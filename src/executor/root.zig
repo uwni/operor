@@ -1,0 +1,18 @@
+const std = @import("std");
+const common = @import("common.zig");
+const execute_mod = @import("execute.zig");
+const pipeline = @import("pipeline/root.zig");
+const scheduler = @import("scheduler.zig");
+const step = @import("step.zig");
+
+/// Runtime options for recipe execution.
+pub const ExecOptions = common.ExecOptions;
+
+/// Executes a recipe against its referenced instruments.
+pub fn execute(allocator: @import("std").mem.Allocator, opts: ExecOptions) !void {
+    try execute_mod.execute(allocator, opts);
+}
+
+test {
+    std.testing.refAllDecls(@This());
+}

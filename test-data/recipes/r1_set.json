@@ -1,0 +1,26 @@
+{
+  "instruments": {
+    "d1": {
+      "driver": "psu",
+      "resource": "USB0::1::INSTR"
+    }
+  },
+  "pipeline": {
+    "record": "all"
+  },
+  "tasks": [
+    {
+      "every_ms": 100,
+      "steps": [
+        {
+          "call": "set",
+          "instrument": "d1",
+          "args": {
+            "voltage": "5"
+          },
+          "save_as": "v"
+        }
+      ]
+    }
+  ]
+}

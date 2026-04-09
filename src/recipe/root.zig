@@ -1,0 +1,33 @@
+const std = @import("std");
+const diagnostic = @import("diagnostic.zig");
+const precompile = @import("precompile.zig");
+const types = @import("types.zig");
+
+/// Executable command prepared during recipe precompilation.
+pub const PrecompiledCommand = types.PrecompiledCommand;
+/// Borrowed-or-owned bytes produced by rendering a precompiled command.
+pub const RenderedCommand = types.RenderedCommand;
+/// Parsed and validated recipe step ready for execution.
+pub const Step = types.Step;
+/// Parsed representation of a single step argument item.
+pub const StepScalar = types.StepScalar;
+/// Parsed representation of a step argument value.
+pub const StepArg = types.StepArg;
+/// Task schedule and the steps that should run at that interval.
+pub const Task = types.Task;
+/// Runtime mode presets for the sampling pipeline.
+pub const PipelineMode = types.PipelineMode;
+/// Optional pipeline configuration attached to a recipe.
+pub const PipelineConfig = types.PipelineConfig;
+/// Recipe instrument bound to a driver and the subset of commands it actually uses.
+pub const PrecompiledInstrument = types.PrecompiledInstrument;
+/// Optional stop conditions applied to the scheduler loop.
+pub const StopWhen = types.StopWhen;
+/// Context captured for the most recent precompile failure.
+pub const PrecompileDiagnostic = diagnostic.PrecompileDiagnostic;
+/// Fully validated recipe ready for preview or execution.
+pub const PrecompiledRecipe = types.PrecompiledRecipe;
+
+test {
+    std.testing.refAllDecls(@This());
+}

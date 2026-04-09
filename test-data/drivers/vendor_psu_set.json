@@ -1,0 +1,13 @@
+{
+  "metadata": {
+    "name": "psu1",
+    "version": null,
+    "description": null
+  },
+  "commands": {
+    "set": {
+      "write": "VOLT {voltage}",
+      "read": null
+    }
+  }
+}

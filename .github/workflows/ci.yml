@@ -1,0 +1,89 @@
+name: CI & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  # Opt-in to Node.js 24 for all JavaScript actions to avoid deprecation warnings
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  test:
+    name: Build & Test (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Run tests
+        run: zig build test
+
+  build_and_release:
+    name: Build & Release
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-macos
+            os: macos
+            ext: ""
+          - target: x86_64-macos
+            os: macos
+            ext: ""
+          - target: x86_64-linux-musl
+            os: linux
+            ext: ""
+          - target: aarch64-linux-musl
+            os: linux
+            ext: ""
+          - target: x86_64-windows-gnu
+            os: windows
+            ext: ".exe"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Build (${{ matrix.target }})
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+      - name: Package Artifact
+        id: package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          # If not a tag push, use short sha
+          if [[ ! "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="dev-${GITHUB_SHA:0:7}"
+          fi
+
+          BIN_NAME="ordo"
+          ARTIFACT_NAME="${BIN_NAME}-${VERSION}-${{ matrix.target }}"
+          STAGING_DIR="staging"
+          mkdir -p "${STAGING_DIR}"
+
+          # Copy binary
+          cp "zig-out/bin/${BIN_NAME}${{ matrix.ext }}" "${STAGING_DIR}/${BIN_NAME}${{ matrix.ext }}"
+
+          # Create archive
+          ARCHIVE_FILE="${ARTIFACT_NAME}.zip"
+          cd "${STAGING_DIR}" && zip -r "../${ARCHIVE_FILE}" . && cd ..
+
+          echo "archive_file=${ARCHIVE_FILE}" >> $GITHUB_OUTPUT
+      - name: Upload Artifact to Workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: ${{ steps.package.outputs.archive_file }}
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.archive_file }}

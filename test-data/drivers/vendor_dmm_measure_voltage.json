@@ -1,0 +1,13 @@
+{
+  "metadata": {
+    "name": "dmm",
+    "version": null,
+    "description": null
+  },
+  "commands": {
+    "measure_voltage": {
+      "write": "MEAS:VOLT?",
+      "read": "float"
+    }
+  }
+}
