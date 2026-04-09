@@ -63,7 +63,6 @@ pub fn preview(
     var compiled = blk: {
         var registry = try DriverRegistry.init(allocator, driver_dir);
         defer registry.deinit();
-        try registry.rebuild();
         break :blk recipe.PrecompiledRecipe.precompilePathWithDiagnostic(allocator, recipe_path, &registry, &precompile_diagnostic) catch |err| {
             try precompile_diagnostic.write(log, err);
             return err;

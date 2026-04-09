@@ -28,7 +28,6 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
     var compiled = blk: {
         var registry = try DriverRegistry.init(allocator, opts.driver_dir);
         defer registry.deinit();
-        try registry.rebuild();
         break :blk recipe_mod.PrecompiledRecipe.precompilePathWithDiagnostic(allocator, opts.recipe_path, &registry, &precompile_diagnostic) catch |err| {
             try precompile_diagnostic.write(log, err);
             return err;
@@ -36,8 +35,28 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
     };
     defer compiled.deinit();
 
+    if (compiled.expected_iterations) |total| {
+        try log.print("[PLAN] Expected iterations: {d}\n", .{total});
+    } else {
+        try log.print("[PLAN] Expected iterations: Unknown (running until manual stop or time limit)\n", .{});
+    }
+
     const instruments = try allocator.alloc(common.InstrumentRuntime, compiled.instruments.count());
     var ctx = common.Context.init(allocator);
+
+    // Initialize context variables from the recipe.
+    var var_it = compiled.initial_vars.iterator();
+    while (var_it.next()) |entry| {
+        const val = switch (entry.value_ptr.*) {
+            .string => |s| common.Value{ .string = s },
+            .int => |i| common.Value{ .int = i },
+            .float => |f| common.Value{ .float = f },
+            .bool => |b| common.Value{ .bool = b },
+            .ref => unreachable, // initial vars cannot be refs
+        };
+        try ctx.set(entry.key_ptr.*, val);
+    }
+
     defer {
         for (instruments) |*runtime| {
             if (runtime.handle) |*instr| instr.deinit();

@@ -45,8 +45,8 @@ pub fn deinit(self: *DriverRegistry) void {
     self.dir.close();
 }
 
-/// Loads and parses a driver by name using the registry's current in-memory index without mutating it.
-pub fn loadDriver(self: *const DriverRegistry, allocator: std.mem.Allocator, name: []const u8) !Driver {
+/// Parses a driver document by canonical name using the current registry index.
+pub fn parseDriverByName(self: *const DriverRegistry, allocator: std.mem.Allocator, name: []const u8) !Driver {
     const entry = self.entries.get(name) orelse return error.DriverNotFound;
     return try loadVerifiedDriverByFileName(allocator, name, self.dir, entry.file_name);
 }
@@ -137,20 +137,6 @@ fn openRegistryDir(dir_path: []const u8) !std.fs.Dir {
     }
 
     return std.fs.cwd().openDir(dir_path, .{});
-}
-
-/// Tries to load a driver from a cached file name and rejects it if the metadata name no longer matches.
-fn tryLoadDriverByFileName(
-    allocator: std.mem.Allocator,
-    expected_name: []const u8,
-    dir: std.fs.Dir,
-    file_name: []const u8,
-) !?Driver {
-    var loaded = parse_mod.parseDriverInDir(allocator, dir, file_name) catch return null;
-    errdefer loaded.deinit();
-
-    if (!std.mem.eql(u8, loaded.meta.name, expected_name)) return null;
-    return loaded;
 }
 
 /// Loads a driver from a verified file name and requires the metadata name to match `expected_name`.
@@ -248,7 +234,7 @@ test "driver registry rebuild refreshes stale file path" {
     try workspace.rename("drivers/vendor_psu_set_voltage.json", "drivers/renamed_psu.json");
     try registry.rebuild();
 
-    var loaded = try registry.loadDriver(gpa, "psu");
+    var loaded = try registry.parseDriverByName(gpa, "psu");
     defer loaded.deinit();
 
     try std.testing.expectEqualStrings("psu", loaded.meta.name);
@@ -301,7 +287,7 @@ test "driver registry rebuild refreshes when new driver is added" {
     );
     try registry.rebuild();
 
-    var loaded = try registry.loadDriver(gpa, "dmm");
+    var loaded = try registry.parseDriverByName(gpa, "dmm");
     defer loaded.deinit();
 
     try std.testing.expectEqualStrings("dmm", loaded.meta.name);
@@ -340,7 +326,7 @@ test "driver registry rebuilds corrupted index cache" {
 
     try std.testing.expectEqual(@as(usize, 1), registry.entries.count());
 
-    var loaded = try registry.loadDriver(gpa, "psu");
+    var loaded = try registry.parseDriverByName(gpa, "psu");
     defer loaded.deinit();
     try std.testing.expectEqualStrings("psu", loaded.meta.name);
 

@@ -80,27 +80,43 @@ pub fn freeSegments(allocator: std.mem.Allocator, segments: []const Segment) voi
 }
 
 /// Renders parsed segments into a caller-provided buffer.
+/// `values` can be any object with a `get([]const u8) ?T` method where `T` is a type
+/// that can be formatted with `std.fmt.format` or is a `[]const u8`.
 pub fn renderInto(
     buffer: []u8,
     segments: []const Segment,
-    values: *const std.StringHashMap([]const u8),
+    values: anytype,
 ) RenderError![]const u8 {
-    var used_len: usize = 0;
-    for (segments) |seg| {
-        const bytes = switch (seg) {
-            .literal => |lit| lit,
-            .placeholder => |pl| values.get(pl.name) orelse return error.MissingVariable,
-        };
-        try appendAt(buffer, &used_len, bytes);
-    }
-    return buffer[0..used_len];
+    return renderIntoWithSuffix(buffer, segments, values, "");
+}
+
+/// Renders parsed segments into a caller-provided buffer, then appends a literal suffix.
+pub fn renderIntoWithSuffix(
+    buffer: []u8,
+    segments: []const Segment,
+    values: anytype,
+    suffix: []const u8,
+) RenderError![]const u8 {
+    if (buffer.len < suffix.len) return error.BufferTooSmall;
+    const render_buffer = buffer[0 .. buffer.len - suffix.len];
+
+    var fbs = std.io.fixedBufferStream(render_buffer);
+    renderInternal(fbs.writer(), segments, values) catch |err| switch (err) {
+        error.NoSpaceLeft => return error.BufferTooSmall,
+        else => |e| return e,
+    };
+
+    const rendered_template = fbs.getWritten();
+    const combined_len = rendered_template.len + suffix.len;
+    @memcpy(buffer[rendered_template.len..combined_len], suffix);
+    return buffer[0..combined_len];
 }
 
 /// Renders parsed segments into a newly allocated slice owned by the caller.
 pub fn renderAlloc(
     allocator: std.mem.Allocator,
     segments: []const Segment,
-    values: *const std.StringHashMap([]const u8),
+    values: anytype,
 ) RenderError![]u8 {
     return renderAllocWithSuffix(allocator, segments, values, "");
 }
@@ -109,44 +125,40 @@ pub fn renderAlloc(
 pub fn renderAllocWithSuffix(
     allocator: std.mem.Allocator,
     segments: []const Segment,
-    values: *const std.StringHashMap([]const u8),
+    values: anytype,
     suffix: []const u8,
 ) RenderError![]u8 {
-    const rendered_len = try renderedLen(segments, values);
-    const total_len = std.math.add(usize, rendered_len, suffix.len) catch return error.OutOfMemory;
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
 
-    const out = try allocator.alloc(u8, total_len);
-    errdefer allocator.free(out);
+    renderInternal(out.writer(allocator), segments, values) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => |e| return e,
+    };
 
-    const rendered = try renderInto(out[0..rendered_len], segments, values);
-    std.debug.assert(rendered.len == rendered_len);
-    var used_len = rendered_len;
-    try appendAt(out, &used_len, suffix);
-    std.debug.assert(used_len == total_len);
-    return out;
+    out.appendSlice(allocator, suffix) catch return error.OutOfMemory;
+    return out.toOwnedSlice(allocator) catch error.OutOfMemory;
 }
 
-/// Appends `src` to `buffer` at `used_len`, advancing it on success.
-pub fn appendAt(buffer: []u8, used_len: *usize, src: []const u8) error{BufferTooSmall}!void {
-    std.debug.assert(used_len.* <= buffer.len);
-    if (buffer.len - used_len.* < src.len) return error.BufferTooSmall;
-    @memcpy(buffer[used_len.* .. used_len.* + src.len], src);
-    used_len.* += src.len;
-}
-
-fn renderedLen(
+fn renderInternal(
+    writer: anytype,
     segments: []const Segment,
-    values: *const std.StringHashMap([]const u8),
-) RenderError!usize {
-    var total: usize = 0;
+    values: anytype,
+) !void {
     for (segments) |seg| {
-        const bytes = switch (seg) {
-            .literal => |lit| lit,
-            .placeholder => |pl| values.get(pl.name) orelse return error.MissingVariable,
-        };
-        total = std.math.add(usize, total, bytes.len) catch return error.OutOfMemory;
+        switch (seg) {
+            .literal => |lit| try writer.writeAll(lit),
+            .placeholder => |pl| {
+                const val = values.get(pl.name) orelse return error.MissingVariable;
+                const T = @TypeOf(val);
+                if (T == []const u8 or T == []u8) {
+                    try writer.writeAll(val);
+                } else {
+                    try writer.print("{f}", .{val});
+                }
+            },
+        }
     }
-    return total;
 }
 
 /// Returns whether `name` is a valid placeholder identifier.
@@ -181,18 +193,6 @@ test "render template into buffer" {
     var buffer: [64]u8 = undefined;
     const rendered = try renderInto(buffer[0..], segments, &values);
     try std.testing.expectEqualStrings("MEAS:VOLT? (@1,2,3)", rendered);
-}
-
-test "appendAt advances used length and rejects overflow" {
-    var buffer: [8]u8 = undefined;
-    var used_len: usize = 0;
-
-    try appendAt(buffer[0..], &used_len, "MEAS");
-    try appendAt(buffer[0..], &used_len, "\n");
-    try std.testing.expectEqual(@as(usize, 5), used_len);
-    try std.testing.expectEqualStrings("MEAS\n", buffer[0..used_len]);
-
-    try std.testing.expectError(error.BufferTooSmall, appendAt(buffer[0..], &used_len, "TOO-LONG"));
 }
 
 test "render template allocates with suffix" {

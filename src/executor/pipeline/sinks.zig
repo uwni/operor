@@ -1,5 +1,4 @@
 const std = @import("std");
-const serde = @import("serde");
 const ring_buffer_mod = @import("ring_buffer.zig");
 const types = @import("types.zig");
 
@@ -116,12 +115,10 @@ pub const FileSink = struct {
 };
 
 pub const NetworkSink = struct {
-    allocator: std.mem.Allocator,
     stream: std.net.Stream,
 
     pub fn init(allocator: std.mem.Allocator, host: []const u8, port: u16) !NetworkSink {
         return .{
-            .allocator = allocator,
             .stream = try std.net.tcpConnectToHost(allocator, host, port),
         };
     }
@@ -131,33 +128,37 @@ pub const NetworkSink = struct {
     }
 
     pub fn writeFrame(self: *NetworkSink, frame: *const types.Frame) !void {
-        const source_fields = frame.fields_owned orelse &[_]types.FrameField{};
-        const fields = try self.allocator.alloc(SerializedFrameField, source_fields.len);
-        defer self.allocator.free(fields);
-        for (source_fields, 0..) |*field, idx| {
-            fields[idx] = .{
-                .name = field.name,
-                .value = field.value(),
-            };
-        }
-        try writeJsonLine(self.stream, self.allocator, .{
-            .timestamp_ns = frame.timestamp_ns,
-            .task_idx = frame.task_idx,
-            .fields = fields,
-        });
+        var io_buffer: [2048]u8 = undefined;
+        var stream_writer = self.stream.writer(&io_buffer);
+        try writeFrameJson(&stream_writer.interface, frame);
+        try stream_writer.interface.flush();
     }
 };
 
-const SerializedFrameField = struct {
-    name: []const u8,
-    value: []const u8,
-};
+fn writeFrameJson(writer: *std.Io.Writer, frame: *const types.Frame) !void {
+    const fields = frame.fields_owned orelse &[_]types.FrameField{};
 
-fn writeJsonLine(writer: anytype, allocator: std.mem.Allocator, value: anytype) !void {
-    const line = try serde.json.toSlice(allocator, value);
-    defer allocator.free(line);
-    try writer.writeAll(line);
+    try writer.writeAll("{\"timestamp_ns\":");
+    try writer.print("{d}", .{frame.timestamp_ns});
+    try writer.writeAll(",\"task_idx\":");
+    try writer.print("{d}", .{frame.task_idx});
+    try writer.writeAll(",\"fields\":[");
+
+    for (fields, 0..) |field, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"name\":");
+        try writeJsonString(writer, field.name);
+        try writer.writeAll(",\"value\":");
+        try writeJsonString(writer, field.value());
+        try writer.writeByte('}');
+    }
+
+    try writer.writeAll("]}");
     try writer.writeAll("\n");
+}
+
+fn writeJsonString(writer: *std.Io.Writer, value: []const u8) !void {
+    try std.json.Stringify.encodeJsonString(value, .{}, writer);
 }
 
 fn writeCsvField(writer: anytype, field: []const u8) !void {
@@ -273,4 +274,30 @@ test "file sink escapes csv quotes commas and newlines in frame values" {
     defer gpa.free(file_data);
 
     try std.testing.expect(std.mem.containsAtLeast(u8, file_data, 1, "\"1,\"\"2\"\"\n3\""));
+}
+
+test "writeFrameJson escapes field names and values without heap allocation" {
+    const gpa = std.testing.allocator;
+
+    const fields = try gpa.alloc(types.FrameField, 1);
+    fields[0] = .{
+        .name = "channel\"name",
+        .value_owned = try gpa.dupe(u8, "1,\"2\"\n3"),
+    };
+
+    var frame = types.Frame{
+        .timestamp_ns = 7,
+        .task_idx = 1,
+        .fields_owned = fields,
+    };
+    defer frame.deinit(gpa);
+
+    var out = std.Io.Writer.Allocating.init(gpa);
+    defer out.deinit();
+
+    try writeFrameJson(&out.writer, &frame);
+    try std.testing.expectEqualStrings(
+        "{\"timestamp_ns\":7,\"task_idx\":1,\"fields\":[{\"name\":\"channel\\\"name\",\"value\":\"1,\\\"2\\\"\\n3\"}]}\n",
+        out.written(),
+    );
 }

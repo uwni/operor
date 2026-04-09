@@ -14,7 +14,7 @@ const max_recipe_size: usize = 512 * 1024;
 pub fn precompilePath(
     allocator: std.mem.Allocator,
     recipe_path: []const u8,
-    driver_reg: *const DriverRegistry,
+    driver_reg: *DriverRegistry,
 ) !types.PrecompiledRecipe {
     return precompilePathInternal(allocator, recipe_path, driver_reg, null);
 }
@@ -22,7 +22,7 @@ pub fn precompilePath(
 pub fn precompilePathWithDiagnostic(
     allocator: std.mem.Allocator,
     recipe_path: []const u8,
-    driver_reg: *const DriverRegistry,
+    driver_reg: *DriverRegistry,
     precompile_diagnostic: *diagnostic.PrecompileDiagnostic,
 ) !types.PrecompiledRecipe {
     precompile_diagnostic.reset();
@@ -32,7 +32,7 @@ pub fn precompilePathWithDiagnostic(
 fn precompilePathInternal(
     allocator: std.mem.Allocator,
     recipe_path: []const u8,
-    driver_reg: *const DriverRegistry,
+    driver_reg: *DriverRegistry,
     precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
 ) !types.PrecompiledRecipe {
     var parse_arena = std.heap.ArenaAllocator.init(allocator);
@@ -62,7 +62,7 @@ fn precompilePathInternal(
 fn precompileInternal(
     allocator: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
-    driver_reg: *const DriverRegistry,
+    driver_reg: *DriverRegistry,
     precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
 ) !types.PrecompiledRecipe {
     // 1. Create the arena-owned result lifetime and a temporary driver cache used only while validating the recipe.
@@ -73,148 +73,297 @@ fn precompileInternal(
     var loaded_drivers = std.StringHashMap(Driver).init(allocator);
     defer deinitLoadedDrivers(allocator, &loaded_drivers);
 
-    var diag_ctx: diagnostic.DiagnosticContext = .{};
-    errdefer captureDiagnostic(precompile_diagnostic, diag_ctx);
+    // 2. Pre-register every instrument and load drivers.
+    var precompiled_instruments = try precompileInstruments(allocator, alloc, recipe, driver_reg, &loaded_drivers, precompile_diagnostic);
 
-    var precompiled_instruments = std.StringHashMap(types.PrecompiledInstrument).init(alloc);
+    // 3-5. Normalize tasks and steps, resolving commands and validating arguments.
+    var save_as_set = std.StringArrayHashMap(void).init(alloc);
+    const tasks = try precompileTasks(alloc, recipe, &loaded_drivers, &precompiled_instruments, &save_as_set, precompile_diagnostic);
+
+    // 6. Validate and resolve pipeline record configuration.
+    const pipeline = try resolvePipelineConfig(alloc, recipe, &save_as_set, precompile_diagnostic);
+
+    // 7. Parse initial variables if any.
+    const initial_vars = try parseInitialVars(alloc, recipe);
+
+    // 8. Return the fully validated arena-owned recipe consumed by preview and execution.
+    const stop_when = try parseStopWhen(recipe.stop_when);
+    return .{
+        .arena = arena,
+        .instruments = precompiled_instruments,
+        .tasks = tasks,
+        .pipeline = pipeline,
+        .stop_when = stop_when,
+        .expected_iterations = calculateExpectedIterations(tasks, stop_when),
+        .initial_vars = initial_vars,
+    };
+}
+
+fn precompileInstruments(
+    allocator: std.mem.Allocator,
+    arena_alloc: std.mem.Allocator,
+    recipe: *const config.RecipeConfig,
+    driver_reg: *DriverRegistry,
+    loaded_drivers: *std.StringHashMap(Driver),
+    precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
+) !std.StringHashMap(types.PrecompiledInstrument) {
+    var precompiled_instruments = std.StringHashMap(types.PrecompiledInstrument).init(arena_alloc);
     try precompiled_instruments.ensureTotalCapacity(recipe.instruments.count());
 
-    // 2. Pre-register every instrument, fail fast on missing drivers, assign dense instrument indices, and prepare empty command caches.
     var instrument_it = recipe.instruments.iterator();
     var next_instrument_idx: usize = 0;
     while (instrument_it.next()) |entry| {
         const instrument_name = entry.key_ptr.*;
         const instrument_cfg = entry.value_ptr.*;
 
-        diag_ctx = .{
+        const diag_ctx = diagnostic.DiagnosticContext{
             .instrument_name = instrument_name,
             .driver_name = instrument_cfg.driver,
         };
-        const driver = try getOrLoadDriver(allocator, &loaded_drivers, driver_reg, instrument_cfg.driver);
+        const driver = getOrParseDriver(allocator, loaded_drivers, driver_reg, instrument_cfg.driver) catch |err| {
+            captureDiagnostic(precompile_diagnostic, diag_ctx);
+            return err;
+        };
 
-        const name_copy = try alloc.dupe(u8, instrument_name);
-        const driver_copy = try alloc.dupe(u8, instrument_cfg.driver);
-        const resource_copy = try alloc.dupe(u8, instrument_cfg.resource);
-        const write_termination = try cloneOptionalBytes(alloc, driver.write_termination);
+        const name_copy = try arena_alloc.dupe(u8, instrument_name);
+        const driver_copy = try arena_alloc.dupe(u8, instrument_cfg.driver);
+        const resource_copy = try arena_alloc.dupe(u8, instrument_cfg.resource);
+        const write_termination = try cloneOptionalBytes(arena_alloc, driver.write_termination);
         try precompiled_instruments.put(name_copy, .{
             .instrument_idx = next_instrument_idx,
             .driver_name = driver_copy,
             .resource = resource_copy,
-            .commands = std.StringHashMap(*const types.PrecompiledCommand).init(alloc),
+            .commands = std.StringHashMap(*const types.PrecompiledCommand).init(arena_alloc),
             .write_termination = write_termination,
             .options = .{
                 .timeout_ms = driver.options.timeout_ms,
-                .read_termination = try cloneOptionalBytes(alloc, driver.options.read_termination),
+                .read_termination = try cloneOptionalBytes(arena_alloc, driver.options.read_termination),
                 .query_delay_ms = driver.options.query_delay_ms,
                 .chunk_size = driver.options.chunk_size,
             },
         });
         next_instrument_idx += 1;
     }
+    return precompiled_instruments;
+}
 
-    // 3. Normalize task intervals and allocate the arena-owned runtime task and step arrays.
-    const tasks = try alloc.alloc(types.Task, recipe.tasks.len);
+fn precompileTasks(
+    arena_alloc: std.mem.Allocator,
+    recipe: *const config.RecipeConfig,
+    loaded_drivers: *const std.StringHashMap(Driver),
+    precompiled_instruments: *std.StringHashMap(types.PrecompiledInstrument),
+    save_as_set: *std.StringArrayHashMap(void),
+    precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
+) ![]types.Task {
+    const tasks = try arena_alloc.alloc(types.Task, recipe.tasks.len);
     for (recipe.tasks, 0..) |*task_cfg, task_idx| {
-        diag_ctx = .{ .task_idx = task_idx };
-        const every_ms = try resolveEveryMs(task_cfg);
+        const every_ms = resolveEveryMs(task_cfg) catch |err| {
+            captureDiagnostic(precompile_diagnostic, .{ .task_idx = task_idx });
+            return err;
+        };
 
-        const steps = try alloc.alloc(types.Step, task_cfg.steps.len);
+        const steps = try arena_alloc.alloc(types.Step, task_cfg.steps.len);
         for (task_cfg.steps, 0..) |*step_cfg, step_idx| {
-            diag_ctx = .{
-                .task_idx = task_idx,
-                .step_idx = step_idx,
-                .instrument_name = step_cfg.instrument,
-                .command_name = step_cfg.call,
+            steps[step_idx] = switch (step_cfg.*) {
+                .compute => |*cfg| try precompileComputeStep(
+                    arena_alloc,
+                    recipe,
+                    save_as_set,
+                    cfg,
+                    task_idx,
+                    step_idx,
+                    precompile_diagnostic,
+                ),
+                .call => |*cfg| try precompileCallStep(
+                    arena_alloc,
+                    recipe,
+                    loaded_drivers,
+                    precompiled_instruments,
+                    save_as_set,
+                    cfg,
+                    task_idx,
+                    step_idx,
+                    precompile_diagnostic,
+                ),
             };
-
-            // Parse optional `when` guard expression.
-            const when_expr: ?expr.Expression = if (step_cfg.when) |when_src|
-                expr.parse(alloc, when_src) catch return error.InvalidExpression
-            else
-                null;
-
-            if (step_cfg.isCompute()) {
-                // ── Compute step ────────────────────────────────
-                const compute_src = step_cfg.compute.?;
-                const save_as = step_cfg.save_as orelse return error.ComputeStepMissingSaveAs;
-
-                const compute_expr = expr.parse(alloc, compute_src) catch return error.InvalidExpression;
-
-                const save_as_copy = try alloc.dupe(u8, save_as);
-                steps[step_idx] = .{
-                    .action = .{ .compute = .{
-                        .expression = compute_expr,
-                        .save_as = save_as_copy,
-                    } },
-                    .when = when_expr,
-                };
-            } else if (step_cfg.isCall()) {
-                // ── Instrument call step (existing logic) ──────
-                const call = step_cfg.call.?;
-                const instrument_name = step_cfg.instrument orelse return error.InstrumentNotFound;
-
-                // 4. Resolve the referenced instrument and command, compiling the command on first use for this instrument.
-                const precompiled_instrument = precompiled_instruments.getPtr(instrument_name) orelse return error.InstrumentNotFound;
-
-                diag_ctx.driver_name = precompiled_instrument.driver_name;
-                const loaded_driver = try getOrLoadDriver(allocator, &loaded_drivers, driver_reg, precompiled_instrument.driver_name);
-                const command = try getOrCompileCommand(alloc, precompiled_instrument, loaded_driver, call);
-
-                // 5. Clone step arguments into runtime form, validate them, and store the command index used by the executor.
-                const call_copy = try alloc.dupe(u8, call);
-                const instrument_copy = try alloc.dupe(u8, instrument_name);
-                var args_map = std.StringHashMap(types.StepArg).init(alloc);
-                if (step_cfg.args) |args| {
-                    try cloneStepArgs(alloc, &args_map, args);
-                }
-                try validateStepArgs(command, &args_map, &diag_ctx);
-                const save_as_copy = if (step_cfg.save_as) |value| try alloc.dupe(u8, value) else null;
-                steps[step_idx] = .{
-                    .action = .{ .instrument_call = .{
-                        .call = call_copy,
-                        .instrument = instrument_copy,
-                        .command = command,
-                        .args = args_map,
-                        .save_as = save_as_copy,
-                    } },
-                    .when = when_expr,
-                };
-            } else {
-                // Neither call nor compute – invalid step.
-                return error.InvalidStepConfig;
-            }
         }
         tasks[task_idx] = .{ .every_ms = every_ms, .steps = steps };
     }
+    return tasks;
+}
 
-    // 6. Validate and resolve pipeline record configuration.
-    //    When record is "all", expand it into the explicit list of all save_as labels
-    //    so that downstream code never needs to handle the "all" case.
-    diag_ctx = .{};
+fn precompileComputeStep(
+    arena_alloc: std.mem.Allocator,
+    recipe: *const config.RecipeConfig,
+    save_as_set: *std.StringArrayHashMap(void),
+    cfg: *const config.ComputeStepConfig,
+    task_idx: usize,
+    step_idx: usize,
+    precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
+) !types.Step {
+    const diag_ctx = diagnostic.DiagnosticContext{
+        .task_idx = task_idx,
+        .step_idx = step_idx,
+    };
+    errdefer captureDiagnostic(precompile_diagnostic, diag_ctx);
+
+    const when_expr = try precompileWhen(arena_alloc, recipe, cfg.when);
+
+    const save_as = cfg.save_as;
+    if (!isDeclared(recipe.vars, save_as)) return error.UndeclaredVariable;
+    const save_as_copy = try arena_alloc.dupe(u8, save_as);
+    try save_as_set.put(save_as_copy, {});
+
+    const compute_expr = try expr.parse(arena_alloc, cfg.compute);
+    var it = compute_expr.variables();
+    while (it.next()) |name| {
+        if (!isDeclared(recipe.vars, name)) return error.UndeclaredVariable;
+    }
+
+    return .{
+        .action = .{ .compute = .{
+            .expression = compute_expr,
+            .save_as = save_as_copy,
+        } },
+        .when = when_expr,
+    };
+}
+
+fn precompileCallStep(
+    arena_alloc: std.mem.Allocator,
+    recipe: *const config.RecipeConfig,
+    loaded_drivers: *const std.StringHashMap(Driver),
+    precompiled_instruments: *std.StringHashMap(types.PrecompiledInstrument),
+    save_as_set: *std.StringArrayHashMap(void),
+    cfg: *const config.CallStepConfig,
+    task_idx: usize,
+    step_idx: usize,
+    precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
+) !types.Step {
+    const instrument_name = cfg.instrument;
+    var diag_ctx = diagnostic.DiagnosticContext{
+        .task_idx = task_idx,
+        .step_idx = step_idx,
+        .instrument_name = instrument_name,
+        .command_name = cfg.call,
+    };
+    errdefer captureDiagnostic(precompile_diagnostic, diag_ctx);
+
+    const when_expr = try precompileWhen(arena_alloc, recipe, cfg.when);
+
+    const precompiled_instrument = precompiled_instruments.getPtr(instrument_name) orelse return error.InstrumentNotFound;
+
+    diag_ctx.driver_name = precompiled_instrument.driver_name;
+    const loaded_driver = loaded_drivers.getPtr(precompiled_instrument.driver_name).?;
+    const command = try getOrCompileCommand(arena_alloc, precompiled_instrument, loaded_driver, cfg.call);
+
+    const call_copy = try arena_alloc.dupe(u8, cfg.call);
+    const instrument_copy = try arena_alloc.dupe(u8, instrument_name);
+    var args_map = std.StringHashMap(types.StepArg).init(arena_alloc);
+    if (cfg.args) |args| {
+        var it = args.iterator();
+        while (it.next()) |entry| {
+            diag_ctx.argument_name = entry.key_ptr.*;
+            const value_copy = try cloneAndValidateArg(arena_alloc, entry.value_ptr.*, recipe.vars);
+            const key_copy = try arena_alloc.dupe(u8, entry.key_ptr.*);
+            try args_map.put(key_copy, value_copy);
+        }
+    }
+    diag_ctx.argument_name = null;
+    try validateStepArgs(command, &args_map, &diag_ctx);
+
+    const save_as_copy = if (cfg.save_as) |label| blk: {
+        if (!isDeclared(recipe.vars, label)) return error.UndeclaredVariable;
+        const duped = try arena_alloc.dupe(u8, label);
+        try save_as_set.put(duped, {});
+        break :blk duped;
+    } else null;
+
+    return .{
+        .action = .{ .instrument_call = .{
+            .call = call_copy,
+            .instrument = instrument_copy,
+            .command = command,
+            .args = args_map,
+            .save_as = save_as_copy,
+        } },
+        .when = when_expr,
+    };
+}
+
+fn precompileWhen(
+    arena_alloc: std.mem.Allocator,
+    recipe: *const config.RecipeConfig,
+    when_src_opt: ?[]const u8,
+) !?expr.Expression {
+    if (when_src_opt) |when_src| {
+        const e = try expr.parse(arena_alloc, when_src);
+        var it = e.variables();
+        while (it.next()) |name| {
+            if (!isDeclared(recipe.vars, name)) return error.UndeclaredVariable;
+        }
+        return e;
+    }
+    return null;
+}
+
+fn resolvePipelineConfig(
+    arena_alloc: std.mem.Allocator,
+    recipe: *const config.RecipeConfig,
+    save_as_set: *const std.StringArrayHashMap(void),
+    precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
+) !types.PipelineConfig {
     const pipeline_cfg = recipe.pipeline orelse return error.MissingPipeline;
     if (pipeline_cfg.record == null) return error.MissingRecordConfig;
-    var pipeline = try clonePipelineConfig(alloc, pipeline_cfg);
+    var pipeline = try clonePipelineConfig(arena_alloc, pipeline_cfg);
     switch (pipeline.record.?) {
-        .all => |value| {
-            if (!std.mem.eql(u8, value, "all")) return error.InvalidRecordConfig;
-            // Expand "all" into an explicit list of every save_as label, preserving first-occurrence order.
-            pipeline.record = .{ .explicit = try collectAllSaveAs(alloc, tasks) };
+        .all => {
+            pipeline.record = .{ .explicit = try arena_alloc.dupe([]const u8, save_as_set.keys()) };
         },
         .explicit => |columns| {
             for (columns) |name| {
-                if (!hasSaveAsLabel(tasks, name)) return error.RecordVariableNotFound;
+                if (!isDeclared(recipe.vars, name)) {
+                    captureDiagnostic(precompile_diagnostic, .{});
+                    return error.UndeclaredVariable;
+                }
+                if (!save_as_set.contains(name)) {
+                    captureDiagnostic(precompile_diagnostic, .{});
+                    return error.RecordVariableNotFound;
+                }
             }
         },
     }
+    return pipeline;
+}
 
-    // 7. Return the fully validated arena-owned recipe consumed by preview and execution.
-    return .{
-        .arena = arena,
-        .instruments = precompiled_instruments,
-        .tasks = tasks,
-        .pipeline = pipeline,
-        .stop_when = try parseStopWhen(recipe.stop_when),
-    };
+fn parseInitialVars(
+    arena_alloc: std.mem.Allocator,
+    recipe: *const config.RecipeConfig,
+) !std.StringHashMap(types.StepScalar) {
+    var initial_vars = std.StringHashMap(types.StepScalar).init(arena_alloc);
+    if (recipe.vars) |vars| {
+        try initial_vars.ensureTotalCapacity(vars.count());
+        var var_it = vars.iterator();
+        while (var_it.next()) |entry| {
+            const key = try arena_alloc.dupe(u8, entry.key_ptr.*);
+            const value = try cloneInitialVar(arena_alloc, entry.value_ptr.*);
+            try initial_vars.put(key, value);
+        }
+    }
+    return initial_vars;
+}
+
+/// Estimates the total number of task executions based on stop conditions.
+fn calculateExpectedIterations(tasks: []const types.Task, stop: types.StopWhen) ?u64 {
+    // If an explicit iteration limit is set, that's our total.
+    if (stop.max_iterations) |limit| return limit;
+
+    // If no stop conditions are set, each task runs once by default in the scheduler.
+    if (stop.time_elapsed_ms == null) return tasks.len;
+
+    // If only a time limit is set, we skip estimating because it's inaccurate
+    // and depends on unknown instrument I/O latency.
+    return null;
 }
 
 fn captureDiagnostic(
@@ -240,10 +389,10 @@ fn cloneOptionalBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]const 
     return allocator.dupe(u8, bytes);
 }
 
-fn getOrLoadDriver(
+fn getOrParseDriver(
     allocator: std.mem.Allocator,
     loaded_drivers: *std.StringHashMap(Driver),
-    driver_reg: *const DriverRegistry,
+    driver_reg: *DriverRegistry,
     driver_name: []const u8,
 ) !*const Driver {
     if (loaded_drivers.getPtr(driver_name)) |loaded| return loaded;
@@ -251,7 +400,13 @@ fn getOrLoadDriver(
     const key = try allocator.dupe(u8, driver_name);
     errdefer allocator.free(key);
 
-    var loaded = try driver_reg.loadDriver(allocator, driver_name);
+    var loaded = driver_reg.parseDriverByName(allocator, driver_name) catch |err| switch (err) {
+        error.DriverNotFound => blk: {
+            try driver_reg.rebuild();
+            break :blk try driver_reg.parseDriverByName(allocator, driver_name);
+        },
+        else => return err,
+    };
     errdefer loaded.deinit();
 
     try loaded_drivers.put(key, loaded);
@@ -268,13 +423,9 @@ fn getOrCompileCommand(
 
     const source = loaded_driver.commands.get(call) orelse return error.CommandNotFound;
     const key = try allocator.dupe(u8, call);
-    errdefer allocator.free(key);
-
     const compiled_value = try compileCommand(allocator, source, instrument);
-    errdefer compiled_value.deinit(allocator);
 
     const compiled = try allocator.create(types.PrecompiledCommand);
-    errdefer allocator.destroy(compiled);
     compiled.* = compiled_value;
 
     try instrument.commands.put(key, compiled);
@@ -287,10 +438,7 @@ fn compileCommand(
     instrument: *const types.PrecompiledInstrument,
 ) !types.PrecompiledCommand {
     const command = try source.clone(allocator);
-    errdefer command.deinit(allocator);
-
     const placeholders = try command.placeholderNames(allocator);
-    errdefer allocator.free(placeholders);
 
     return .{
         .instrument = instrument,
@@ -314,55 +462,20 @@ fn validateStepArgs(
 
     var it = args_map.iterator();
     while (it.next()) |entry| {
-        if (!containsString(command.placeholders, entry.key_ptr.*)) {
+        if (!command.hasPlaceholder(entry.key_ptr.*)) {
             diag_ctx.argument_name = entry.key_ptr.*;
             return error.UnexpectedCommandArgument;
         }
     }
 }
 
-fn containsString(haystack: []const []const u8, needle: []const u8) bool {
-    for (haystack) |item| {
-        if (std.mem.eql(u8, item, needle)) return true;
-    }
-    return false;
-}
-
-fn hasSaveAsLabel(tasks: []const types.Task, name: []const u8) bool {
-    for (tasks) |task| {
-        for (task.steps) |*step| {
-            const label = switch (step.action) {
-                .instrument_call => |ic| ic.save_as orelse continue,
-                .compute => |comp| comp.save_as,
-            };
-            if (std.mem.eql(u8, label, name)) return true;
-        }
-    }
-    return false;
-}
-
-/// Collects every unique `save_as` label across all tasks, preserving first-occurrence order.
-fn collectAllSaveAs(allocator: std.mem.Allocator, tasks: []const types.Task) ![]const []const u8 {
-    var seen = std.StringHashMap(void).init(allocator);
-    defer seen.deinit();
-
-    var columns = std.ArrayList([]const u8).empty;
-    defer columns.deinit(allocator);
-
-    for (tasks) |task| {
-        for (task.steps) |*step| {
-            const label = switch (step.action) {
-                .instrument_call => |ic| ic.save_as orelse continue,
-                .compute => |comp| comp.save_as,
-            };
-            const entry = try seen.getOrPut(label);
-            if (!entry.found_existing) {
-                try columns.append(allocator, label);
-            }
-        }
-    }
-
-    return try columns.toOwnedSlice(allocator);
+fn cloneInitialVar(allocator: std.mem.Allocator, value: config.ArgScalarDoc) !types.StepScalar {
+    return switch (value) {
+        .string => |text| .{ .string = try allocator.dupe(u8, text) },
+        .int => |number| .{ .int = number },
+        .float => |number| .{ .float = number },
+        .bool => |flag| .{ .bool = flag },
+    };
 }
 
 fn resolveEveryMs(task: *const config.TaskConfig) !u64 {
@@ -435,46 +548,40 @@ fn parseDurationMs(input: []const u8) !u64 {
     return error.InvalidDuration;
 }
 
-fn cloneStepArgs(
-    allocator: std.mem.Allocator,
-    args_map: *std.StringHashMap(types.StepArg),
-    doc_args: std.StringHashMap(config.ArgValueDoc),
-) !void {
-    var it = doc_args.iterator();
-    while (it.next()) |entry| {
-        const key_copy = try allocator.dupe(u8, entry.key_ptr.*);
-        errdefer allocator.free(key_copy);
-
-        const value_copy = try cloneStepArg(allocator, entry.value_ptr.*);
-        try args_map.put(key_copy, value_copy);
-    }
+fn isDeclared(vars: ?std.StringHashMap(config.ArgScalarDoc), name: []const u8) bool {
+    // Built-in variables are always allowed.
+    if (std.mem.eql(u8, name, "$ITER")) return true;
+    if (std.mem.eql(u8, name, "$TASK_IDX")) return true;
+    if (vars) |v| return v.contains(name);
+    return false;
 }
 
-fn cloneStepArg(allocator: std.mem.Allocator, doc_arg: config.ArgValueDoc) !types.StepArg {
+fn cloneAndValidateArg(
+    allocator: std.mem.Allocator,
+    doc_arg: config.ArgValueDoc,
+    vars: ?std.StringHashMap(config.ArgScalarDoc),
+) !types.StepArg {
     return switch (doc_arg) {
-        .scalar => |scalar| .{ .scalar = try cloneArgScalar(allocator, scalar) },
+        .scalar => |scalar| .{ .scalar = try cloneAndValidateArgScalar(allocator, scalar, vars) },
         .list => |items| blk: {
             const out = try allocator.alloc(types.StepScalar, items.len);
-            errdefer allocator.free(out);
-
-            var initialized: usize = 0;
-            errdefer {
-                for (out[0..initialized]) |item| freeClonedStepScalar(allocator, item);
-            }
-
             for (items, 0..) |item, idx| {
-                out[idx] = try cloneArgScalar(allocator, item);
-                initialized += 1;
+                out[idx] = try cloneAndValidateArgScalar(allocator, item, vars);
             }
             break :blk .{ .list = out };
         },
     };
 }
 
-fn cloneArgScalar(allocator: std.mem.Allocator, value: config.ArgScalarDoc) !types.StepScalar {
+fn cloneAndValidateArgScalar(
+    allocator: std.mem.Allocator,
+    value: config.ArgScalarDoc,
+    vars: ?std.StringHashMap(config.ArgScalarDoc),
+) !types.StepScalar {
     return switch (value) {
         .string => |text| blk: {
             if (referenceName(text)) |name| {
+                if (!isDeclared(vars, name)) return error.UndeclaredVariable;
                 break :blk .{ .ref = try allocator.dupe(u8, name) };
             }
             break :blk .{ .string = try allocator.dupe(u8, text) };
@@ -483,14 +590,6 @@ fn cloneArgScalar(allocator: std.mem.Allocator, value: config.ArgScalarDoc) !typ
         .float => |number| .{ .float = number },
         .bool => |flag| .{ .bool = flag },
     };
-}
-
-fn freeClonedStepScalar(allocator: std.mem.Allocator, value: types.StepScalar) void {
-    switch (value) {
-        .string => |text| allocator.free(text),
-        .ref => |name| allocator.free(name),
-        .int, .float, .bool => {},
-    }
 }
 
 fn referenceName(text: []const u8) ?[]const u8 {
@@ -532,6 +631,7 @@ test "load recipe and drivers" {
         \\  "pipeline": {
         \\    "record": "all"
         \\  },
+        \\  "vars": { "voltage": null },
         \\  "tasks": [
         \\    {
         \\      "every": "100ms",
@@ -666,6 +766,120 @@ test "parse durations and stop conditions" {
 
     try std.testing.expectEqual(@as(?u64, 2000), compiled.stop_when.time_elapsed_ms);
     try std.testing.expectEqual(@as(?u64, 3), compiled.stop_when.max_iterations);
+    try std.testing.expectEqual(@as(?u64, 3), compiled.expected_iterations);
+}
+
+test "precompile preserves initial variables" {
+    const gpa = std.testing.allocator;
+
+    var workspace = testing.TestWorkspace.init(gpa);
+    defer workspace.deinit();
+
+    try workspace.makePath("drivers");
+    try workspace.writeFile("recipes/initial_vars.json",
+        \\{
+        \\  "instruments": {},
+        \\  "pipeline": { "record": "all" },
+        \\  "vars": {
+        \\    "v_set": 1.0,
+        \\    "name": "scan"
+        \\  },
+        \\  "tasks": []
+        \\}
+    );
+
+    const driver_dir = try workspace.realpathAlloc("drivers");
+    defer gpa.free(driver_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/initial_vars.json");
+    defer gpa.free(recipe_path);
+
+    var registry = try DriverRegistry.init(gpa, driver_dir);
+    defer registry.deinit();
+
+    var compiled = try precompilePath(gpa, recipe_path, &registry);
+    defer compiled.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), compiled.initial_vars.count());
+    const v_set = compiled.initial_vars.get("v_set").?;
+    try std.testing.expectEqual(@as(f64, 1.0), v_set.float);
+    const name = compiled.initial_vars.get("name").?;
+    try std.testing.expectEqualStrings("scan", name.string);
+}
+
+test "precompile estimates iterations for run-once recipes" {
+    const gpa = std.testing.allocator;
+
+    var workspace = testing.TestWorkspace.init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("drivers/psu.json",
+        \\{
+        \\  "metadata": { "name": "psu" },
+        \\  "commands": { "set": { "write": "V", "read": null } }
+        \\}
+    );
+    try workspace.writeFile("recipes/run_once.json",
+        \\{
+        \\  "instruments": { "d1": { "driver": "psu", "resource": "R" } },
+        \\  "pipeline": { "record": "all" },
+        \\  "vars": {},
+        \\  "tasks": [
+        \\    { "every_ms": 0, "steps": [ { "call": "set", "instrument": "d1", "args": {} } ] },
+        \\    { "every_ms": 0, "steps": [ { "call": "set", "instrument": "d1", "args": {} } ] }
+        \\  ]
+        \\}
+    );
+
+    const driver_dir = try workspace.realpathAlloc("drivers");
+    defer gpa.free(driver_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/run_once.json");
+    defer gpa.free(recipe_path);
+
+    var registry = try DriverRegistry.init(gpa, driver_dir);
+    defer registry.deinit();
+
+    var compiled = try precompilePath(gpa, recipe_path, &registry);
+    defer compiled.deinit();
+
+    // Default run-once behavior: each task runs once.
+    try std.testing.expectEqual(@as(?u64, 2), compiled.expected_iterations);
+}
+
+test "precompile marks iterations unknown for time-limited infinite loops" {
+    const gpa = std.testing.allocator;
+
+    var workspace = testing.TestWorkspace.init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("drivers/psu.json",
+        \\{
+        \\  "metadata": { "name": "psu" },
+        \\  "commands": { "set": { "write": "V", "read": null } }
+        \\}
+    );
+    try workspace.writeFile("recipes/time_limited.json",
+        \\{
+        \\  "instruments": { "d1": { "driver": "psu", "resource": "R" } },
+        \\  "pipeline": { "record": "all" },
+        \\  "vars": {},
+        \\  "tasks": [ { "every_ms": 10, "steps": [ { "call": "set", "instrument": "d1", "args": {} } ] } ],
+        \\  "stop_when": { "time_elapsed": "1s" }
+        \\}
+    );
+
+    const driver_dir = try workspace.realpathAlloc("drivers");
+    defer gpa.free(driver_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/time_limited.json");
+    defer gpa.free(recipe_path);
+
+    var registry = try DriverRegistry.init(gpa, driver_dir);
+    defer registry.deinit();
+
+    var compiled = try precompilePath(gpa, recipe_path, &registry);
+    defer compiled.deinit();
+
+    // Iterations unknown because we skip time-based estimation.
+    try std.testing.expectEqual(@as(?u64, null), compiled.expected_iterations);
 }
 
 test "precompile preserves typed literal step arguments" {
@@ -700,6 +914,7 @@ test "precompile preserves typed literal step arguments" {
         \\  "pipeline": {
         \\    "record": "all"
         \\  },
+        \\  "vars": { "target": "mir" },
         \\  "tasks": [
         \\    {
         \\      "every_ms": 0,
@@ -839,6 +1054,7 @@ test "precompile stores only referenced commands" {
         \\  "pipeline": {
         \\    "record": "all"
         \\  },
+        \\  "vars": {},
         \\  "tasks": [
         \\    {
         \\      "every_ms": 0,
@@ -889,6 +1105,7 @@ test "precompile rejects missing instrument references" {
         \\    }
         \\  },
         \\  "pipeline": { "record": "all" },
+        \\  "vars": {},
         \\  "tasks": [
         \\    {
         \\      "every_ms": 0,
@@ -1131,6 +1348,7 @@ test "precompile compute step" {
         \\  "pipeline": {
         \\    "record": "all"
         \\  },
+        \\  "vars": { "v": 0, "doubled": 0 },
         \\  "tasks": [
         \\    {
         \\      "every_ms": 0,
@@ -1214,7 +1432,8 @@ test "precompile compute step rejects missing save_as" {
     var registry = try DriverRegistry.init(gpa, driver_dir);
     defer registry.deinit();
 
-    try std.testing.expectError(error.ComputeStepMissingSaveAs, precompilePath(gpa, recipe_path, &registry));
+    // With the union-based StepConfig, missing required fields (save_as) results in a parse error.
+    try std.testing.expectError(error.WrongType, precompilePath(gpa, recipe_path, &registry));
 }
 
 test "precompile step with when guard" {
@@ -1235,6 +1454,7 @@ test "precompile step with when guard" {
         \\  "pipeline": {
         \\    "record": "all"
         \\  },
+        \\  "vars": { "power": 0 },
         \\  "tasks": [
         \\    {
         \\      "every_ms": 0,
@@ -1302,7 +1522,8 @@ test "precompile rejects invalid step (neither call nor compute)" {
     var registry = try DriverRegistry.init(gpa, driver_dir);
     defer registry.deinit();
 
-    try std.testing.expectError(error.InvalidStepConfig, precompilePath(gpa, recipe_path, &registry));
+    // With the union-based StepConfig, an object matching neither variant results in a parse error.
+    try std.testing.expectError(error.WrongType, precompilePath(gpa, recipe_path, &registry));
 }
 
 test "precompile rejects record with unknown save_as variable" {
@@ -1323,6 +1544,7 @@ test "precompile rejects record with unknown save_as variable" {
         \\  "pipeline": {
         \\    "record": ["voltage", "nonexistent"]
         \\  },
+        \\  "vars": { "voltage": 0, "nonexistent": 0 },
         \\  "tasks": [
         \\    {
         \\      "every_ms": 0,
@@ -1368,6 +1590,7 @@ test "precompile accepts valid record subset" {
         \\  "pipeline": {
         \\    "record": ["voltage"]
         \\  },
+        \\  "vars": { "voltage": 0, "doubled": 0 },
         \\  "tasks": [
         \\    {
         \\      "every_ms": 0,
@@ -1537,6 +1760,7 @@ test "precompile expands record all into explicit save_as list" {
         \\  "pipeline": {
         \\    "record": "all"
         \\  },
+        \\  "vars": { "voltage": 0, "doubled": 0 },
         \\  "tasks": [
         \\    {
         \\      "every_ms": 100,
@@ -1564,7 +1788,6 @@ test "precompile expands record all into explicit save_as list" {
 
     var registry = try DriverRegistry.init(gpa, driver_dir);
     defer registry.deinit();
-    try registry.rebuild();
 
     var compiled = try precompilePath(gpa, recipe_path, &registry);
     defer compiled.deinit();
@@ -1578,4 +1801,67 @@ test "precompile expands record all into explicit save_as list" {
         },
         .all => return error.TestUnexpectedResult,
     }
+}
+
+test "precompile rejects undeclared variable use" {
+    const gpa = std.testing.allocator;
+
+    var workspace = testing.TestWorkspace.init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("drivers/psu.json",
+        \\{
+        \\  "metadata": { "name": "psu" },
+        \\  "commands": { "set": { "write": "V {voltage}", "read": null } }
+        \\}
+    );
+    try workspace.writeFile("recipes/undeclared.json",
+        \\{
+        \\  "instruments": { "d1": { "driver": "psu", "resource": "R" } },
+        \\  "pipeline": { "record": "all" },
+        \\  "vars": { "voltage": 1 },
+        \\  "tasks": [
+        \\    { "every_ms": 0, "steps": [ { "call": "set", "instrument": "d1", "args": { "voltage": "5" }, "save_as": "undeclared_var" } ] }
+        \\  ]
+        \\}
+    );
+
+    const driver_dir = try workspace.realpathAlloc("drivers");
+    defer gpa.free(driver_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/undeclared.json");
+    defer gpa.free(recipe_path);
+
+    var registry = try DriverRegistry.init(gpa, driver_dir);
+    defer registry.deinit();
+
+    try std.testing.expectError(error.UndeclaredVariable, precompilePath(gpa, recipe_path, &registry));
+}
+
+test "precompile rejects undeclared variable in expression" {
+    const gpa = std.testing.allocator;
+
+    var workspace = testing.TestWorkspace.init(gpa);
+    defer workspace.deinit();
+
+    try workspace.makePath("drivers");
+    try workspace.writeFile("recipes/undeclared_expr.json",
+        \\{
+        \\  "instruments": {},
+        \\  "pipeline": { "record": "all" },
+        \\  "vars": { "v": 1 },
+        \\  "tasks": [
+        \\    { "every_ms": 0, "steps": [ { "compute": "${v} + ${x}", "save_as": "v" } ] }
+        \\  ]
+        \\}
+    );
+
+    const driver_dir = try workspace.realpathAlloc("drivers");
+    defer gpa.free(driver_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/undeclared_expr.json");
+    defer gpa.free(recipe_path);
+
+    var registry = try DriverRegistry.init(gpa, driver_dir);
+    defer registry.deinit();
+
+    try std.testing.expectError(error.UndeclaredVariable, precompilePath(gpa, recipe_path, &registry));
 }

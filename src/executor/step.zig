@@ -17,20 +17,16 @@ pub const ParsedValue = union(Driver.Encoding) {
 pub const SavedValue = struct {
     label: []const u8,
     value_owned: []u8,
-
-    pub fn deinit(self: *SavedValue, allocator: std.mem.Allocator) void {
-        allocator.free(self.value_owned);
-    }
 };
 
 /// Reusable scratch space for step argument resolution, avoiding per-step HashMap allocation.
 pub const StepScratch = struct {
-    values: std.StringHashMap([]const u8),
+    values: std.StringHashMap(common.RenderValue),
     temp_arena: std.heap.ArenaAllocator,
 
     pub fn init(allocator: std.mem.Allocator) StepScratch {
         return .{
-            .values = std.StringHashMap([]const u8).init(allocator),
+            .values = std.StringHashMap(common.RenderValue).init(allocator),
             .temp_arena = std.heap.ArenaAllocator.init(allocator),
         };
     }
@@ -42,10 +38,6 @@ pub const StepScratch = struct {
 
     fn tempAllocator(self: *StepScratch) std.mem.Allocator {
         return self.temp_arena.allocator();
-    }
-
-    fn formatTemp(self: *StepScratch, comptime fmt: []const u8, args: anytype) ![]const u8 {
-        return try std.fmt.allocPrint(self.tempAllocator(), fmt, args);
     }
 
     /// Clears resolved values and reuses retained arena capacity for temporary buffers.
@@ -111,9 +103,10 @@ fn executeCompute(
         else => return err,
     };
 
+    try ctx.set(comp.save_as, .{ .float = result });
+
+    // String for pipeline Frame.
     const value_owned = try std.fmt.allocPrint(allocator, "{d}", .{result});
-    errdefer allocator.free(value_owned);
-    try ctx.set(comp.save_as, value_owned);
 
     return .{
         .label = comp.save_as,
@@ -140,20 +133,16 @@ fn executeInstrumentCall(
     while (arg_it.next()) |entry| {
         switch (entry.value_ptr.*) {
             .scalar => |value| {
-                const resolved = try resolveStepScalar(ctx, scratch, value);
-                try scratch.values.put(entry.key_ptr.*, resolved);
+                const resolved = try resolveStepScalar(ctx, value);
+                try scratch.values.put(entry.key_ptr.*, .{ .scalar = resolved });
             },
             .list => |items| {
                 const alloc = scratch.tempAllocator();
-                var joined = std.ArrayList(u8).empty;
-                defer joined.deinit(alloc);
+                const resolved_items = try alloc.alloc(common.Value, items.len);
                 for (items, 0..) |item, idx| {
-                    const resolved = try resolveStepScalar(ctx, scratch, item);
-                    if (idx > 0) try joined.append(alloc, ',');
-                    try joined.appendSlice(alloc, resolved);
+                    resolved_items[idx] = try resolveStepScalar(ctx, item);
                 }
-                const joined_value = try joined.toOwnedSlice(alloc);
-                try scratch.values.put(entry.key_ptr.*, joined_value);
+                try scratch.values.put(entry.key_ptr.*, .{ .list = resolved_items });
             },
         }
     }
@@ -196,14 +185,16 @@ fn executeInstrumentCall(
         if (step.save_as) |label| {
             defer allocator.free(resp);
             const stored = try parseResponse(encoding, resp);
-            const stored_value_owned = switch (stored) {
-                .raw => |value| try allocator.dupe(u8, value),
-                .string => |value| try allocator.dupe(u8, value),
-                .int => |value| try std.fmt.allocPrint(allocator, "{d}", .{value}),
-                .float => |value| try std.fmt.allocPrint(allocator, "{d}", .{value}),
+            const value = switch (stored) {
+                .raw => |v| common.Value{ .string = v },
+                .string => |v| common.Value{ .string = v },
+                .int => |v| common.Value{ .int = v },
+                .float => |v| common.Value{ .float = v },
             };
-            errdefer allocator.free(stored_value_owned);
-            try ctx.set(label, stored_value_owned);
+            try ctx.set(label, value);
+
+            const stored_value_owned = try std.fmt.allocPrint(allocator, "{f}", .{value});
+
             return .{
                 .label = label,
                 .value_owned = stored_value_owned,
@@ -228,29 +219,19 @@ pub fn parseResponse(encoding: Driver.Encoding, resp: []const u8) !ParsedValue {
     };
 }
 
-/// Resolves `${name}` references from the execution context or returns the literal argument unchanged.
-pub fn resolveArg(ctx: *const common.Context, arg: []const u8) ![]const u8 {
-    if (arg.len >= 4 and std.mem.startsWith(u8, arg, "${") and std.mem.endsWith(u8, arg, "}")) {
-        return resolveReference(ctx, arg[2 .. arg.len - 1]);
-    }
-    return arg;
-}
-
-fn resolveReference(ctx: *const common.Context, key: []const u8) ![]const u8 {
-    if (ctx.get(key)) |val| return val;
-    return error.MissingArgument;
+fn resolveReference(ctx: *const common.Context, key: []const u8) !common.Value {
+    return ctx.get(key) orelse error.MissingArgument;
 }
 
 fn resolveStepScalar(
     ctx: *const common.Context,
-    scratch: *StepScratch,
     value: recipe_mod.StepScalar,
-) ![]const u8 {
+) !common.Value {
     return switch (value) {
-        .string => |text| text,
-        .int => |number| try scratch.formatTemp("{d}", .{number}),
-        .float => |number| try scratch.formatTemp("{d}", .{number}),
-        .bool => |flag| if (flag) "true" else "false",
+        .string => |text| .{ .string = text },
+        .int => |number| .{ .int = number },
+        .float => |number| .{ .float = number },
+        .bool => |flag| .{ .bool = flag },
         .ref => |key| try resolveReference(ctx, key),
     };
 }
@@ -261,30 +242,6 @@ fn logWarning(log_sink: pipeline_mod.AsyncLog, message: []const u8) void {
 
 fn logDryRun(log_sink: pipeline_mod.AsyncLog, driver_name: []const u8, rendered: []const u8) void {
     log_sink.print("[dry-run] {s} -> {s}\n", .{ driver_name, rendered });
-}
-
-test "executor resolve arg" {
-    var ctx = common.Context.init(std.testing.allocator);
-    defer ctx.deinit();
-    var scratch = StepScratch.init(std.testing.allocator);
-    defer scratch.deinit();
-
-    try ctx.set("v", "5.0");
-    const resolved = try resolveArg(&ctx, "${v}");
-    try std.testing.expectEqualStrings("5.0", resolved);
-    const literal = try resolveArg(&ctx, "3.3");
-    try std.testing.expectEqualStrings("3.3", literal);
-
-    const typed_ref = try resolveStepScalar(&ctx, &scratch, .{ .ref = "v" });
-    try std.testing.expectEqualStrings("5.0", typed_ref);
-    const typed_int = try resolveStepScalar(&ctx, &scratch, .{ .int = 7 });
-    try std.testing.expectEqualStrings("7", typed_int);
-    const typed_float = try resolveStepScalar(&ctx, &scratch, .{ .float = 3.25 });
-    try std.testing.expectEqualStrings("3.25", typed_float);
-    const typed_bool = try resolveStepScalar(&ctx, &scratch, .{ .bool = true });
-    try std.testing.expectEqualStrings("true", typed_bool);
-    const typed_string = try resolveStepScalar(&ctx, &scratch, .{ .string = "literal" });
-    try std.testing.expectEqualStrings("literal", typed_string);
 }
 
 test "executor parse response" {

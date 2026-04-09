@@ -39,29 +39,27 @@ pub const PrecompiledCommand = struct {
         template.freeSegments(allocator, self.template);
     }
 
+    /// Returns whether the compiled template expects a given placeholder.
+    pub fn hasPlaceholder(self: *const PrecompiledCommand, name: []const u8) bool {
+        for (self.placeholders) |placeholder| {
+            if (std.mem.eql(u8, placeholder, name)) return true;
+        }
+        return false;
+    }
+
     /// Renders the command plus optional suffix using a stack buffer with automatic heap fallback.
     pub fn render(
         self: *const PrecompiledCommand,
         allocator: std.mem.Allocator,
         stack_buffer: []u8,
-        values: *const std.StringHashMap([]const u8),
+        values: anytype,
         suffix: []const u8,
     ) RenderError!RenderedCommand {
-        if (stack_buffer.len >= suffix.len) {
-            // the buffer for rendering the template must leave room for the suffix, which is appended in-place after rendering
-            const render_buffer = stack_buffer[0 .. stack_buffer.len - suffix.len];
-            // attempt to render into the provided stack buffer; if it doesn't fit, it will be null
-            const rendered = template.renderInto(render_buffer, self.template, values) catch |err| switch (err) {
-                error.BufferTooSmall => null,
-                else => return err,
-            };
-
-            // non-null rendered means the template fit into the stack buffer, so we can append the suffix in-place and return a borrowed slice
-            if (rendered) |rendered_bytes| {
-                var used_len = rendered_bytes.len;
-                template.appendAt(stack_buffer, &used_len, suffix) catch unreachable;
-                return .{ .bytes = stack_buffer[0..used_len] };
-            }
+        if (template.renderIntoWithSuffix(stack_buffer, self.template, values, suffix)) |rendered| {
+            return .{ .bytes = rendered };
+        } else |err| switch (err) {
+            error.BufferTooSmall => {},
+            else => return err,
         }
 
         const owned = try template.renderAllocWithSuffix(allocator, self.template, values, suffix);
@@ -219,7 +217,7 @@ pub const PrecompiledRecipe = struct {
     pub fn precompilePath(
         allocator: std.mem.Allocator,
         recipe_path: []const u8,
-        driver_reg: *const DriverRegistry,
+        driver_reg: *DriverRegistry,
     ) !PrecompiledRecipe {
         return @import("precompile.zig").precompilePath(allocator, recipe_path, driver_reg);
     }
@@ -228,7 +226,7 @@ pub const PrecompiledRecipe = struct {
     pub fn precompilePathWithDiagnostic(
         allocator: std.mem.Allocator,
         recipe_path: []const u8,
-        driver_reg: *const DriverRegistry,
+        driver_reg: *DriverRegistry,
         diagnostic_ctx: *diagnostic.PrecompileDiagnostic,
     ) !PrecompiledRecipe {
         return @import("precompile.zig").precompilePathWithDiagnostic(allocator, recipe_path, driver_reg, diagnostic_ctx);

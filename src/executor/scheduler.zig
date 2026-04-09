@@ -42,14 +42,16 @@ pub fn runTasks(
 
     const next_due = try allocator.alloc(i128, compiled_recipe.tasks.len);
     defer allocator.free(next_due);
-    const start_ns: i128 = std.time.nanoTimestamp();
+    ctx.start_ns = std.time.nanoTimestamp();
+    ctx.task_idx = 0;
+    ctx.iteration = 0;
     for (next_due, compiled_recipe.tasks) |*due, t| {
-        due.* = start_ns + @as(i128, t.every_ms) * 1_000_000;
+        due.* = ctx.start_ns + @as(i128, t.every_ms) * 1_000_000;
     }
 
-    var end_ns: ?i128 = if (opts.max_duration_ms) |ms| start_ns + @as(i128, ms) * 1_000_000 else null;
+    var end_ns: ?i128 = if (opts.max_duration_ms) |ms| ctx.start_ns + @as(i128, ms) * 1_000_000 else null;
     if (compiled_recipe.stop_when.time_elapsed_ms) |ms| {
-        const limit = start_ns + @as(i128, ms) * 1_000_000;
+        const limit = ctx.start_ns + @as(i128, ms) * 1_000_000;
         if (end_ns) |current| {
             end_ns = if (limit < current) limit else current;
         } else {
@@ -60,6 +62,10 @@ pub fn runTasks(
     const ran_once = try allocator.alloc(bool, compiled_recipe.tasks.len);
     defer allocator.free(ran_once);
     @memset(ran_once, false);
+    const task_runs = try allocator.alloc(u64, compiled_recipe.tasks.len);
+    defer allocator.free(task_runs);
+    @memset(task_runs, 0);
+
     var remaining_once = compiled_recipe.tasks.len;
     var total_runs: u64 = 0;
     const max_iterations = compiled_recipe.stop_when.max_iterations;
@@ -88,9 +94,10 @@ pub fn runTasks(
             std.Thread.sleep(delta_ns);
         }
 
-        try runTask(allocator, compiled_recipe, best_idx, instruments, ctx, pipeline_runtime, opts.dry_run, &scratch);
+        try runTask(allocator, compiled_recipe, best_idx, task_runs[best_idx], instruments, ctx, pipeline_runtime, opts.dry_run, &scratch);
         next_due[best_idx] += @as(i128, compiled_recipe.tasks[best_idx].every_ms) * 1_000_000;
 
+        task_runs[best_idx] += 1;
         total_runs += 1;
         if (!ran_once[best_idx]) {
             ran_once[best_idx] = true;
@@ -105,6 +112,7 @@ fn runTask(
     allocator: std.mem.Allocator,
     compiled_recipe: *const recipe_mod.PrecompiledRecipe,
     task_idx: usize,
+    iteration: u64,
     instruments: []common.InstrumentRuntime,
     ctx: *common.Context,
     pipeline_runtime: *pipeline_mod.Runtime,
@@ -114,6 +122,9 @@ fn runTask(
     const task = compiled_recipe.tasks[task_idx];
     var frame_builder = TaskFrameBuilder.init(allocator, task_idx);
     defer frame_builder.deinit();
+
+    ctx.task_idx = task_idx;
+    ctx.iteration = iteration;
 
     for (task.steps) |*step| {
         const instrument: ?*common.InstrumentRuntime = switch (step.action) {
