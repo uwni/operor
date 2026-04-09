@@ -2,12 +2,15 @@
 
 A CI Engine for excute experiment plan on your instruments.
 
+## Installation
+
+
 ## Usage
 
 Run the `run` subcommand with a driver directory and recipe path:
 
 ```sh
-zig build run -- run <driver_dir> <recipe> [--preview] [--dry-run] [--duration-ms <ms>]
+ordo run <driver_dir> <recipe> [--preview] [--dry-run] [--duration-ms <ms>]
 ```
 
 `--preview` validates referenced drivers, instruments, commands, and command arguments without opening VISA sessions.
@@ -70,7 +73,7 @@ What each stage means in practice:
 Open an interactive VISA REPL against a single resource:
 
 ```sh
-zig build run -- repl <resource>
+ordo repl <resource>
 ```
 
 ## Driver I/O Options
@@ -108,12 +111,13 @@ query <command>
 List all VISA instrument resources:
 
 ```sh
-zig build run -- instrument list
+ordo instrument list
 ```
 
 # Expression
 `{name[:format]}`
 
 # Todo List
-[] Exception Handle: Not throw the errors instead of give a comprehensive text
-[] Github CI Config
+- [ ] Exception Handle: Not throw the errors instead of giving a comprehensive text
+- [x] Github CI Config
+- [ ] add description entry for driver. generate documentation for a driver

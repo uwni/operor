@@ -41,29 +41,35 @@ pub const InstrumentConfig = struct {
 ///
 /// A step is either an instrument `call` or a local `compute` expression.
 /// Both variants support an optional `when` guard expression.
-pub const StepConfig = struct {
-    /// Instrument command name (mutually exclusive with `compute`).
-    call: ?[]const u8 = null,
-    /// Target instrument name (required when `call` is set).
-    instrument: ?[]const u8 = null,
+pub const StepConfig = union(enum) {
+    call: CallStepConfig,
+    compute: ComputeStepConfig,
+
+    pub const serde = .{
+        .tag = serde_lib.UnionTag.untagged,
+    };
+};
+
+pub const CallStepConfig = struct {
+    /// Instrument command name.
+    call: []const u8,
+    /// Target instrument name.
+    instrument: []const u8,
     /// Arguments forwarded to the driver command template.
     args: ?std.StringHashMap(ArgValueDoc) = null,
-    /// Expression to evaluate locally (mutually exclusive with `call`).
-    compute: ?[]const u8 = null,
     /// Context key that receives the step result (response or computed value).
     save_as: ?[]const u8 = null,
     /// Guard expression; step is skipped when the result is falsy (0.0).
     when: ?[]const u8 = null,
+};
 
-    /// Returns true when the step represents a local compute expression.
-    pub fn isCompute(self: StepConfig) bool {
-        return self.compute != null;
-    }
-
-    /// Returns true when the step represents an instrument call.
-    pub fn isCall(self: StepConfig) bool {
-        return self.call != null;
-    }
+pub const ComputeStepConfig = struct {
+    /// Expression to evaluate locally.
+    compute: []const u8,
+    /// Context key that receives the step result.
+    save_as: []const u8,
+    /// Guard expression; step is skipped when the result is falsy (0.0).
+    when: ?[]const u8 = null,
 };
 
 /// Parsed task object before interval normalization.
@@ -88,6 +94,7 @@ pub const RecipeConfig = struct {
     tasks: []TaskConfig,
     pipeline: ?PipelineConfig = null,
     stop_when: ?StopWhenConfig = null,
+    vars: ?std.StringHashMap(ArgScalarDoc) = null,
 };
 
 test "parse recipe arg object values" {

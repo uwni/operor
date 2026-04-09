@@ -18,6 +18,11 @@ pub const TestWorkspace = struct {
         self.tmp.cleanup();
     }
 
+    /// Creates a directory path inside the temporary workspace.
+    pub fn makePath(self: *const TestWorkspace, sub_path: []const u8) !void {
+        try self.tmp.dir.makePath(sub_path);
+    }
+
     /// Writes a new file into the temporary workspace.
     pub fn writeFile(self: *const TestWorkspace, sub_path: []const u8, data: []const u8) !void {
         try self.ensureParentPath(sub_path);

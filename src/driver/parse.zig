@@ -62,13 +62,10 @@ test "parse driver templates and placeholders" {
         \\{
         \\  "metadata": {
         \\    "name": "psu0",
-        \\    "version": null,
-        \\    "description": null
         \\  },
         \\  "commands": {
         \\    "set_voltage": {
         \\      "write": "VOLT {voltage},(@{channels})",
-        \\      "read": null
         \\    }
         \\  }
         \\}

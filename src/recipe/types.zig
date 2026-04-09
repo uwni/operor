@@ -204,6 +204,11 @@ pub const PrecompiledRecipe = struct {
     tasks: []Task,
     pipeline: PipelineConfig,
     stop_when: StopWhen,
+    /// Estimated total number of task iterations across all tasks.
+    /// Null when the recipe runs indefinitely or stop conditions are dynamic.
+    expected_iterations: ?u64,
+    /// Default values for context variables at execution startup.
+    initial_vars: std.StringHashMap(StepScalar),
 
     /// Releases all arena-owned precompiled recipe data.
     pub fn deinit(self: *PrecompiledRecipe) void {
