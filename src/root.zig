@@ -41,7 +41,7 @@ pub fn listResources(allocator: std.mem.Allocator, visa_lib: ?[]const u8) !Resou
 /// `visa_lib` optionally overrides the VISA shared library path.
 pub fn repl(
     allocator: std.mem.Allocator,
-    resource_addr: []const u8,
+    resource_addr: ?[]const u8,
     visa_lib: ?[]const u8,
     reader: *std.Io.Reader,
     out: *std.Io.Writer,

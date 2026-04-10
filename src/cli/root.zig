@@ -1,7 +1,6 @@
 const std = @import("std");
 const clap = @import("clap");
 const common = @import("common.zig");
-const instrument = @import("instrument.zig");
 const repl = @import("repl.zig");
 const run = @import("run.zig");
 
@@ -42,7 +41,7 @@ pub fn main() !void {
             &common.root_params,
             common.exe_name,
             "",
-            "run, instrument, repl",
+            "run, repl",
         );
         return error.MissingCommand;
     };
@@ -53,14 +52,13 @@ pub fn main() !void {
             &common.root_params,
             common.exe_name,
             raw,
-            "run, instrument, repl",
+            "run, repl",
         );
         return error.UnknownCommand;
     };
 
     switch (command) {
         .run => try run.handle(allocator, &iter),
-        .instrument => try instrument.handle(allocator, &iter),
         .repl => try repl.handle(allocator, &iter),
     }
 }

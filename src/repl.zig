@@ -8,10 +8,16 @@ const repl_whitespace = " \t\r\n";
 /// Recommended stdin buffer size for line-oriented REPL input.
 pub const stdin_buffer_bytes: usize = repl_max_line_bytes + 1;
 
+/// REPL connection state.
+const State = enum { disconnected, connected };
+
 /// Parsed REPL command variants.
 const Command = union(enum) {
     help,
-    exit,
+    quit,
+    list,
+    open: ?[]const u8,
+    close,
     read,
     write: []const u8,
     query: []const u8,
@@ -24,10 +30,10 @@ const ParseError = error{
     UnexpectedCommandPayload,
 };
 
-/// Opens a VISA instrument and starts the interactive REPL loop.
+/// Opens a VISA resource manager and starts the interactive REPL loop.
 pub fn run(
     allocator: std.mem.Allocator,
-    resource_addr: []const u8,
+    resource_addr: ?[]const u8,
     visa_lib: ?[]const u8,
     reader: *std.Io.Reader,
     out: *std.Io.Writer,
@@ -36,22 +42,68 @@ pub fn run(
     var rm = try visa.ResourceManager.init(&vtable);
     defer rm.deinit();
 
-    var instrument = visa.Instrument.init(rm.session, &vtable);
-    try instrument.open(allocator, resource_addr, .{});
-    defer instrument.deinit();
+    var ctx = ReplContext{
+        .rm = &rm,
+        .vtable = &vtable,
+    };
+    defer ctx.close();
 
-    try out.print("Connected to {s}\n", .{resource_addr});
-    try printHelp(out);
+    if (resource_addr) |addr| {
+        try ctx.open(allocator, addr);
+        try out.print("Connected to {s}\n", .{addr});
+    }
+
+    try printHelp(out, ctx.state());
     defer out.flush() catch {};
-    try loop(allocator, reader, out, &instrument);
+    try loop(allocator, reader, out, &ctx);
 }
 
-/// Runs the command prompt loop until EOF or an exit command is received.
+/// Production REPL context wrapping a VISA resource manager and optional instrument.
+const ReplContext = struct {
+    rm: *visa.ResourceManager,
+    vtable: *const visa.loader.Vtable,
+    instrument: ?visa.Instrument = null,
+
+    fn state(self: *const ReplContext) State {
+        return if (self.instrument != null) .connected else .disconnected;
+    }
+
+    fn open(self: *ReplContext, allocator: std.mem.Allocator, addr: []const u8) !void {
+        var inst = visa.Instrument.init(self.rm.session, self.vtable);
+        try inst.open(allocator, addr, .{});
+        self.instrument = inst;
+    }
+
+    fn close(self: *ReplContext) void {
+        if (self.instrument) |*i| {
+            i.deinit();
+        }
+        self.instrument = null;
+    }
+
+    fn listResources(self: *ReplContext, allocator: std.mem.Allocator) !visa.ResourceList {
+        return self.rm.listResources(allocator);
+    }
+
+    fn write(self: *ReplContext, payload: []const u8) !void {
+        return self.instrument.?.write(payload);
+    }
+
+    fn readToOwned(self: *ReplContext, allocator: std.mem.Allocator) ![]u8 {
+        return self.instrument.?.readToOwned(allocator);
+    }
+
+    fn queryToOwned(self: *ReplContext, allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
+        return self.instrument.?.queryToOwned(allocator, payload);
+    }
+};
+
+/// Runs the command prompt loop until EOF or a quit command is received.
 fn loop(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
     out: *std.Io.Writer,
-    instrument: anytype,
+    ctx: anytype,
 ) !void {
     var running = true;
     while (running) {
@@ -77,7 +129,7 @@ fn loop(
             continue;
         };
 
-        running = executeCommand(allocator, instrument, command, out) catch |err| {
+        running = executeCommand(allocator, ctx, command, reader, out) catch |err| {
             try out.print("error: {any}\n", .{err});
             continue;
         };
@@ -87,34 +139,130 @@ fn loop(
 /// Executes one parsed command and returns whether the REPL should continue running.
 fn executeCommand(
     allocator: std.mem.Allocator,
-    instrument: anytype,
+    ctx: anytype,
     command: Command,
+    reader: *std.Io.Reader,
     out: *std.Io.Writer,
 ) !bool {
     switch (command) {
-        .help => {
-            try printHelp(out);
-            return true;
-        },
-        .exit => return false,
-        .write => |payload| {
-            try instrument.write(payload);
-            try out.writeAll("ok\n");
-            return true;
-        },
-        .read => {
-            const response = try instrument.readToOwned(allocator);
-            defer allocator.free(response);
-            try printResponse(out, response);
-            return true;
-        },
-        .query => |payload| {
-            const response = try instrument.queryToOwned(allocator, payload);
-            defer allocator.free(response);
-            try printResponse(out, response);
-            return true;
-        },
+        .help => try printHelp(out, ctx.state()),
+        .quit => return false,
+        .list => _ = try printResourceList(allocator, ctx, out, false),
+        .open => |addr| try handleOpen(allocator, ctx, addr, reader, out),
+        .close => try handleClose(ctx, out),
+        .write => |payload| try handleWrite(ctx, payload, out),
+        .read => try handleRead(allocator, ctx, out),
+        .query => |payload| try handleQuery(allocator, ctx, payload, out),
     }
+    return true;
+}
+
+fn handleOpen(
+    allocator: std.mem.Allocator,
+    ctx: anytype,
+    maybe_addr: ?[]const u8,
+    reader: *std.Io.Reader,
+    out: *std.Io.Writer,
+) !void {
+    if (ctx.state() == .connected) {
+        try out.writeAll("error: already connected; use 'close' first\n");
+        return;
+    }
+    if (maybe_addr) |addr| {
+        try ctx.open(allocator, addr);
+        try out.print("Connected to {s}\n", .{addr});
+        return;
+    }
+    // Interactive mode: scan and prompt for index.
+    const count = try printResourceList(allocator, ctx, out, true);
+    if (count == 0) return;
+    try out.writeAll("Enter index: ");
+    try out.flush();
+    const idx_line = readLine(reader) catch |err| switch (err) {
+        error.ReadFailed => return error.ReadFailed,
+        error.StreamTooLong => {
+            try out.writeAll("error: input too long\n");
+            return;
+        },
+    } orelse return;
+    const idx_trimmed = std.mem.trim(u8, idx_line, repl_whitespace);
+    const index = std.fmt.parseInt(usize, idx_trimmed, 10) catch {
+        try out.writeAll("error: invalid index\n");
+        return;
+    };
+    if (index == 0 or index > count) {
+        try out.writeAll("error: index out of range\n");
+        return;
+    }
+    // Re-fetch to get the address at the selected index.
+    var resources = try ctx.listResources(allocator);
+    defer resources.deinit();
+    if (index > resources.items.len) {
+        try out.writeAll("error: instrument list changed; try again\n");
+        return;
+    }
+    const addr = resources.items[index - 1];
+    try ctx.open(allocator, addr);
+    try out.print("Connected to {s}\n", .{addr});
+}
+
+fn handleClose(ctx: anytype, out: *std.Io.Writer) !void {
+    if (ctx.state() == .disconnected) {
+        try out.writeAll("error: not connected; use 'open <resource>' to connect first\n");
+        return;
+    }
+    ctx.close();
+    try out.writeAll("Disconnected.\n");
+}
+
+const not_connected_msg = "error: not connected; use 'list' to discover instruments, then 'open <resource>' to connect\n";
+
+fn handleWrite(ctx: anytype, payload: []const u8, out: *std.Io.Writer) !void {
+    if (ctx.state() == .disconnected) {
+        try out.writeAll(not_connected_msg);
+        return;
+    }
+    try ctx.write(payload);
+    try out.writeAll("ok\n");
+}
+
+fn handleRead(allocator: std.mem.Allocator, ctx: anytype, out: *std.Io.Writer) !void {
+    if (ctx.state() == .disconnected) {
+        try out.writeAll(not_connected_msg);
+        return;
+    }
+    const response = try ctx.readToOwned(allocator);
+    defer allocator.free(response);
+    try printResponse(out, response);
+}
+
+fn handleQuery(allocator: std.mem.Allocator, ctx: anytype, payload: []const u8, out: *std.Io.Writer) !void {
+    if (ctx.state() == .disconnected) {
+        try out.writeAll(not_connected_msg);
+        return;
+    }
+    const response = try ctx.queryToOwned(allocator, payload);
+    defer allocator.free(response);
+    try printResponse(out, response);
+}
+
+/// Scans for VISA resources and prints them. When `numbered` is true,
+/// each entry is prefixed with a 1-based index. Returns the count.
+fn printResourceList(allocator: std.mem.Allocator, ctx: anytype, out: *std.Io.Writer, numbered: bool) !usize {
+    var resources = try ctx.listResources(allocator);
+    defer resources.deinit();
+    if (resources.items.len == 0) {
+        try out.writeAll("No instruments found.\n");
+        return 0;
+    }
+    for (resources.items, 1..) |resource, i| {
+        if (numbered) {
+            try out.print("  {d}) {s}\n", .{ i, resource });
+        } else {
+            try out.print("  {s}\n", .{resource});
+        }
+    }
+    return resources.items.len;
 }
 
 /// Reads one newline-delimited command line from the REPL input stream.
@@ -134,7 +282,9 @@ fn readLine(reader: *std.Io.Reader) error{ ReadFailed, StreamTooLong }!?[]const 
 /// Parses a trimmed input line into one of the supported REPL commands.
 fn parseCommand(line: []const u8) ParseError!Command {
     if (std.mem.eql(u8, line, "help") or std.mem.eql(u8, line, "?")) return .help;
-    if (std.mem.eql(u8, line, "exit") or std.mem.eql(u8, line, "quit")) return .exit;
+    if (std.mem.eql(u8, line, "quit")) return .quit;
+    if (std.mem.eql(u8, line, "list")) return .list;
+    if (std.mem.eql(u8, line, "close")) return .close;
 
     const verb_end = std.mem.indexOfAny(u8, line, repl_whitespace) orelse line.len;
     const verb = line[0..verb_end];
@@ -152,20 +302,36 @@ fn parseCommand(line: []const u8) ParseError!Command {
         if (payload.len == 0) return error.MissingCommandPayload;
         return .{ .query = payload };
     }
+    if (std.mem.eql(u8, verb, "open")) {
+        if (payload.len == 0) return .{ .open = null };
+        return .{ .open = payload };
+    }
     return error.UnknownCommand;
 }
 
-/// Prints the list of supported REPL commands.
-fn printHelp(out: *std.Io.Writer) !void {
-    try out.writeAll(
-        \\Commands:
-        \\  write <command>  Send a command to the instrument.
-        \\  read             Read a response from the instrument.
-        \\  query <command>  Send a command and then read the response.
-        \\  help             Show this help text.
-        \\  exit | quit      Leave the REPL.
-        \\
-    );
+/// Prints the list of supported REPL commands based on connection state.
+fn printHelp(out: *std.Io.Writer, current_state: State) !void {
+    switch (current_state) {
+        .disconnected => try out.writeAll(
+            \\Commands:
+            \\  list              List available VISA instruments.
+            \\  open [<resource>]  Connect by address, or scan and pick interactively.
+            \\  help              Show this help text.
+            \\  quit              Leave the REPL.
+            \\
+        ),
+        .connected => try out.writeAll(
+            \\Commands:
+            \\  write <command>   Send a command to the instrument.
+            \\  read              Read a response from the instrument.
+            \\  query <command>   Send a command and then read the response.
+            \\  list              List available VISA instruments.
+            \\  close             Disconnect from the current instrument.
+            \\  help              Show this help text.
+            \\  quit              Leave the REPL.
+            \\
+        ),
+    }
 }
 
 /// Prints a friendly parse error followed by a usage hint.
@@ -191,15 +357,22 @@ fn printResponse(out: *std.Io.Writer, response: []const u8) !void {
     }
 }
 
+/// Mock resource list for testing.
+const MockResourceList = struct {
+    items: []const []const u8,
+    fn deinit(_: *MockResourceList) void {}
+};
+
 /// Test double used to exercise the REPL loop without a real VISA session.
-const MockInstrument = struct {
+const MockContext = struct {
     allocator: std.mem.Allocator,
     writes: std.ArrayList([]u8),
     responses: []const []const u8,
     read_index: usize = 0,
+    mock_resources: []const []const u8 = &.{},
+    connected: bool = false,
 
-    /// Creates a mock instrument with a predefined response sequence.
-    fn init(allocator: std.mem.Allocator, responses: []const []const u8) MockInstrument {
+    fn init(allocator: std.mem.Allocator, responses: []const []const u8) MockContext {
         return .{
             .allocator = allocator,
             .writes = .empty,
@@ -207,28 +380,41 @@ const MockInstrument = struct {
         };
     }
 
-    /// Releases stored write payloads captured by the mock.
-    fn deinit(self: *MockInstrument) void {
+    fn deinit(self: *MockContext) void {
         for (self.writes.items) |item| self.allocator.free(item);
         self.writes.deinit(self.allocator);
     }
 
-    /// Records a write payload issued by the REPL.
-    fn write(self: *MockInstrument, payload: []const u8) !void {
+    fn state(self: *const MockContext) State {
+        return if (self.connected) .connected else .disconnected;
+    }
+
+    fn listResources(self: *MockContext, _: std.mem.Allocator) !MockResourceList {
+        return .{ .items = self.mock_resources };
+    }
+
+    fn open(self: *MockContext, _: std.mem.Allocator, _: []const u8) !void {
+        self.connected = true;
+    }
+
+    fn close(self: *MockContext) void {
+        self.connected = false;
+    }
+
+    fn write(self: *MockContext, payload: []const u8) !void {
         const copy = try self.allocator.dupe(u8, payload);
         errdefer self.allocator.free(copy);
         try self.writes.append(self.allocator, copy);
     }
 
-    /// Returns the next predefined response as an owned buffer.
-    fn readToOwned(self: *MockInstrument, allocator: std.mem.Allocator) ![]u8 {
+    fn readToOwned(self: *MockContext, allocator: std.mem.Allocator) ![]u8 {
         if (self.read_index >= self.responses.len) return error.EndOfStream;
         const response = self.responses[self.read_index];
         self.read_index += 1;
         return try allocator.dupe(u8, response);
     }
 
-    fn queryToOwned(self: *MockInstrument, allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
+    fn queryToOwned(self: *MockContext, allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
         try self.write(payload);
         return self.readToOwned(allocator);
     }
@@ -247,20 +433,36 @@ test "parse repl commands" {
         else => false,
     });
 
+    const open_cmd = try parseCommand("open USB0::0x0957::INSTR");
+    try std.testing.expect(switch (open_cmd) {
+        .open => |addr| if (addr) |a| std.mem.eql(u8, a, "USB0::0x0957::INSTR") else false,
+        else => false,
+    });
+
+    const open_bare = try parseCommand("open");
+    try std.testing.expect(switch (open_bare) {
+        .open => |addr| addr == null,
+        else => false,
+    });
+
     try std.testing.expectEqual(Command.read, try parseCommand("read"));
     try std.testing.expectEqual(Command.help, try parseCommand("help"));
-    try std.testing.expectEqual(Command.exit, try parseCommand("quit"));
+    try std.testing.expectEqual(Command.quit, try parseCommand("quit"));
+    try std.testing.expectEqual(Command.list, try parseCommand("list"));
+    try std.testing.expectEqual(Command.close, try parseCommand("close"));
     try std.testing.expectError(error.MissingCommandPayload, parseCommand("write"));
     try std.testing.expectError(error.UnexpectedCommandPayload, parseCommand("read extra"));
     try std.testing.expectError(error.UnknownCommand, parseCommand("ping"));
 }
 
-test "repl loop handles write query read and quit" {
+test "repl loop handles open write query read close and quit" {
     const gpa = std.testing.allocator;
     const input =
+        \\open USB0::INSTR
         \\write CONF:VOLT 10
         \\query *IDN?
         \\read
+        \\close
         \\quit
         \\
     ;
@@ -269,15 +471,107 @@ test "repl loop handles write query read and quit" {
     var out = std.Io.Writer.Allocating.init(gpa);
     defer out.deinit();
 
-    var instrument = MockInstrument.init(gpa, &.{ "TEST,MODEL,123\n", "5.000\n" });
-    defer instrument.deinit();
+    var ctx = MockContext.init(gpa, &.{ "TEST,MODEL,123\n", "5.000\n" });
+    defer ctx.deinit();
 
-    try loop(gpa, &reader, &out.writer, &instrument);
+    try loop(gpa, &reader, &out.writer, &ctx);
 
-    try std.testing.expectEqual(@as(usize, 2), instrument.writes.items.len);
-    try std.testing.expectEqualStrings("CONF:VOLT 10", instrument.writes.items[0]);
-    try std.testing.expectEqualStrings("*IDN?", instrument.writes.items[1]);
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "ok\n"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "TEST,MODEL,123\n"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "5.000\n"));
+    try std.testing.expectEqual(@as(usize, 2), ctx.writes.items.len);
+    try std.testing.expectEqualStrings("CONF:VOLT 10", ctx.writes.items[0]);
+    try std.testing.expectEqualStrings("*IDN?", ctx.writes.items[1]);
+    const output = out.written();
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Connected to USB0::INSTR\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "ok\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "TEST,MODEL,123\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "5.000\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Disconnected.\n"));
+}
+
+test "repl list command shows resources" {
+    const gpa = std.testing.allocator;
+    const input =
+        \\list
+        \\quit
+        \\
+    ;
+
+    var reader = std.Io.Reader.fixed(input);
+    var out = std.Io.Writer.Allocating.init(gpa);
+    defer out.deinit();
+
+    var ctx = MockContext.init(gpa, &.{});
+    ctx.mock_resources = &.{ "USB0::0x0957::INSTR", "TCPIP0::192.168.1.1::INSTR" };
+    defer ctx.deinit();
+
+    try loop(gpa, &reader, &out.writer, &ctx);
+
+    const output = out.written();
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "  USB0::0x0957::INSTR\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "  TCPIP0::192.168.1.1::INSTR\n"));
+    // list should NOT show numbers
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "1)"));
+}
+
+test "repl interactive open scans and prompts" {
+    const gpa = std.testing.allocator;
+    // "open" without args triggers scan, then "2\n" selects the second instrument.
+    const input = "open\n2\nclose\nquit\n";
+
+    var reader = std.Io.Reader.fixed(input);
+    var out = std.Io.Writer.Allocating.init(gpa);
+    defer out.deinit();
+
+    var ctx = MockContext.init(gpa, &.{});
+    ctx.mock_resources = &.{ "USB0::0x0957::INSTR", "TCPIP0::192.168.1.1::INSTR" };
+    defer ctx.deinit();
+
+    try loop(gpa, &reader, &out.writer, &ctx);
+
+    const output = out.written();
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "1) USB0::0x0957::INSTR"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "2) TCPIP0::192.168.1.1::INSTR"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Enter index:"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Connected to TCPIP0::192.168.1.1::INSTR\n"));
+}
+
+test "repl interactive open with invalid index" {
+    const gpa = std.testing.allocator;
+    const input = "open\n5\nquit\n";
+
+    var reader = std.Io.Reader.fixed(input);
+    var out = std.Io.Writer.Allocating.init(gpa);
+    defer out.deinit();
+
+    var ctx = MockContext.init(gpa, &.{});
+    ctx.mock_resources = &.{"USB0::INSTR"};
+    defer ctx.deinit();
+
+    try loop(gpa, &reader, &out.writer, &ctx);
+
+    const output = out.written();
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "index out of range"));
+}
+
+test "repl rejects instrument commands when disconnected" {
+    const gpa = std.testing.allocator;
+    const input =
+        \\write CONF:VOLT 10
+        \\read
+        \\query *IDN?
+        \\close
+        \\quit
+        \\
+    ;
+
+    var reader = std.Io.Reader.fixed(input);
+    var out = std.Io.Writer.Allocating.init(gpa);
+    defer out.deinit();
+
+    var ctx = MockContext.init(gpa, &.{});
+    defer ctx.deinit();
+
+    try loop(gpa, &reader, &out.writer, &ctx);
+
+    const output = out.written();
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 3, "not connected"));
 }

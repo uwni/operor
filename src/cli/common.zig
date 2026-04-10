@@ -8,7 +8,6 @@ pub const exe_name = build_options.exe_name;
 /// Top-level CLI subcommands.
 pub const Command = enum {
     run,
-    instrument,
     repl,
 };
 
@@ -70,7 +69,7 @@ pub const root_parsers = .{
 pub const root_params = clap.parseParamsComptime(
     \\-h, --help  Display this help and exit.
     \\<command>
-    \\        Command to run. Currently supported: run, instrument, repl.
+    \\        Command to run. Currently supported: run, repl.
     \\
 );
 

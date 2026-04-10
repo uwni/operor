@@ -5,7 +5,6 @@ const common = @import("common.zig");
 
 /// Parser table for the `repl` command.
 const parsers = .{
-    .resource = clap.parsers.string,
     .str = clap.parsers.string,
 };
 
@@ -13,8 +12,7 @@ const parsers = .{
 const params = clap.parseParamsComptime(
     \\-h, --help              Display this help and exit.
     \\    --visa-lib <str>    Path to VISA shared library (overrides platform default).
-    \\<resource>
-    \\        VISA resource address to connect to.
+    \\-r, --resource <str>    VISA resource address to connect to.
     \\
 );
 
@@ -38,10 +36,7 @@ pub fn handle(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
         return;
     }
 
-    const resource_addr = res.positionals[0] orelse {
-        try common.usageAndHelpToFile(.stderr(), common.exe_name ++ " repl", clap.Help, &params);
-        return error.MissingResourceAddress;
-    };
+    const resource_addr = res.args.resource;
 
     var stdin_buffer: [ordo.repl_stdin_buffer_bytes]u8 = undefined;
     var stdin_reader = std.fs.File.stdin().reader(&stdin_buffer);
@@ -51,11 +46,12 @@ pub fn handle(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
     try ordo.repl(allocator, resource_addr, res.args.@"visa-lib", &stdin_reader.interface, &stdout_writer.interface);
 }
 
-test "main parses repl command" {
+test "main parses repl command with resource flag" {
     const gpa = std.testing.allocator;
 
     var iter = common.SliceArgIter{ .items = &.{
         "repl",
+        "--resource",
         "USB0::0x0957::0x1798::MY12345678::INSTR",
     } };
 
@@ -76,6 +72,29 @@ test "main parses repl command" {
     try std.testing.expectEqual(@as(usize, 0), repl.args.help);
     try std.testing.expectEqualStrings(
         "USB0::0x0957::0x1798::MY12345678::INSTR",
-        repl.positionals[0].?,
+        repl.args.resource.?,
     );
+}
+
+test "main parses repl command without resource" {
+    const gpa = std.testing.allocator;
+
+    var iter = common.SliceArgIter{ .items = &.{
+        "repl",
+    } };
+
+    var root = try clap.parseEx(clap.Help, &common.root_params, common.root_parsers, &iter, .{
+        .allocator = gpa,
+        .terminating_positional = 0,
+    });
+    defer root.deinit();
+
+    try std.testing.expectEqualStrings("repl", root.positionals[0].?);
+
+    var repl = try clap.parseEx(clap.Help, &params, parsers, &iter, .{
+        .allocator = gpa,
+    });
+    defer repl.deinit();
+
+    try std.testing.expectEqual(@as(?[]const u8, null), repl.args.resource);
 }
