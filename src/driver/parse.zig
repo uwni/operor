@@ -9,7 +9,8 @@ const max_driver_file_size: usize = 512 * 1024;
 
 /// Raw serialized shape of a driver document.
 const DriverDoc = struct {
-    metadata: types.DriverMeta,
+    metadata: types.DriverMeta = .{},
+    instrument: types.InstrumentSpec = .{},
     commands: std.StringHashMap(CommandDoc),
 };
 
@@ -35,19 +36,21 @@ pub fn parseDriverInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_name
         try commands.put(entry.key_ptr.*, cmd);
     }
 
-    const write_termination = parsed.metadata.write_termination orelse "";
+    const inst = parsed.instrument;
+    const write_termination = inst.write_termination orelse "";
 
     return Driver{
         .arena = driver_arena,
         .path = try dir.realpathAlloc(alloc, file_name),
         .meta = parsed.metadata,
+        .instrument = inst,
         .commands = commands,
         .write_termination = write_termination,
         .options = .{
-            .timeout_ms = parsed.metadata.timeout_ms,
-            .read_termination = parsed.metadata.read_termination orelse "",
-            .query_delay_ms = parsed.metadata.query_delay_ms orelse 0,
-            .chunk_size = parsed.metadata.chunk_size orelse visa.default_chunk_size,
+            .timeout_ms = inst.timeout_ms,
+            .read_termination = inst.read_termination orelse "",
+            .query_delay_ms = inst.query_delay_ms orelse 0,
+            .chunk_size = inst.chunk_size orelse visa.default_chunk_size,
         },
     };
 }
@@ -126,6 +129,8 @@ test "parse driver with write termination" {
         \\[metadata]
         \\version = "1.0"
         \\description = "PSU over serial"
+        \\
+        \\[instrument]
         \\write_termination = "\n"
         \\
         \\[commands.set_voltage]
@@ -180,6 +185,8 @@ test "parse driver instrument options" {
         \\[metadata]
         \\version = "1.0"
         \\description = "Scope over TCPIP"
+        \\
+        \\[instrument]
         \\timeout_ms = 2500
         \\read_termination = "\n"
         \\write_termination = "\r\n"

@@ -9,6 +9,7 @@ const Driver = @This();
 arena: std.heap.ArenaAllocator,
 path: []const u8,
 meta: types.DriverMeta,
+instrument: types.InstrumentSpec,
 commands: std.StringHashMap(Command),
 /// Suffix appended to every write command (e.g. "\n", "\r\n").
 /// Empty string means no write termination. Owned by the driver arena.

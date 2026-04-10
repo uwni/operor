@@ -7,6 +7,13 @@ pub const DriverMeta = struct {
     version: ?[]const u8 = null,
     /// Optional free-form description shown to operators.
     description: ?[]const u8 = null,
+    /// Optional author or maintainer of the driver definition.
+    author: ?[]const u8 = null,
+};
+
+/// Instrument-level defaults declared in a driver document.
+/// These fields configure VISA session behaviour and identity matching.
+pub const InstrumentSpec = struct {
     /// Optional timeout applied to VISA I/O for this driver's instruments.
     timeout_ms: ?u32 = null,
     /// Optional response suffix removed from owned reads.

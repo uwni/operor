@@ -94,12 +94,14 @@ Ordo has two configuration layers:
 
 ### Driver Files
 
-Driver documents are TOML files with optional metadata plus a `commands` table.
+Driver documents are TOML files with optional metadata, an optional `instrument` section for VISA session defaults, and a `commands` table.
 
 ```toml
 [metadata]
 version = "1.2.3"
 description = "Bench power supply"
+
+[instrument]
 timeout_ms = 2500
 write_termination = "\n"
 read_termination = "\n"
