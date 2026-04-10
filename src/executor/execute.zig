@@ -42,19 +42,12 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
     }
 
     const instruments = try allocator.alloc(common.InstrumentRuntime, compiled.instruments.count());
-    var ctx = common.Context.init(allocator);
+    var ctx = try common.Context.init(allocator, compiled.initial_values.len);
 
     // Initialize context variables from the recipe.
-    var var_it = compiled.initial_vars.iterator();
-    while (var_it.next()) |entry| {
-        const val = switch (entry.value_ptr.*) {
-            .string => |s| common.Value{ .string = s },
-            .int => |i| common.Value{ .int = i },
-            .float => |f| common.Value{ .float = f },
-            .bool => |b| common.Value{ .bool = b },
-            .ref => unreachable, // initial vars cannot be refs
-        };
-        try ctx.set(entry.key_ptr.*, val);
+    for (compiled.initial_values, 0..) |value_opt, slot_idx| {
+        const value = value_opt orelse continue;
+        try ctx.setSlot(slot_idx, value);
     }
 
     defer {
@@ -138,15 +131,13 @@ fn resolveConfiguredPath(allocator: std.mem.Allocator, recipe_path: []const u8, 
 /// Opens VISA sessions for every precompiled instrument when not running in dry-run mode.
 fn prepareRuntime(
     allocator: std.mem.Allocator,
-    precompiled_instruments: *const std.StringHashMap(recipe_mod.PrecompiledInstrument),
+    precompiled_instruments: *const std.StringArrayHashMap(recipe_mod.PrecompiledInstrument),
     instruments: []common.InstrumentRuntime,
     rm: ?visa.ResourceManager,
 ) !void {
     const mgr = rm orelse return;
-    var instrument_it = precompiled_instruments.iterator();
-    while (instrument_it.next()) |entry| {
-        const compiled_instrument = entry.value_ptr;
-        const runtime = &instruments[compiled_instrument.instrument_idx];
+    for (precompiled_instruments.values(), 0..) |*compiled_instrument, idx| {
+        const runtime = &instruments[idx];
         var instr = visa.Instrument.init(mgr.session, mgr.vtable);
         try instr.open(allocator, compiled_instrument.resource, compiled_instrument.options);
         runtime.handle = instr;

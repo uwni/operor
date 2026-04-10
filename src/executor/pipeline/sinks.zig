@@ -89,9 +89,9 @@ pub const FileSink = struct {
         const writer = &file_writer.interface;
 
         try writer.print("{d},{d}", .{ frame.timestamp_ns, frame.task_idx });
-        for (self.frame_columns) |column_name| {
+        for (0..self.frame_columns.len) |col| {
             try writer.writeByte(',');
-            if (frame.getValue(column_name)) |value| {
+            if (frame.getColumn(col)) |value| {
                 try writeCsvField(writer, value);
             }
         }
@@ -116,41 +116,48 @@ pub const FileSink = struct {
 
 pub const NetworkSink = struct {
     stream: std.net.Stream,
+    frame_columns: []const []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, host: []const u8, port: u16) !NetworkSink {
+    pub fn init(allocator: std.mem.Allocator, host: []const u8, port: u16, frame_columns: []const []const u8) !NetworkSink {
+        const columns_copy = try allocator.alloc([]const u8, frame_columns.len);
+        std.mem.copyForwards([]const u8, columns_copy, frame_columns);
         return .{
             .stream = try std.net.tcpConnectToHost(allocator, host, port),
+            .frame_columns = columns_copy,
         };
     }
 
-    pub fn deinit(self: *NetworkSink) void {
+    pub fn deinit(self: *NetworkSink, allocator: std.mem.Allocator) void {
+        allocator.free(self.frame_columns);
         self.stream.close();
     }
 
     pub fn writeFrame(self: *NetworkSink, frame: *const types.Frame) !void {
         var io_buffer: [2048]u8 = undefined;
         var stream_writer = self.stream.writer(&io_buffer);
-        try writeFrameJson(&stream_writer.interface, frame);
+        try writeFrameJson(&stream_writer.interface, frame, self.frame_columns);
         try stream_writer.interface.flush();
     }
 };
 
-fn writeFrameJson(writer: *std.Io.Writer, frame: *const types.Frame) !void {
-    const fields = frame.fields_owned orelse &[_]types.FrameField{};
-
+fn writeFrameJson(writer: *std.Io.Writer, frame: *const types.Frame, columns: []const []const u8) !void {
     try writer.writeAll("{\"timestamp_ns\":");
     try writer.print("{d}", .{frame.timestamp_ns});
     try writer.writeAll(",\"task_idx\":");
     try writer.print("{d}", .{frame.task_idx});
     try writer.writeAll(",\"fields\":[");
 
-    for (fields, 0..) |field, idx| {
-        if (idx > 0) try writer.writeByte(',');
-        try writer.writeAll("{\"name\":");
-        try writeJsonString(writer, field.name);
-        try writer.writeAll(",\"value\":");
-        try writeJsonString(writer, field.value());
-        try writer.writeByte('}');
+    var first = true;
+    for (columns, 0..) |name, col| {
+        if (frame.getColumn(col)) |value| {
+            if (!first) try writer.writeByte(',');
+            first = false;
+            try writer.writeAll("{\"name\":");
+            try writeJsonString(writer, name);
+            try writer.writeAll(",\"value\":");
+            try writeJsonString(writer, value);
+            try writer.writeByte('}');
+        }
     }
 
     try writer.writeAll("]}");
@@ -187,14 +194,14 @@ test "file sink writes one frame row with all saved fields" {
     var sink = try FileSink.init(gpa, sink_path, &columns);
     defer sink.deinit();
 
-    const fields = try gpa.alloc(types.FrameField, 2);
-    fields[0] = .{ .name = "voltage", .value_owned = try gpa.dupe(u8, "1.23") };
-    fields[1] = .{ .name = "current", .value_owned = try gpa.dupe(u8, "0.45") };
+    const values = try gpa.alloc(?[]u8, 2);
+    values[0] = try gpa.dupe(u8, "1.23");
+    values[1] = try gpa.dupe(u8, "0.45");
 
     var frame = types.Frame{
         .timestamp_ns = 10,
         .task_idx = 2,
-        .fields_owned = fields,
+        .values_owned = values,
     };
     defer frame.deinit(gpa);
 
@@ -223,13 +230,14 @@ test "file sink leaves unrelated frame columns blank" {
     var sink = try FileSink.init(gpa, sink_path, &columns);
     defer sink.deinit();
 
-    const fields = try gpa.alloc(types.FrameField, 1);
-    fields[0] = .{ .name = "voltage", .value_owned = try gpa.dupe(u8, "1.23") };
+    const values = try gpa.alloc(?[]u8, 2);
+    values[0] = try gpa.dupe(u8, "1.23");
+    values[1] = null;
 
     var frame = types.Frame{
         .timestamp_ns = 11,
         .task_idx = 0,
-        .fields_owned = fields,
+        .values_owned = values,
     };
     defer frame.deinit(gpa);
 
@@ -258,13 +266,13 @@ test "file sink escapes csv quotes commas and newlines in frame values" {
     var sink = try FileSink.init(gpa, sink_path, &columns);
     defer sink.deinit();
 
-    const fields = try gpa.alloc(types.FrameField, 1);
-    fields[0] = .{ .name = "reading", .value_owned = try gpa.dupe(u8, "1,\"2\"\n3") };
+    const values = try gpa.alloc(?[]u8, 1);
+    values[0] = try gpa.dupe(u8, "1,\"2\"\n3");
 
     var frame = types.Frame{
         .timestamp_ns = 7,
         .task_idx = 1,
-        .fields_owned = fields,
+        .values_owned = values,
     };
     defer frame.deinit(gpa);
 
@@ -276,26 +284,26 @@ test "file sink escapes csv quotes commas and newlines in frame values" {
     try std.testing.expect(std.mem.containsAtLeast(u8, file_data, 1, "\"1,\"\"2\"\"\n3\""));
 }
 
-test "writeFrameJson escapes field names and values without heap allocation" {
+test "writeFrameJson escapes column names and values without heap allocation" {
     const gpa = std.testing.allocator;
 
-    const fields = try gpa.alloc(types.FrameField, 1);
-    fields[0] = .{
-        .name = "channel\"name",
-        .value_owned = try gpa.dupe(u8, "1,\"2\"\n3"),
-    };
+    const values = try gpa.alloc(?[]u8, 2);
+    values[0] = try gpa.dupe(u8, "1,\"2\"\n3");
+    values[1] = null;
 
     var frame = types.Frame{
         .timestamp_ns = 7,
         .task_idx = 1,
-        .fields_owned = fields,
+        .values_owned = values,
     };
     defer frame.deinit(gpa);
+
+    const columns = [_][]const u8{ "channel\"name", "unused" };
 
     var out = std.Io.Writer.Allocating.init(gpa);
     defer out.deinit();
 
-    try writeFrameJson(&out.writer, &frame);
+    try writeFrameJson(&out.writer, &frame, &columns);
     try std.testing.expectEqualStrings(
         "{\"timestamp_ns\":7,\"task_idx\":1,\"fields\":[{\"name\":\"channel\\\"name\",\"value\":\"1,\\\"2\\\"\\n3\"}]}\n",
         out.written(),

@@ -1,173 +1,120 @@
+pub const Context = @This();
 const std = @import("std");
 const expr = @import("../expr.zig");
+const recipe_types = @import("../recipe/types.zig");
 
-pub const Value = union(enum) {
+pub const Value = recipe_types.Value;
+pub const RenderValue = recipe_types.RenderValue;
+
+/// Execution-time value store used for `${name}` substitutions and `save_as` outputs.
+allocator: std.mem.Allocator,
+start_ns: i128 = 0,
+iteration: u64 = 0,
+task_idx: usize = 0,
+values: []ContextValue,
+
+const ContextValue = union(enum) {
+    unset,
     float: f64,
     int: i64,
     bool: bool,
-    string: []const u8,
-
-    fn toResolvedValue(self: Value) expr.ResolvedValue {
-        return switch (self) {
-            .float => |f| .{ .number = f },
-            .int => |i| .{ .number = @floatFromInt(i) },
-            .bool => |b| .{ .number = if (b) 1.0 else 0.0 },
-            .string => |s| .{ .string = s },
-        };
-    }
-
-    pub fn format(self: Value, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        switch (self) {
-            .float => |f| try writer.print("{d}", .{f}),
-            .int => |i| try writer.print("{d}", .{i}),
-            .bool => |b| try writer.writeAll(if (b) "true" else "false"),
-            .string => |s| try writer.writeAll(s),
-        }
-    }
+    string: struct {
+        buffer: []u8,
+        len: usize,
+    },
 };
 
-/// Render-time value used by command templates.
-pub const RenderValue = union(enum) {
-    scalar: Value,
-    list: []const Value,
+/// Creates an empty execution context.
+pub fn init(allocator: std.mem.Allocator, slot_count: usize) !Context {
+    const values = try allocator.alloc(ContextValue, slot_count);
+    for (values) |*slot| slot.* = .unset;
 
-    pub fn format(self: RenderValue, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        switch (self) {
-            .scalar => |value| try value.format(writer),
-            .list => |items| {
-                for (items, 0..) |item, idx| {
-                    if (idx > 0) try writer.writeByte(',');
-                    try item.format(writer);
-                }
-            },
-        }
-    }
-};
-
-/// Execution-time value store used for `${name}` substitutions and `save_as` outputs.
-pub const Context = struct {
-    allocator: std.mem.Allocator,
-    start_ns: i128 = 0,
-    iteration: u64 = 0,
-    task_idx: usize = 0,
-    values: std.StringHashMap(ContextValue),
-
-    const ContextValue = union(enum) {
-        float: f64,
-        int: i64,
-        bool: bool,
-        string: struct {
-            buffer: []u8,
-            len: usize,
-        },
+    return .{
+        .allocator = allocator,
+        .values = values,
     };
+}
 
-    /// Creates an empty execution context.
-    pub fn init(allocator: std.mem.Allocator) Context {
-        return .{
-            .allocator = allocator,
-            .values = std.StringHashMap(ContextValue).init(allocator),
-        };
-    }
-
-    /// Releases all context-owned keys and values.
-    pub fn deinit(self: *Context) void {
-        var it = self.values.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            switch (entry.value_ptr.*) {
-                .string => |s| self.allocator.free(s.buffer),
-                else => {},
-            }
+/// Releases all context-owned keys and values.
+pub fn deinit(self: *Context) void {
+    for (self.values) |*slot| {
+        switch (slot.*) {
+            .string => |s| self.allocator.free(s.buffer),
+            else => {},
         }
-        self.values.deinit();
     }
+    self.allocator.free(self.values);
+}
 
-    /// Stores or replaces a named runtime value.
-    pub fn set(self: *Context, key: []const u8, value: Value) !void {
-        if (self.values.getPtr(key)) |stored| {
-            switch (value) {
-                .string => |s| {
-                    if (stored.* == .string) {
-                        if (stored.string.buffer.len < s.len) {
-                            const replacement = try self.allocator.alloc(u8, s.len);
-                            self.allocator.free(stored.string.buffer);
-                            stored.string.buffer = replacement;
-                        }
-                        std.mem.copyForwards(u8, stored.string.buffer[0..s.len], s);
-                        stored.string.len = s.len;
-                    } else {
-                        const buffer = try self.allocator.alloc(u8, s.len);
-                        std.mem.copyForwards(u8, buffer, s);
-                        stored.* = .{ .string = .{ .buffer = buffer, .len = s.len } };
-                    }
-                },
-                .float => |f| {
-                    if (stored.* == .string) self.allocator.free(stored.string.buffer);
-                    stored.* = .{ .float = f };
-                },
-                .int => |i| {
-                    if (stored.* == .string) self.allocator.free(stored.string.buffer);
-                    stored.* = .{ .int = i };
-                },
-                .bool => |b| {
-                    if (stored.* == .string) self.allocator.free(stored.string.buffer);
-                    stored.* = .{ .bool = b };
-                },
-            }
-            return;
-        }
-
-        const key_copy = try self.allocator.dupe(u8, key);
-        errdefer self.allocator.free(key_copy);
-
-        const val = switch (value) {
-            .string => |s| blk: {
+/// Stores or replaces a runtime value by compiled slot index.
+pub fn setSlot(self: *Context, slot_idx: usize, value: Value) !void {
+    const stored = &self.values[slot_idx];
+    switch (value) {
+        .string => |s| {
+            if (stored.* == .string) {
+                if (stored.string.buffer.len < s.len) {
+                    const replacement = try self.allocator.alloc(u8, s.len);
+                    self.allocator.free(stored.string.buffer);
+                    stored.string.buffer = replacement;
+                }
+                std.mem.copyForwards(u8, stored.string.buffer[0..s.len], s);
+                stored.string.len = s.len;
+            } else {
                 const buffer = try self.allocator.alloc(u8, s.len);
                 std.mem.copyForwards(u8, buffer, s);
-                break :blk ContextValue{ .string = .{ .buffer = buffer, .len = s.len } };
-            },
-            .float => |f| ContextValue{ .float = f },
-            .int => |i| ContextValue{ .int = i },
-            .bool => |b| ContextValue{ .bool = b },
-        };
-
-        try self.values.put(key_copy, val);
+                stored.* = .{ .string = .{ .buffer = buffer, .len = s.len } };
+            }
+        },
+        .float => |f| {
+            if (stored.* == .string) self.allocator.free(stored.string.buffer);
+            stored.* = .{ .float = f };
+        },
+        .int => |i| {
+            if (stored.* == .string) self.allocator.free(stored.string.buffer);
+            stored.* = .{ .int = i };
+        },
+        .bool => |b| {
+            if (stored.* == .string) self.allocator.free(stored.string.buffer);
+            stored.* = .{ .bool = b };
+        },
     }
+}
 
-    /// Returns a previously stored runtime value.
-    pub fn get(self: *const Context, key: []const u8) ?Value {
-        if (builtinValue(self, key)) |value| return value;
+/// Returns a previously stored runtime value by compiled slot index.
+pub fn getSlot(self: *const Context, slot_idx: usize) ?Value {
+    const stored = self.values[slot_idx];
+    return switch (stored) {
+        .unset => null,
+        .float => |f| .{ .float = f },
+        .int => |i| .{ .int = i },
+        .bool => |b| .{ .bool = b },
+        .string => |s| .{ .string = s.buffer[0..s.len] },
+    };
+}
 
-        const stored = self.values.get(key) orelse return null;
-        return switch (stored) {
-            .float => |f| .{ .float = f },
-            .int => |i| .{ .int = i },
-            .bool => |b| .{ .bool = b },
-            .string => |s| .{ .string = s.buffer[0..s.len] },
-        };
-    }
+pub fn resolveBinding(self: *const Context, binding: expr.VariableBinding) ?Value {
+    return switch (binding) {
+        .slot => |slot_idx| self.getSlot(slot_idx),
+        .builtin => |builtin| switch (builtin) {
+            .iter => .{ .int = @intCast(self.iteration) },
+            .task_idx => .{ .int = @intCast(self.task_idx) },
+        },
+    };
+}
 
-    fn builtinValue(self: *const Context, key: []const u8) ?Value {
-        if (std.mem.eql(u8, key, "$ITER")) return .{ .int = @intCast(self.iteration) };
-        if (std.mem.eql(u8, key, "$TASK_IDX")) return .{ .int = @intCast(self.task_idx) };
-        return null;
-    }
+fn resolveBindingValue(ctx_ptr: *const anyopaque, binding: expr.VariableBinding) ?expr.ResolvedValue {
+    const self: *const Context = @ptrCast(@alignCast(ctx_ptr));
+    const val = self.resolveBinding(binding) orelse return null;
+    return val.toResolvedValue();
+}
 
-    fn resolve(ctx_ptr: *const anyopaque, name: []const u8) ?expr.ResolvedValue {
-        const self: *const Context = @ptrCast(@alignCast(ctx_ptr));
-        const val = self.get(name) orelse return null;
-        return val.toResolvedValue();
-    }
-
-    /// Returns an expression resolver over user values plus built-in execution state.
-    pub fn varResolver(self: *const Context) expr.VarResolver {
-        return .{
-            .ctx = @ptrCast(self),
-            .resolveFn = resolve,
-        };
-    }
-};
+/// Returns an expression resolver over slot-based values plus built-in execution state.
+pub fn varResolver(self: *const Context) expr.VarResolver {
+    return .{
+        .ctx = @ptrCast(self),
+        .resolve_fn = resolveBindingValue,
+    };
+}
 
 test "Value and RenderValue format support formatter specifier" {
     const testing = std.testing;
@@ -195,25 +142,30 @@ test "Context exposes built-ins alongside stored values" {
     const testing = std.testing;
     const expr_mod = @import("../expr.zig");
 
-    var ctx = Context.init(testing.allocator);
+    var ctx = try Context.init(testing.allocator, 1);
     defer ctx.deinit();
 
-    try ctx.set("voltage", .{ .float = 3.3 });
+    try ctx.setSlot(0, .{ .float = 3.3 });
     ctx.task_idx = 2;
     ctx.iteration = 7;
 
-    try testing.expectEqualDeep(Value{ .int = 7 }, ctx.get("$ITER").?);
-    try testing.expectEqualDeep(Value{ .int = 2 }, ctx.get("$TASK_IDX").?);
-    try testing.expectEqualDeep(Value{ .float = 3.3 }, ctx.get("voltage").?);
-    try testing.expect(ctx.get("missing") == null);
+    try testing.expectEqualDeep(Value{ .int = 7 }, ctx.resolveBinding(.{ .builtin = .iter }).?);
+    try testing.expectEqualDeep(Value{ .int = 2 }, ctx.resolveBinding(.{ .builtin = .task_idx }).?);
+    try testing.expectEqualDeep(Value{ .float = 3.3 }, ctx.resolveBinding(.{ .slot = 0 }).?);
+    try testing.expect(ctx.getSlot(0) != null);
 
-    try testing.expectApproxEqAbs(@as(f64, 9.0), try expr_mod.eval(testing.allocator, "$ITER + $TASK_IDX", ctx.varResolver()), 1e-9);
+    var expr_obj = try expr_mod.parse(testing.allocator, "$ITER + $TASK_IDX");
+    defer expr_obj.deinit(testing.allocator);
+    var empty_slots = std.StringArrayHashMap(void).init(testing.allocator);
+    defer empty_slots.deinit();
+    try expr_obj.bindVariables(&empty_slots);
+    try testing.expectApproxEqAbs(@as(f64, 9.0), try expr_obj.eval(ctx.varResolver()), 1e-9);
 }
 
 test "Context stores run start state separately from iteration state" {
     const testing = std.testing;
 
-    var ctx = Context.init(testing.allocator);
+    var ctx = try Context.init(testing.allocator, 0);
     defer ctx.deinit();
 
     ctx.start_ns = 1234;

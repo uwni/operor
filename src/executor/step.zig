@@ -15,25 +15,22 @@ pub const ParsedValue = union(Driver.Encoding) {
 };
 
 pub const SavedValue = struct {
-    label: []const u8,
+    column: usize,
     value_owned: []u8,
 };
 
 /// Reusable scratch space for step argument resolution, avoiding per-step HashMap allocation.
 pub const StepScratch = struct {
-    values: std.StringHashMap(common.RenderValue),
     temp_arena: std.heap.ArenaAllocator,
 
     pub fn init(allocator: std.mem.Allocator) StepScratch {
         return .{
-            .values = std.StringHashMap(common.RenderValue).init(allocator),
             .temp_arena = std.heap.ArenaAllocator.init(allocator),
         };
     }
 
     pub fn deinit(self: *StepScratch) void {
         self.temp_arena.deinit();
-        self.values.deinit();
     }
 
     fn tempAllocator(self: *StepScratch) std.mem.Allocator {
@@ -43,7 +40,6 @@ pub const StepScratch = struct {
     /// Clears resolved values and reuses retained arena capacity for temporary buffers.
     pub fn reset(self: *StepScratch) void {
         _ = self.temp_arena.reset(.retain_capacity);
-        self.values.clearRetainingCapacity();
     }
 };
 
@@ -103,13 +99,15 @@ fn executeCompute(
         else => return err,
     };
 
-    try ctx.set(comp.save_as, .{ .float = result });
+    try ctx.setSlot(comp.save_slot, .{ .float = result });
+
+    const save_column = comp.save_column orelse return null;
 
     // String for pipeline Frame.
     const value_owned = try std.fmt.allocPrint(allocator, "{d}", .{result});
 
     return .{
-        .label = comp.save_as,
+        .column = save_column,
         .value_owned = value_owned,
     };
 }
@@ -128,28 +126,15 @@ fn executeInstrumentCall(
     const driver_name = cmd.instrument.driver_name;
 
     scratch.reset();
-
-    var arg_it = step.args.iterator();
-    while (arg_it.next()) |entry| {
-        switch (entry.value_ptr.*) {
-            .scalar => |value| {
-                const resolved = try resolveStepScalar(ctx, value);
-                try scratch.values.put(entry.key_ptr.*, .{ .scalar = resolved });
-            },
-            .list => |items| {
-                const alloc = scratch.tempAllocator();
-                const resolved_items = try alloc.alloc(common.Value, items.len);
-                for (items, 0..) |item, idx| {
-                    resolved_items[idx] = try resolveStepScalar(ctx, item);
-                }
-                try scratch.values.put(entry.key_ptr.*, .{ .list = resolved_items });
-            },
-        }
+    const alloc = scratch.tempAllocator();
+    const resolved_args = try alloc.alloc(common.RenderValue, step.args.len);
+    for (step.args, 0..) |arg, idx| {
+        resolved_args[idx] = try resolveStepArg(ctx, arg, alloc);
     }
 
     var render_stack_buf: [command_stack_bytes]u8 = undefined;
     const write_termination = step.command.instrument.write_termination;
-    const rendered = cmd.render(allocator, render_stack_buf[0..], &scratch.values, write_termination) catch |err| switch (err) {
+    const rendered = cmd.render(allocator, render_stack_buf[0..], resolved_args, write_termination) catch |err| switch (err) {
         error.MissingVariable => {
             var warning_buf: [160]u8 = undefined;
             const warning = try std.fmt.bufPrint(warning_buf[0..], "missing template variable for call {s}", .{step.call});
@@ -182,7 +167,7 @@ fn executeInstrumentCall(
             return null;
         };
         errdefer allocator.free(resp);
-        if (step.save_as) |label| {
+        if (step.save_slot) |slot| {
             defer allocator.free(resp);
             const stored = try parseResponse(encoding, resp);
             const value = switch (stored) {
@@ -191,12 +176,13 @@ fn executeInstrumentCall(
                 .int => |v| common.Value{ .int = v },
                 .float => |v| common.Value{ .float = v },
             };
-            try ctx.set(label, value);
+            try ctx.setSlot(slot, value);
 
+            const save_column = step.save_column orelse return null;
             const stored_value_owned = try std.fmt.allocPrint(allocator, "{f}", .{value});
 
             return .{
-                .label = label,
+                .column = save_column,
                 .value_owned = stored_value_owned,
             };
         } else {
@@ -219,20 +205,30 @@ pub fn parseResponse(encoding: Driver.Encoding, resp: []const u8) !ParsedValue {
     };
 }
 
-fn resolveReference(ctx: *const common.Context, key: []const u8) !common.Value {
-    return ctx.get(key) orelse error.MissingArgument;
-}
-
 fn resolveStepScalar(
     ctx: *const common.Context,
-    value: recipe_mod.StepScalar,
+    value: recipe_mod.CompiledArgValue,
 ) !common.Value {
     return switch (value) {
-        .string => |text| .{ .string = text },
-        .int => |number| .{ .int = number },
-        .float => |number| .{ .float = number },
-        .bool => |flag| .{ .bool = flag },
-        .ref => |key| try resolveReference(ctx, key),
+        .const_value => |const_value| const_value,
+        .binding => |binding| ctx.resolveBinding(binding) orelse error.MissingArgument,
+    };
+}
+
+fn resolveStepArg(
+    ctx: *const common.Context,
+    value: recipe_mod.StepArg,
+    allocator: std.mem.Allocator,
+) !common.RenderValue {
+    return switch (value) {
+        .scalar => |scalar| .{ .scalar = try resolveStepScalar(ctx, scalar) },
+        .list => |items| blk: {
+            const resolved = try allocator.alloc(common.Value, items.len);
+            for (items, 0..) |item, idx| {
+                resolved[idx] = try resolveStepScalar(ctx, item);
+            }
+            break :blk .{ .list = resolved };
+        },
     };
 }
 

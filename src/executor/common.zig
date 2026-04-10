@@ -1,7 +1,7 @@
 const std = @import("std");
 const recipe_types = @import("../recipe/types.zig");
 const visa = @import("../visa/root.zig");
-const context_mod = @import("context.zig");
+const context_mod = @import("Context.zig");
 
 /// Runtime options for recipe execution.
 pub const ExecOptions = struct {

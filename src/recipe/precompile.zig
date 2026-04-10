@@ -11,6 +11,8 @@ const visa = @import("../visa/root.zig");
 
 const max_recipe_size: usize = 512 * 1024;
 
+const VarsMap = std.StringArrayHashMap(config.ArgScalarDoc);
+
 pub fn precompilePath(
     allocator: std.mem.Allocator,
     recipe_path: []const u8,
@@ -70,21 +72,31 @@ fn precompileInternal(
     errdefer arena.deinit();
     const alloc = arena.allocator();
 
-    var loaded_drivers = std.StringHashMap(Driver).init(allocator);
-    defer deinitLoadedDrivers(allocator, &loaded_drivers);
+    var driver_arena = std.heap.ArenaAllocator.init(allocator);
+    defer driver_arena.deinit();
 
-    // 2. Pre-register every instrument and load drivers.
-    var precompiled_instruments = try precompileInstruments(allocator, alloc, recipe, driver_reg, &loaded_drivers, precompile_diagnostic);
+    const vars: VarsMap = recipe.vars orelse VarsMap.init(alloc);
+    const initial_values = try buildInitialValues(alloc, &vars);
+
+    // 2. Eagerly load every referenced driver.
+    var loaded_drivers = try loadDrivers(driver_arena.allocator(), recipe, driver_reg, precompile_diagnostic);
+    defer {
+        var it = loaded_drivers.valueIterator();
+        while (it.next()) |driver| driver.deinit();
+    }
+
+    // 3. Compile instrument metadata from loaded drivers.
+    var precompiled_instruments = try precompileInstruments(alloc, recipe, &loaded_drivers);
 
     // 3-5. Normalize tasks and steps, resolving commands and validating arguments.
     var save_as_set = std.StringArrayHashMap(void).init(alloc);
-    const tasks = try precompileTasks(alloc, recipe, &loaded_drivers, &precompiled_instruments, &save_as_set, precompile_diagnostic);
+    const tasks = try precompileTasks(alloc, recipe, &vars, &loaded_drivers, &precompiled_instruments, &save_as_set, precompile_diagnostic);
 
     // 6. Validate and resolve pipeline record configuration.
-    const pipeline = try resolvePipelineConfig(alloc, recipe, &save_as_set, precompile_diagnostic);
+    const pipeline = try resolvePipelineConfig(alloc, recipe, &vars, &save_as_set, precompile_diagnostic);
 
-    // 7. Parse initial variables if any.
-    const initial_vars = try parseInitialVars(alloc, recipe);
+    // 7. Assign save_column indices to steps that contribute to recorded frames.
+    assignSaveColumns(tasks, &vars, pipeline.record.?.explicit);
 
     // 8. Return the fully validated arena-owned recipe consumed by preview and execution.
     const stop_when = try parseStopWhen(recipe.stop_when);
@@ -95,54 +107,61 @@ fn precompileInternal(
         .pipeline = pipeline,
         .stop_when = stop_when,
         .expected_iterations = calculateExpectedIterations(tasks, stop_when),
-        .initial_vars = initial_vars,
+        .initial_values = initial_values,
     };
 }
 
-fn precompileInstruments(
+fn loadDrivers(
     allocator: std.mem.Allocator,
-    arena_alloc: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
     driver_reg: *DriverRegistry,
-    loaded_drivers: *std.StringHashMap(Driver),
     precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
-) !std.StringHashMap(types.PrecompiledInstrument) {
-    var precompiled_instruments = std.StringHashMap(types.PrecompiledInstrument).init(arena_alloc);
+) !std.StringHashMap(Driver) {
+    var map = std.StringHashMap(Driver).init(allocator);
+    var instrument_it = recipe.instruments.iterator();
+    while (instrument_it.next()) |entry| {
+        const cfg = entry.value_ptr.*;
+        _ = getOrParseDriver(allocator, &map, driver_reg, cfg.driver) catch |err| {
+            captureDiagnostic(precompile_diagnostic, .{
+                .instrument_name = entry.key_ptr.*,
+                .driver_name = cfg.driver,
+            });
+            return err;
+        };
+    }
+    return map;
+}
+
+fn precompileInstruments(
+    alloc: std.mem.Allocator,
+    recipe: *const config.RecipeConfig,
+    loaded_drivers: *const std.StringHashMap(Driver),
+) !std.StringArrayHashMap(types.PrecompiledInstrument) {
+    var precompiled_instruments = std.StringArrayHashMap(types.PrecompiledInstrument).init(alloc);
     try precompiled_instruments.ensureTotalCapacity(recipe.instruments.count());
 
     var instrument_it = recipe.instruments.iterator();
-    var next_instrument_idx: usize = 0;
     while (instrument_it.next()) |entry| {
         const instrument_name = entry.key_ptr.*;
         const instrument_cfg = entry.value_ptr.*;
+        const driver = loaded_drivers.getPtr(instrument_cfg.driver).?;
 
-        const diag_ctx = diagnostic.DiagnosticContext{
-            .instrument_name = instrument_name,
-            .driver_name = instrument_cfg.driver,
-        };
-        const driver = getOrParseDriver(allocator, loaded_drivers, driver_reg, instrument_cfg.driver) catch |err| {
-            captureDiagnostic(precompile_diagnostic, diag_ctx);
-            return err;
-        };
-
-        const name_copy = try arena_alloc.dupe(u8, instrument_name);
-        const driver_copy = try arena_alloc.dupe(u8, instrument_cfg.driver);
-        const resource_copy = try arena_alloc.dupe(u8, instrument_cfg.resource);
-        const write_termination = try cloneOptionalBytes(arena_alloc, driver.write_termination);
+        const name_copy = try alloc.dupe(u8, instrument_name);
+        const driver_copy = try alloc.dupe(u8, instrument_cfg.driver);
+        const resource_copy = try alloc.dupe(u8, instrument_cfg.resource);
+        const write_termination = try cloneOptionalBytes(alloc, driver.write_termination);
         try precompiled_instruments.put(name_copy, .{
-            .instrument_idx = next_instrument_idx,
             .driver_name = driver_copy,
             .resource = resource_copy,
-            .commands = std.StringHashMap(*const types.PrecompiledCommand).init(arena_alloc),
+            .commands = std.StringHashMap(*const types.PrecompiledCommand).init(alloc),
             .write_termination = write_termination,
             .options = .{
                 .timeout_ms = driver.options.timeout_ms,
-                .read_termination = try cloneOptionalBytes(arena_alloc, driver.options.read_termination),
+                .read_termination = try cloneOptionalBytes(alloc, driver.options.read_termination),
                 .query_delay_ms = driver.options.query_delay_ms,
                 .chunk_size = driver.options.chunk_size,
             },
         });
-        next_instrument_idx += 1;
     }
     return precompiled_instruments;
 }
@@ -150,8 +169,9 @@ fn precompileInstruments(
 fn precompileTasks(
     arena_alloc: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
+    vars: *const VarsMap,
     loaded_drivers: *const std.StringHashMap(Driver),
-    precompiled_instruments: *std.StringHashMap(types.PrecompiledInstrument),
+    precompiled_instruments: *std.StringArrayHashMap(types.PrecompiledInstrument),
     save_as_set: *std.StringArrayHashMap(void),
     precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
 ) ![]types.Task {
@@ -167,7 +187,7 @@ fn precompileTasks(
             steps[step_idx] = switch (step_cfg.*) {
                 .compute => |*cfg| try precompileComputeStep(
                     arena_alloc,
-                    recipe,
+                    vars,
                     save_as_set,
                     cfg,
                     task_idx,
@@ -176,7 +196,7 @@ fn precompileTasks(
                 ),
                 .call => |*cfg| try precompileCallStep(
                     arena_alloc,
-                    recipe,
+                    vars,
                     loaded_drivers,
                     precompiled_instruments,
                     save_as_set,
@@ -194,7 +214,7 @@ fn precompileTasks(
 
 fn precompileComputeStep(
     arena_alloc: std.mem.Allocator,
-    recipe: *const config.RecipeConfig,
+    vars: *const VarsMap,
     save_as_set: *std.StringArrayHashMap(void),
     cfg: *const config.ComputeStepConfig,
     task_idx: usize,
@@ -207,23 +227,20 @@ fn precompileComputeStep(
     };
     errdefer captureDiagnostic(precompile_diagnostic, diag_ctx);
 
-    const when_expr = try precompileWhen(arena_alloc, recipe, cfg.when);
+    const when_expr = try precompileWhen(arena_alloc, vars, cfg.when);
 
     const save_as = cfg.save_as;
-    if (!isDeclared(recipe.vars, save_as)) return error.UndeclaredVariable;
+    const save_slot = vars.getIndex(save_as) orelse return error.UndeclaredVariable;
     const save_as_copy = try arena_alloc.dupe(u8, save_as);
     try save_as_set.put(save_as_copy, {});
 
-    const compute_expr = try expr.parse(arena_alloc, cfg.compute);
-    var it = compute_expr.variables();
-    while (it.next()) |name| {
-        if (!isDeclared(recipe.vars, name)) return error.UndeclaredVariable;
-    }
+    var compute_expr = try expr.parse(arena_alloc, cfg.compute);
+    try compute_expr.bindVariables(vars);
 
     return .{
         .action = .{ .compute = .{
             .expression = compute_expr,
-            .save_as = save_as_copy,
+            .save_slot = save_slot,
         } },
         .when = when_expr,
     };
@@ -231,9 +248,9 @@ fn precompileComputeStep(
 
 fn precompileCallStep(
     arena_alloc: std.mem.Allocator,
-    recipe: *const config.RecipeConfig,
+    vars: *const VarsMap,
     loaded_drivers: *const std.StringHashMap(Driver),
-    precompiled_instruments: *std.StringHashMap(types.PrecompiledInstrument),
+    precompiled_instruments: *std.StringArrayHashMap(types.PrecompiledInstrument),
     save_as_set: *std.StringArrayHashMap(void),
     cfg: *const config.CallStepConfig,
     task_idx: usize,
@@ -249,7 +266,7 @@ fn precompileCallStep(
     };
     errdefer captureDiagnostic(precompile_diagnostic, diag_ctx);
 
-    const when_expr = try precompileWhen(arena_alloc, recipe, cfg.when);
+    const when_expr = try precompileWhen(arena_alloc, vars, cfg.when);
 
     const precompiled_instrument = precompiled_instruments.getPtr(instrument_name) orelse return error.InstrumentNotFound;
 
@@ -259,33 +276,23 @@ fn precompileCallStep(
 
     const call_copy = try arena_alloc.dupe(u8, cfg.call);
     const instrument_copy = try arena_alloc.dupe(u8, instrument_name);
-    var args_map = std.StringHashMap(types.StepArg).init(arena_alloc);
-    if (cfg.args) |args| {
-        var it = args.iterator();
-        while (it.next()) |entry| {
-            diag_ctx.argument_name = entry.key_ptr.*;
-            const value_copy = try cloneAndValidateArg(arena_alloc, entry.value_ptr.*, recipe.vars);
-            const key_copy = try arena_alloc.dupe(u8, entry.key_ptr.*);
-            try args_map.put(key_copy, value_copy);
-        }
-    }
-    diag_ctx.argument_name = null;
-    try validateStepArgs(command, &args_map, &diag_ctx);
+    const compiled_args = try compileStepArgs(arena_alloc, command, cfg.args, vars, &diag_ctx);
 
-    const save_as_copy = if (cfg.save_as) |label| blk: {
-        if (!isDeclared(recipe.vars, label)) return error.UndeclaredVariable;
+    var save_slot: ?usize = null;
+    if (cfg.save_as) |label| {
+        save_slot = vars.getIndex(label) orelse return error.UndeclaredVariable;
         const duped = try arena_alloc.dupe(u8, label);
         try save_as_set.put(duped, {});
-        break :blk duped;
-    } else null;
+    }
 
     return .{
         .action = .{ .instrument_call = .{
             .call = call_copy,
             .instrument = instrument_copy,
+            .instrument_idx = precompiled_instruments.getIndex(instrument_name).?,
             .command = command,
-            .args = args_map,
-            .save_as = save_as_copy,
+            .args = compiled_args,
+            .save_slot = save_slot,
         } },
         .when = when_expr,
     };
@@ -293,16 +300,14 @@ fn precompileCallStep(
 
 fn precompileWhen(
     arena_alloc: std.mem.Allocator,
-    recipe: *const config.RecipeConfig,
+    vars: *const VarsMap,
     when_src_opt: ?[]const u8,
 ) !?expr.Expression {
     if (when_src_opt) |when_src| {
         const e = try expr.parse(arena_alloc, when_src);
-        var it = e.variables();
-        while (it.next()) |name| {
-            if (!isDeclared(recipe.vars, name)) return error.UndeclaredVariable;
-        }
-        return e;
+        var bound = e;
+        try bound.bindVariables(vars);
+        return bound;
     }
     return null;
 }
@@ -310,6 +315,7 @@ fn precompileWhen(
 fn resolvePipelineConfig(
     arena_alloc: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
+    vars: *const VarsMap,
     save_as_set: *const std.StringArrayHashMap(void),
     precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
 ) !types.PipelineConfig {
@@ -322,7 +328,7 @@ fn resolvePipelineConfig(
         },
         .explicit => |columns| {
             for (columns) |name| {
-                if (!isDeclared(recipe.vars, name)) {
+                if (bindingForName(vars, name) == null) {
                     captureDiagnostic(precompile_diagnostic, .{});
                     return error.UndeclaredVariable;
                 }
@@ -336,21 +342,27 @@ fn resolvePipelineConfig(
     return pipeline;
 }
 
-fn parseInitialVars(
-    arena_alloc: std.mem.Allocator,
-    recipe: *const config.RecipeConfig,
-) !std.StringHashMap(types.StepScalar) {
-    var initial_vars = std.StringHashMap(types.StepScalar).init(arena_alloc);
-    if (recipe.vars) |vars| {
-        try initial_vars.ensureTotalCapacity(vars.count());
-        var var_it = vars.iterator();
-        while (var_it.next()) |entry| {
-            const key = try arena_alloc.dupe(u8, entry.key_ptr.*);
-            const value = try cloneInitialVar(arena_alloc, entry.value_ptr.*);
-            try initial_vars.put(key, value);
+fn assignSaveColumns(tasks: []types.Task, vars: *const VarsMap, columns: []const []const u8) void {
+    for (tasks) |*task| {
+        for (task.steps) |*step| {
+            switch (step.action) {
+                .instrument_call => |*ic| {
+                    ic.save_column = if (ic.save_slot) |slot| slotToColumn(vars, slot, columns) else null;
+                },
+                .compute => |*comp| {
+                    comp.save_column = slotToColumn(vars, comp.save_slot, columns);
+                },
+            }
         }
     }
-    return initial_vars;
+}
+
+fn slotToColumn(vars: *const VarsMap, save_slot: usize, columns: []const []const u8) ?usize {
+    const name = vars.keys()[save_slot];
+    for (columns, 0..) |col_name, col_idx| {
+        if (std.mem.eql(u8, col_name, name)) return col_idx;
+    }
+    return null;
 }
 
 /// Estimates the total number of task executions based on stop conditions.
@@ -375,15 +387,6 @@ fn captureDiagnostic(
     }
 }
 
-fn deinitLoadedDrivers(allocator: std.mem.Allocator, loaded_drivers: *std.StringHashMap(Driver)) void {
-    var it = loaded_drivers.iterator();
-    while (it.next()) |entry| {
-        allocator.free(entry.key_ptr.*);
-        entry.value_ptr.deinit();
-    }
-    loaded_drivers.deinit();
-}
-
 fn cloneOptionalBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     if (bytes.len == 0) return "";
     return allocator.dupe(u8, bytes);
@@ -398,7 +401,6 @@ fn getOrParseDriver(
     if (loaded_drivers.getPtr(driver_name)) |loaded| return loaded;
 
     const key = try allocator.dupe(u8, driver_name);
-    errdefer allocator.free(key);
 
     var loaded = driver_reg.parseDriverByName(allocator, driver_name) catch |err| switch (err) {
         error.DriverNotFound => blk: {
@@ -432,44 +434,81 @@ fn getOrCompileCommand(
     return compiled;
 }
 
+fn buildInitialValues(
+    arena_alloc: std.mem.Allocator,
+    vars: *const VarsMap,
+) ![]const ?types.Value {
+    const initial_values = try arena_alloc.alloc(?types.Value, vars.count());
+    for (vars.values(), 0..) |value, idx| {
+        initial_values[idx] = try compileInitialValue(arena_alloc, value);
+    }
+    return initial_values;
+}
+
 fn compileCommand(
     allocator: std.mem.Allocator,
     source: Driver.Command,
     instrument: *const types.PrecompiledInstrument,
 ) !types.PrecompiledCommand {
-    const command = try source.clone(allocator);
-    const placeholders = try command.placeholderNames(allocator);
+    var arg_names = std.ArrayList([]const u8).empty;
+    const segments = try allocator.alloc(types.CompiledSegment, source.template.len);
+
+    for (source.template, 0..) |segment, idx| {
+        segments[idx] = switch (segment) {
+            .literal => |literal| .{ .literal = try allocator.dupe(u8, literal) },
+            .placeholder => |placeholder| .{ .arg = blk: {
+                if (findArgIndex(arg_names.items, placeholder.name)) |arg_idx| break :blk arg_idx;
+                const name_copy = try allocator.dupe(u8, placeholder.name);
+                try arg_names.append(allocator, name_copy);
+                break :blk arg_names.items.len - 1;
+            } },
+        };
+    }
 
     return .{
         .instrument = instrument,
-        .response = command.response,
-        .template = command.template,
-        .placeholders = placeholders,
+        .response = source.response,
+        .segments = segments,
+        .arg_names = try arg_names.toOwnedSlice(allocator),
     };
 }
 
-fn validateStepArgs(
+fn compileStepArgs(
+    allocator: std.mem.Allocator,
     command: *const types.PrecompiledCommand,
-    args_map: *const std.StringHashMap(types.StepArg),
+    doc_args: ?std.StringHashMap(config.ArgValueDoc),
+    vars: *const VarsMap,
     diag_ctx: *diagnostic.DiagnosticContext,
-) !void {
-    for (command.placeholders) |placeholder| {
-        if (!args_map.contains(placeholder)) {
-            diag_ctx.argument_name = placeholder;
+) ![]types.StepArg {
+    const args = try allocator.alloc(types.StepArg, command.arg_names.len);
+
+    for (command.arg_names, 0..) |arg_name, idx| {
+        const doc_arg = if (doc_args) |map|
+            map.get(arg_name) orelse {
+                diag_ctx.argument_name = arg_name;
+                return error.MissingCommandArgument;
+            }
+        else {
+            diag_ctx.argument_name = arg_name;
             return error.MissingCommandArgument;
+        };
+        args[idx] = try compileArg(allocator, doc_arg, vars);
+    }
+
+    if (doc_args) |map| {
+        var it = map.iterator();
+        while (it.next()) |entry| {
+            if (!command.hasPlaceholder(entry.key_ptr.*)) {
+                diag_ctx.argument_name = entry.key_ptr.*;
+                return error.UnexpectedCommandArgument;
+            }
         }
     }
 
-    var it = args_map.iterator();
-    while (it.next()) |entry| {
-        if (!command.hasPlaceholder(entry.key_ptr.*)) {
-            diag_ctx.argument_name = entry.key_ptr.*;
-            return error.UnexpectedCommandArgument;
-        }
-    }
+    return args;
 }
 
-fn cloneInitialVar(allocator: std.mem.Allocator, value: config.ArgScalarDoc) !types.StepScalar {
+fn compileInitialValue(allocator: std.mem.Allocator, value: config.ArgScalarDoc) !types.Value {
     return switch (value) {
         .string => |text| .{ .string = try allocator.dupe(u8, text) },
         .int => |number| .{ .int = number },
@@ -548,48 +587,54 @@ fn parseDurationMs(input: []const u8) !u64 {
     return error.InvalidDuration;
 }
 
-fn isDeclared(vars: ?std.StringHashMap(config.ArgScalarDoc), name: []const u8) bool {
-    // Built-in variables are always allowed.
-    if (std.mem.eql(u8, name, "$ITER")) return true;
-    if (std.mem.eql(u8, name, "$TASK_IDX")) return true;
-    if (vars) |v| return v.contains(name);
-    return false;
+fn bindingForName(vars: *const VarsMap, name: []const u8) ?expr.VariableBinding {
+    if (std.mem.eql(u8, name, "$ITER")) return .{ .builtin = .iter };
+    if (std.mem.eql(u8, name, "$TASK_IDX")) return .{ .builtin = .task_idx };
+    const slot = vars.getIndex(name) orelse return null;
+    return .{ .slot = slot };
 }
 
-fn cloneAndValidateArg(
+fn compileArg(
     allocator: std.mem.Allocator,
     doc_arg: config.ArgValueDoc,
-    vars: ?std.StringHashMap(config.ArgScalarDoc),
+    vars: *const VarsMap,
 ) !types.StepArg {
     return switch (doc_arg) {
-        .scalar => |scalar| .{ .scalar = try cloneAndValidateArgScalar(allocator, scalar, vars) },
+        .scalar => |scalar| .{ .scalar = try compileArgScalar(allocator, scalar, vars) },
         .list => |items| blk: {
-            const out = try allocator.alloc(types.StepScalar, items.len);
+            const out = try allocator.alloc(types.CompiledArgValue, items.len);
             for (items, 0..) |item, idx| {
-                out[idx] = try cloneAndValidateArgScalar(allocator, item, vars);
+                out[idx] = try compileArgScalar(allocator, item, vars);
             }
             break :blk .{ .list = out };
         },
     };
 }
 
-fn cloneAndValidateArgScalar(
+fn compileArgScalar(
     allocator: std.mem.Allocator,
     value: config.ArgScalarDoc,
-    vars: ?std.StringHashMap(config.ArgScalarDoc),
-) !types.StepScalar {
+    vars: *const VarsMap,
+) !types.CompiledArgValue {
     return switch (value) {
         .string => |text| blk: {
             if (referenceName(text)) |name| {
-                if (!isDeclared(vars, name)) return error.UndeclaredVariable;
-                break :blk .{ .ref = try allocator.dupe(u8, name) };
+                const binding = bindingForName(vars, name) orelse return error.UndeclaredVariable;
+                break :blk .{ .binding = binding };
             }
-            break :blk .{ .string = try allocator.dupe(u8, text) };
+            break :blk .{ .const_value = .{ .string = try allocator.dupe(u8, text) } };
         },
-        .int => |number| .{ .int = number },
-        .float => |number| .{ .float = number },
-        .bool => |flag| .{ .bool = flag },
+        .int => |number| .{ .const_value = .{ .int = number } },
+        .float => |number| .{ .const_value = .{ .float = number } },
+        .bool => |flag| .{ .const_value = .{ .bool = flag } },
     };
+}
+
+fn findArgIndex(arg_names: []const []const u8, name: []const u8) ?usize {
+    for (arg_names, 0..) |arg_name, idx| {
+        if (std.mem.eql(u8, arg_name, name)) return idx;
+    }
+    return null;
 }
 
 fn referenceName(text: []const u8) ?[]const u8 {
@@ -663,14 +708,13 @@ test "load recipe and drivers" {
     const instrument = compiled.instruments.getPtr("d1") orelse return error.TestUnexpectedResult;
     try std.testing.expect(std.mem.eql(u8, instrument.resource, "USB0::1::INSTR"));
     try std.testing.expect(std.mem.eql(u8, instrument.driver_name, "psu"));
-    try std.testing.expectEqual(@as(usize, 0), instrument.instrument_idx);
     try std.testing.expectEqual(@as(usize, 1), instrument.commands.count());
 
     const command = instrument.commands.get("set") orelse return error.TestUnexpectedResult;
     try std.testing.expect(command.instrument == instrument);
     try std.testing.expect(command.response == null);
-    try std.testing.expectEqual(@as(usize, 1), command.placeholders.len);
-    try std.testing.expect(std.mem.eql(u8, command.placeholders[0], "voltage"));
+    try std.testing.expectEqual(@as(usize, 1), command.arg_names.len);
+    try std.testing.expect(std.mem.eql(u8, command.arg_names[0], "voltage"));
 
     try std.testing.expectEqual(@as(usize, 1), compiled.tasks.len);
     try std.testing.expectEqual(@as(u64, 100), compiled.tasks[0].every_ms);
@@ -679,10 +723,13 @@ test "load recipe and drivers" {
     try std.testing.expect(std.mem.eql(u8, step0.call, "set"));
     try std.testing.expect(step0.command == command);
 
-    const voltage = step0.args.get("voltage") orelse return error.TestUnexpectedResult;
+    const voltage = step0.args[command.argIndex("voltage").?];
     switch (voltage) {
         .scalar => |value| switch (value) {
-            .string => |text| try std.testing.expectEqualStrings("5", text),
+            .const_value => |text| switch (text) {
+                .string => |s| try std.testing.expectEqualStrings("5", s),
+                else => return error.TestUnexpectedResult,
+            },
             else => return error.TestUnexpectedResult,
         },
         .list => return error.TestUnexpectedResult,
@@ -755,10 +802,14 @@ test "parse durations and stop conditions" {
 
     try std.testing.expectEqual(@as(u64, 250), compiled.tasks[0].every_ms);
 
-    const voltage = compiled.tasks[0].steps[0].action.instrument_call.args.get("voltage") orelse return error.TestUnexpectedResult;
+    const step_args = compiled.tasks[0].steps[0].action.instrument_call;
+    const voltage = step_args.args[step_args.command.argIndex("voltage").?];
     switch (voltage) {
         .scalar => |value| switch (value) {
-            .string => |text| try std.testing.expectEqualStrings("5", text),
+            .const_value => |text| switch (text) {
+                .string => |s| try std.testing.expectEqualStrings("5", s),
+                else => return error.TestUnexpectedResult,
+            },
             else => return error.TestUnexpectedResult,
         },
         .list => return error.TestUnexpectedResult,
@@ -799,11 +850,25 @@ test "precompile preserves initial variables" {
     var compiled = try precompilePath(gpa, recipe_path, &registry);
     defer compiled.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), compiled.initial_vars.count());
-    const v_set = compiled.initial_vars.get("v_set").?;
-    try std.testing.expectEqual(@as(f64, 1.0), v_set.float);
-    const name = compiled.initial_vars.get("name").?;
-    try std.testing.expectEqualStrings("scan", name.string);
+    try std.testing.expectEqual(@as(usize, 2), compiled.initial_values.len);
+    var found_float = false;
+    var found_string = false;
+    for (compiled.initial_values) |val_opt| {
+        const val = val_opt orelse continue;
+        switch (val) {
+            .float => |number| {
+                try std.testing.expectEqual(@as(f64, 1.0), number);
+                found_float = true;
+            },
+            .string => |text| {
+                try std.testing.expectEqualStrings("scan", text);
+                found_string = true;
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    try std.testing.expect(found_float);
+    try std.testing.expect(found_string);
 }
 
 test "precompile estimates iterations for run-once recipes" {
@@ -949,53 +1014,73 @@ test "precompile preserves typed literal step arguments" {
 
     const args = compiled.tasks[0].steps[0].action.instrument_call.args;
 
-    const count = args.get("count") orelse return error.TestUnexpectedResult;
+    const command = compiled.tasks[0].steps[0].action.instrument_call.command;
+
+    const count = args[command.argIndex("count").?];
     switch (count) {
         .scalar => |value| switch (value) {
-            .int => |number| try std.testing.expectEqual(@as(i64, 5), number),
+            .const_value => |number| switch (number) {
+                .int => |n| try std.testing.expectEqual(@as(i64, 5), n),
+                else => return error.TestUnexpectedResult,
+            },
             else => return error.TestUnexpectedResult,
         },
         .list => return error.TestUnexpectedResult,
     }
 
-    const voltage = args.get("voltage") orelse return error.TestUnexpectedResult;
+    const voltage = args[command.argIndex("voltage").?];
     switch (voltage) {
         .scalar => |value| switch (value) {
-            .float => |number| try std.testing.expectApproxEqAbs(@as(f64, 1.25), number, 1e-9),
+            .const_value => |number| switch (number) {
+                .float => |n| try std.testing.expectApproxEqAbs(@as(f64, 1.25), n, 1e-9),
+                else => return error.TestUnexpectedResult,
+            },
             else => return error.TestUnexpectedResult,
         },
         .list => return error.TestUnexpectedResult,
     }
 
-    const enabled = args.get("enabled") orelse return error.TestUnexpectedResult;
+    const enabled = args[command.argIndex("enabled").?];
     switch (enabled) {
         .scalar => |value| switch (value) {
-            .bool => |flag| try std.testing.expect(flag),
+            .const_value => |flag| switch (flag) {
+                .bool => |b| try std.testing.expect(b),
+                else => return error.TestUnexpectedResult,
+            },
             else => return error.TestUnexpectedResult,
         },
         .list => return error.TestUnexpectedResult,
     }
 
-    const channels = args.get("channels") orelse return error.TestUnexpectedResult;
+    const channels = args[command.argIndex("channels").?];
     switch (channels) {
         .scalar => return error.TestUnexpectedResult,
         .list => |items| {
             try std.testing.expectEqual(@as(usize, 2), items.len);
             switch (items[0]) {
-                .int => |number| try std.testing.expectEqual(@as(i64, 1), number),
+                .const_value => |number| switch (number) {
+                    .int => |n| try std.testing.expectEqual(@as(i64, 1), n),
+                    else => return error.TestUnexpectedResult,
+                },
                 else => return error.TestUnexpectedResult,
             }
             switch (items[1]) {
-                .int => |number| try std.testing.expectEqual(@as(i64, 2), number),
+                .const_value => |number| switch (number) {
+                    .int => |n| try std.testing.expectEqual(@as(i64, 2), n),
+                    else => return error.TestUnexpectedResult,
+                },
                 else => return error.TestUnexpectedResult,
             }
         },
     }
 
-    const mirror = args.get("mirror") orelse return error.TestUnexpectedResult;
+    const mirror = args[command.argIndex("mirror").?];
     switch (mirror) {
         .scalar => |value| switch (value) {
-            .ref => |name| try std.testing.expectEqualStrings("target", name),
+            .binding => |binding| switch (binding) {
+                .slot => |slot| try std.testing.expect(slot < compiled.initial_values.len),
+                .builtin => return error.TestUnexpectedResult,
+            },
             else => return error.TestUnexpectedResult,
         },
         .list => return error.TestUnexpectedResult,
@@ -1212,7 +1297,6 @@ test "precompiled command renders via helper" {
     defer source.deinit(gpa);
 
     var instrument = types.PrecompiledInstrument{
-        .instrument_idx = 0,
         .driver_name = "psu",
         .resource = "USB0::1::INSTR",
         .commands = std.StringHashMap(*const types.PrecompiledCommand).init(gpa),
@@ -1225,13 +1309,15 @@ test "precompiled command renders via helper" {
     defer compiled.deinit(gpa);
 
     try std.testing.expect(compiled.instrument == &instrument);
+    try std.testing.expectEqual(@as(usize, 1), compiled.arg_names.len);
+    try std.testing.expectEqualStrings("voltage", compiled.arg_names[0]);
 
-    var values = std.StringHashMap([]const u8).init(gpa);
-    defer values.deinit();
-    try values.put("voltage", "3.3");
+    const args = [_]types.RenderValue{
+        .{ .scalar = .{ .float = 3.3 } },
+    };
 
     var stack_buf: [32]u8 = undefined;
-    const rendered = try compiled.render(gpa, stack_buf[0..], &values, instrument.write_termination);
+    const rendered = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination);
     defer rendered.deinit(gpa);
 
     try std.testing.expectEqualStrings("VOLT 3.3\n", rendered.bytes);
@@ -1245,7 +1331,6 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     defer source.deinit(gpa);
 
     var instrument = types.PrecompiledInstrument{
-        .instrument_idx = 0,
         .driver_name = "psu",
         .resource = "USB0::1::INSTR",
         .commands = std.StringHashMap(*const types.PrecompiledCommand).init(gpa),
@@ -1257,12 +1342,12 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     const compiled = try compileCommand(gpa, source, &instrument);
     defer compiled.deinit(gpa);
 
-    var values = std.StringHashMap([]const u8).init(gpa);
-    defer values.deinit();
-    try values.put("voltage", "1234567890");
+    const args = [_]types.RenderValue{
+        .{ .scalar = .{ .string = "1234567890" } },
+    };
 
     var stack_buf: [8]u8 = undefined;
-    const rendered = try compiled.render(gpa, stack_buf[0..], &values, instrument.write_termination);
+    const rendered = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination);
     defer rendered.deinit(gpa);
 
     try std.testing.expect(rendered.owned != null);
@@ -1390,7 +1475,9 @@ test "precompile compute step" {
 
     // Second step: compute
     switch (compiled.tasks[0].steps[1].action) {
-        .compute => |comp| try std.testing.expectEqualStrings("doubled", comp.save_as),
+        .compute => |comp| {
+            try std.testing.expect(comp.save_column != null);
+        },
         .instrument_call => return error.TestUnexpectedResult,
     }
 }

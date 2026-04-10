@@ -73,6 +73,11 @@ pub fn runTasks(
     var scratch = step_mod.StepScratch.init(allocator);
     defer scratch.deinit();
 
+    const column_count = if (compiled_recipe.pipeline.record) |rec| switch (rec) {
+        .explicit => |cols| cols.len,
+        .all => 0,
+    } else 0;
+
     while (true) {
         if (stop_requested.load(.seq_cst)) break;
         const now = std.time.nanoTimestamp();
@@ -94,7 +99,7 @@ pub fn runTasks(
             std.Thread.sleep(delta_ns);
         }
 
-        try runTask(allocator, compiled_recipe, best_idx, task_runs[best_idx], instruments, ctx, pipeline_runtime, opts.dry_run, &scratch);
+        try runTask(allocator, compiled_recipe, best_idx, task_runs[best_idx], instruments, ctx, pipeline_runtime, opts.dry_run, &scratch, column_count);
         next_due[best_idx] += @as(i128, compiled_recipe.tasks[best_idx].every_ms) * 1_000_000;
 
         task_runs[best_idx] += 1;
@@ -118,9 +123,10 @@ fn runTask(
     pipeline_runtime: *pipeline_mod.Runtime,
     dry_run: bool,
     scratch: *step_mod.StepScratch,
+    column_count: usize,
 ) !void {
     const task = compiled_recipe.tasks[task_idx];
-    var frame_builder = TaskFrameBuilder.init(allocator, task_idx);
+    var frame_builder = try TaskFrameBuilder.init(allocator, task_idx, column_count);
     defer frame_builder.deinit();
 
     ctx.task_idx = task_idx;
@@ -128,7 +134,7 @@ fn runTask(
 
     for (task.steps) |*step| {
         const instrument: ?*common.InstrumentRuntime = switch (step.action) {
-            .instrument_call => |ic| &instruments[ic.command.instrument.instrument_idx],
+            .instrument_call => |ic| &instruments[ic.instrument_idx],
             .compute => null,
         };
         const saved_value = try step_mod.executeStep(
@@ -141,121 +147,112 @@ fn runTask(
             scratch,
         );
         if (saved_value) |captured| {
-            // Ownership of the saved value transfers to the frame on success.
-            // Do not release it here.
-            try frame_builder.captureOwned(captured.label, captured.value_owned);
+            frame_builder.captureOwned(captured.column, captured.value_owned);
         }
     }
 
-    if (try frame_builder.finish(std.time.nanoTimestamp())) |frame| {
+    if (frame_builder.finish(std.time.nanoTimestamp())) |frame| {
         var owned_frame = frame;
         if (!pipeline_runtime.publish(&owned_frame)) {
             stop_requested.store(true, .seq_cst);
             return;
         }
-        std.debug.assert(owned_frame.fields_owned == null);
+        std.debug.assert(owned_frame.values_owned == null);
     }
 }
 
 const TaskFrameBuilder = struct {
     allocator: std.mem.Allocator,
     task_idx: usize,
-    fields: std.ArrayList(pipeline_mod.FrameField) = .empty,
+    values: []?[]u8,
+    has_values: bool = false,
 
-    fn init(allocator: std.mem.Allocator, task_idx: usize) TaskFrameBuilder {
+    fn init(allocator: std.mem.Allocator, task_idx: usize, column_count: usize) !TaskFrameBuilder {
+        const values = try allocator.alloc(?[]u8, column_count);
+        @memset(values, null);
         return .{
             .allocator = allocator,
             .task_idx = task_idx,
+            .values = values,
         };
     }
 
     fn deinit(self: *TaskFrameBuilder) void {
-        for (self.fields.items) |*field| field.deinit(self.allocator);
-        self.fields.deinit(self.allocator);
+        for (self.values) |v| if (v) |owned| self.allocator.free(owned);
+        self.allocator.free(self.values);
     }
 
-    fn capture(self: *TaskFrameBuilder, name: []const u8, value: []const u8) !void {
-        const owned = try self.allocator.dupe(u8, value);
-        errdefer self.allocator.free(owned);
-        try self.captureOwned(name, owned);
+    fn captureOwned(self: *TaskFrameBuilder, column: usize, value_owned: []u8) void {
+        if (self.values[column]) |old| self.allocator.free(old);
+        self.values[column] = value_owned;
+        self.has_values = true;
     }
 
-    fn captureOwned(self: *TaskFrameBuilder, name: []const u8, value_owned: []u8) !void {
-        errdefer self.allocator.free(value_owned);
+    fn finish(self: *TaskFrameBuilder, timestamp_ns: i128) ?pipeline_mod.Frame {
+        if (!self.has_values) return null;
 
-        for (self.fields.items) |*field| {
-            if (std.mem.eql(u8, field.name, name)) {
-                self.allocator.free(field.value_owned);
-                field.value_owned = value_owned;
-                return;
-            }
-        }
-
-        try self.fields.append(self.allocator, .{
-            .name = name,
-            .value_owned = value_owned,
-        });
-    }
-
-    fn finish(self: *TaskFrameBuilder, timestamp_ns: i128) !?pipeline_mod.Frame {
-        if (self.fields.items.len == 0) return null;
+        const frame_values = self.values;
+        // Transfer ownership: allocate a fresh slate for builder reuse isn't needed
+        // since the builder is per-iteration. Just null out our pointer.
+        self.values = &.{};
+        self.has_values = false;
 
         return .{
             .timestamp_ns = timestamp_ns,
             .task_idx = self.task_idx,
-            .fields_owned = try self.fields.toOwnedSlice(self.allocator),
+            .values_owned = frame_values,
         };
     }
 };
 
 test "task frame builder groups multiple saved values into one frame" {
-    var builder = TaskFrameBuilder.init(std.testing.allocator, 2);
+    var builder = try TaskFrameBuilder.init(std.testing.allocator, 2, 2);
     defer builder.deinit();
 
-    try builder.capture("voltage", "1.23");
-    try builder.capture("current", "0.45");
+    builder.captureOwned(0, try std.testing.allocator.dupe(u8, "1.23"));
+    builder.captureOwned(1, try std.testing.allocator.dupe(u8, "0.45"));
 
-    var frame = (try builder.finish(123)).?;
+    var frame = builder.finish(123).?;
     defer frame.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(i128, 123), frame.timestamp_ns);
     try std.testing.expectEqual(@as(usize, 2), frame.task_idx);
     try std.testing.expectEqual(@as(usize, 2), frame.fieldCount());
-    try std.testing.expectEqualStrings("1.23", frame.getValue("voltage").?);
-    try std.testing.expectEqualStrings("0.45", frame.getValue("current").?);
+    try std.testing.expectEqualStrings("1.23", frame.getColumn(0).?);
+    try std.testing.expectEqualStrings("0.45", frame.getColumn(1).?);
 }
 
-test "task frame builder keeps the latest value for duplicate labels" {
-    var builder = TaskFrameBuilder.init(std.testing.allocator, 0);
+test "task frame builder keeps the latest value for duplicate columns" {
+    var builder = try TaskFrameBuilder.init(std.testing.allocator, 0, 1);
     defer builder.deinit();
 
-    try builder.capture("voltage", "1.23");
-    try builder.capture("voltage", "1.24");
+    builder.captureOwned(0, try std.testing.allocator.dupe(u8, "1.23"));
+    builder.captureOwned(0, try std.testing.allocator.dupe(u8, "1.24"));
 
-    var frame = (try builder.finish(1)).?;
+    var frame = builder.finish(1).?;
     defer frame.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), frame.fieldCount());
-    try std.testing.expectEqualStrings("1.24", frame.getValue("voltage").?);
+    try std.testing.expectEqualStrings("1.24", frame.getColumn(0).?);
 }
 
 test "task frame builder captures saved value by ownership transfer" {
     const gpa = std.testing.allocator;
 
-    var builder = TaskFrameBuilder.init(gpa, 0);
+    var builder = try TaskFrameBuilder.init(gpa, 0, 1);
     defer builder.deinit();
 
     const saved = step_mod.SavedValue{
-        .label = "voltage",
+        .column = 0,
         .value_owned = try gpa.dupe(u8, "1.23"),
     };
-    try builder.captureOwned(saved.label, saved.value_owned);
+    builder.captureOwned(saved.column, saved.value_owned);
 
-    var frame = (try builder.finish(1)).?;
+    var frame = builder.finish(1).?;
     defer frame.deinit(gpa);
 
     try std.testing.expectEqual(@as(usize, 1), frame.fieldCount());
-    try std.testing.expectEqualStrings("1.23", frame.getValue("voltage").?);
+    try std.testing.expectEqualStrings("1.23", frame.getColumn(0).?);
 }
 
 pub const SamplerState = struct {

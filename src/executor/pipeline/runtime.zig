@@ -55,7 +55,7 @@ pub const Runtime = struct {
         errdefer if (runtime.file_sink) |*sink| sink.deinit();
 
         if (config.network_host) |host| {
-            runtime.network_sink = try sinks.NetworkSink.init(allocator, host, config.network_port.?);
+            runtime.network_sink = try sinks.NetworkSink.init(allocator, host, config.network_port.?, frame_columns);
         }
         errdefer if (runtime.network_sink) |*sink| sink.deinit();
 
@@ -65,7 +65,7 @@ pub const Runtime = struct {
     pub fn deinit(self: *Runtime) void {
         if (self.consumer_thread != null) unreachable;
         if (self.log_thread != null) unreachable;
-        if (self.network_sink) |*sink| sink.deinit();
+        if (self.network_sink) |*sink| sink.deinit(self.allocator);
         if (self.file_sink) |*sink| sink.deinit();
         self.frame_queue.deinit();
         self.log_queue.deinit();
@@ -234,7 +234,7 @@ pub const Runtime = struct {
     fn writeNetworkSink(self: *Runtime, frame: *const types.Frame) !void {
         if (self.network_sink == null) return;
         self.network_sink.?.writeFrame(frame) catch |err| {
-            self.network_sink.?.deinit();
+            self.network_sink.?.deinit(self.allocator);
             self.network_sink = null;
             self.asyncLog().print("[WARN] network sink disabled: {s}\n", .{@errorName(err)});
         };

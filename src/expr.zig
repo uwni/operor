@@ -24,6 +24,21 @@ pub const EvalError = error{
     OutOfMemory,
 };
 
+pub const BuiltinVar = enum {
+    iter,
+    task_idx,
+};
+
+pub const VariableBinding = union(enum) {
+    slot: usize,
+    builtin: BuiltinVar,
+};
+
+pub const VariableRef = union(enum) {
+    name: []const u8,
+    binding: VariableBinding,
+};
+
 /// Pre-parsed expression tree that can be evaluated many times with different variable bindings.
 pub const Expression = struct {
     root: *const Node,
@@ -54,6 +69,24 @@ pub const Expression = struct {
     pub fn variables(self: *const Expression) VariableIterator {
         return .{ .expr = self };
     }
+
+    /// Rewrites variable references from source names to compiled bindings.
+    pub fn bindVariables(self: *Expression, slots: anytype) !void {
+        for (self.nodes) |node| {
+            switch (node.*) {
+                .variable => |var_ref| switch (var_ref) {
+                    .name => |name| {
+                        const binding: VariableBinding = resolveBuiltin(name) orelse .{
+                            .slot = slots.getIndex(name) orelse return error.UndeclaredVariable,
+                        };
+                        node.* = .{ .variable = .{ .binding = binding } };
+                    },
+                    .binding => {},
+                },
+                else => {},
+            }
+        }
+    }
 };
 
 /// Iterator over all variable names in an expression.
@@ -65,9 +98,12 @@ pub const VariableIterator = struct {
         while (self.node_idx < self.expr.nodes.len) : (self.node_idx += 1) {
             const node = self.expr.nodes[self.node_idx];
             switch (node.*) {
-                .variable => |name| {
-                    self.node_idx += 1;
-                    return name;
+                .variable => |var_ref| switch (var_ref) {
+                    .name => |name| {
+                        self.node_idx += 1;
+                        return name;
+                    },
+                    .binding => {},
                 },
                 else => {},
             }
@@ -81,26 +117,24 @@ pub const ResolvedValue = union(enum) {
     string: []const u8,
 };
 
-/// Opaque variable resolver: calls the provided function to map names to values.
+/// Opaque variable resolver: calls the provided function to map bindings to values.
 pub const VarResolver = struct {
     ctx: *const anyopaque,
-    resolveFn: *const fn (ctx: *const anyopaque, name: []const u8) ?ResolvedValue,
+    resolve_fn: *const fn (ctx: *const anyopaque, binding: VariableBinding) ?ResolvedValue,
 
-    pub fn resolve(self: VarResolver, name: []const u8) ?ResolvedValue {
-        return self.resolveFn(self.ctx, name);
+    pub fn resolve(self: VarResolver, binding: VariableBinding) ?ResolvedValue {
+        return self.resolve_fn(self.ctx, binding);
     }
 
-    /// Convenience constructor from a `*const StringHashMap([]const u8)`.
-    pub fn fromStringHashMap(map: *const std.StringHashMap([]const u8)) VarResolver {
+    /// Returns a resolver that always yields null (for variable-free expressions).
+    pub fn none() VarResolver {
         return .{
-            .ctx = @ptrCast(map),
-            .resolveFn = struct {
-                fn resolve(ctx_ptr: *const anyopaque, name: []const u8) ?ResolvedValue {
-                    const m: *const std.StringHashMap([]const u8) = @ptrCast(@alignCast(ctx_ptr));
-                    const s = m.get(name) orelse return null;
-                    return .{ .string = s };
+            .ctx = undefined,
+            .resolve_fn = struct {
+                fn noResolve(_: *const anyopaque, _: VariableBinding) ?ResolvedValue {
+                    return null;
                 }
-            }.resolve,
+            }.noResolve,
         };
     }
 };
@@ -131,7 +165,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) EvalError!Express
     };
 }
 
-/// Evaluate an expression string directly against a variable map.
+/// Evaluate a variable-free expression string directly.
 pub fn eval(allocator: std.mem.Allocator, source: []const u8, resolver: VarResolver) EvalError!Value {
     var expr_obj = try parse(allocator, source);
     defer expr_obj.deinit(allocator);
@@ -142,7 +176,7 @@ pub fn eval(allocator: std.mem.Allocator, source: []const u8, resolver: VarResol
 
 const Node = union(enum) {
     number: f64,
-    variable: []const u8,
+    variable: VariableRef,
     unary_not: *const Node,
     unary_neg: *const Node,
     binary: BinaryNode,
@@ -178,8 +212,11 @@ const BinaryOp = enum {
 fn evalNode(node: *const Node, resolver: VarResolver) EvalError!Value {
     return switch (node.*) {
         .number => |n| n,
-        .variable => |name| {
-            const val = resolver.resolve(name) orelse return error.VariableNotFound;
+        .variable => |var_ref| {
+            const val = switch (var_ref) {
+                .name => unreachable,
+                .binding => |binding| resolver.resolve(binding),
+            } orelse return error.VariableNotFound;
             return switch (val) {
                 .number => |n| n,
                 .string => |text| std.fmt.parseFloat(f64, std.mem.trim(u8, text, &std.ascii.whitespace)) catch return error.InvalidNumber,
@@ -230,6 +267,12 @@ fn evalNode(node: *const Node, resolver: VarResolver) EvalError!Value {
 
 fn boolToValue(b: bool) f64 {
     return if (b) 1.0 else 0.0;
+}
+
+fn resolveBuiltin(name: []const u8) ?VariableBinding {
+    if (std.mem.eql(u8, name, "$ITER")) return .{ .builtin = .iter };
+    if (std.mem.eql(u8, name, "$TASK_IDX")) return .{ .builtin = .task_idx };
+    return null;
 }
 
 // ── Recursive-descent parser ────────────────────────────────────────────
@@ -416,7 +459,7 @@ const Parser = struct {
             if (self.pos >= self.source.len) return error.InvalidExpression;
             const name = self.source[name_start..self.pos];
             self.pos += 1; // skip '}'
-            return self.createNode(.{ .variable = name });
+            return self.createNode(.{ .variable = .{ .name = name } });
         }
 
         // Built-in variable: $ITER, $TASK_IDX
@@ -425,7 +468,7 @@ const Parser = struct {
             self.pos += 1;
             while (self.pos < self.source.len and (std.ascii.isAlphanumeric(self.source[self.pos]) or self.source[self.pos] == '_')) : (self.pos += 1) {}
             const name = self.source[start..self.pos];
-            return self.createNode(.{ .variable = name });
+            return self.createNode(.{ .variable = .{ .name = name } });
         }
 
         // Function call: min(x, y), max(x, y)
@@ -490,16 +533,58 @@ const Parser = struct {
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
-fn mockResolver(ctx_ptr: *const anyopaque, name: []const u8) ?ResolvedValue {
-    const m: *const std.StringHashMap([]const u8) = @ptrCast(@alignCast(ctx_ptr));
-    const s = m.get(name) orelse return null;
-    return .{ .string = s };
+/// Test helper: resolves slots back to string values via a name-indexed HashMap.
+const TestContext = struct {
+    vars: *const std.StringHashMap([]const u8),
+    slot_names: [32][]const u8 = undefined,
+    count: usize = 0,
+
+    fn addVar(self: *TestContext, name: []const u8) usize {
+        for (self.slot_names[0..self.count], 0..) |n, i| {
+            if (std.mem.eql(u8, n, name)) return i;
+        }
+        const idx = self.count;
+        self.slot_names[self.count] = name;
+        self.count += 1;
+        return idx;
+    }
+
+    fn resolve(ctx_ptr: *const anyopaque, binding: VariableBinding) ?ResolvedValue {
+        const self: *const TestContext = @ptrCast(@alignCast(ctx_ptr));
+        return switch (binding) {
+            .slot => |slot| {
+                if (slot >= self.count) return null;
+                const s = self.vars.get(self.slot_names[slot]) orelse return null;
+                return .{ .string = s };
+            },
+            .builtin => null,
+        };
+    }
+
+    fn resolver(self: *const TestContext) VarResolver {
+        return .{ .ctx = @ptrCast(self), .resolve_fn = resolve };
+    }
+};
+
+fn testBoundEval(source: []const u8, vars: *const std.StringHashMap([]const u8)) !Value {
+    var expr_obj = try parse(std.testing.allocator, source);
+    defer expr_obj.deinit(std.testing.allocator);
+    var tc = TestContext{ .vars = vars };
+    var slots = std.StringArrayHashMap(void).init(std.testing.allocator);
+    defer slots.deinit();
+    var it = expr_obj.variables();
+    while (it.next()) |name| {
+        if (slots.getIndex(name) == null) {
+            _ = tc.addVar(name);
+            try slots.put(name, {});
+        }
+    }
+    try expr_obj.bindVariables(&slots);
+    return expr_obj.eval(tc.resolver());
 }
 
 test "expr arithmetic" {
-    var vars = std.StringHashMap([]const u8).init(std.testing.allocator);
-    defer vars.deinit();
-    const r = VarResolver{ .ctx = &vars, .resolveFn = mockResolver };
+    const r = VarResolver.none();
 
     try std.testing.expectApproxEqAbs(@as(f64, 7.0), try eval(std.testing.allocator, "3 + 4", r), 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 6.0), try eval(std.testing.allocator, "2 * 3", r), 1e-9);
@@ -509,9 +594,7 @@ test "expr arithmetic" {
 }
 
 test "expr comparison" {
-    var vars = std.StringHashMap([]const u8).init(std.testing.allocator);
-    defer vars.deinit();
-    const r = VarResolver{ .ctx = &vars, .resolveFn = mockResolver };
+    const r = VarResolver.none();
 
     try std.testing.expectApproxEqAbs(@as(f64, 1.0), try eval(std.testing.allocator, "5 > 3", r), 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 0.0), try eval(std.testing.allocator, "2 > 3", r), 1e-9);
@@ -521,9 +604,7 @@ test "expr comparison" {
 }
 
 test "expr logical" {
-    var vars = std.StringHashMap([]const u8).init(std.testing.allocator);
-    defer vars.deinit();
-    const r = VarResolver.fromStringHashMap(&vars);
+    const r = VarResolver.none();
 
     try std.testing.expectApproxEqAbs(@as(f64, 1.0), try eval(std.testing.allocator, "1 && 1", r), 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 0.0), try eval(std.testing.allocator, "1 && 0", r), 1e-9);
@@ -537,34 +618,43 @@ test "expr variables" {
     defer vars.deinit();
     try vars.put("voltage", "4.5");
     try vars.put("current", "2.0");
-    const r = VarResolver{ .ctx = &vars, .resolveFn = mockResolver };
 
-    try std.testing.expectApproxEqAbs(@as(f64, 9.0), try eval(std.testing.allocator, "${voltage} * ${current}", r), 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 1.0), try eval(std.testing.allocator, "${voltage} > 3", r), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 9.0), try testBoundEval("${voltage} * ${current}", &vars), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), try testBoundEval("${voltage} > 3", &vars), 1e-9);
 }
 
 test "expr built-in variables" {
-    var vars = std.StringHashMap([]const u8).init(std.testing.allocator);
-    defer vars.deinit();
-    const r = VarResolver{
-        .ctx = &vars,
-        .resolveFn = struct {
-            fn resolve(ctx_ptr: *const anyopaque, name: []const u8) ?ResolvedValue {
-                _ = ctx_ptr;
-                if (std.mem.eql(u8, name, "$ITER")) return .{ .number = 42.0 };
-                return null;
+    const resolver_v = VarResolver{
+        .ctx = undefined,
+        .resolve_fn = struct {
+            fn resolve(_: *const anyopaque, binding: VariableBinding) ?ResolvedValue {
+                return switch (binding) {
+                    .builtin => |b| switch (b) {
+                        .iter => .{ .number = 42.0 },
+                        .task_idx => null,
+                    },
+                    .slot => null,
+                };
             }
         }.resolve,
     };
 
-    try std.testing.expectApproxEqAbs(@as(f64, 42.0), try eval(std.testing.allocator, "$ITER", r), 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 43.0), try eval(std.testing.allocator, "$ITER + 1", r), 1e-9);
+    var empty_slots = std.StringArrayHashMap(void).init(std.testing.allocator);
+    defer empty_slots.deinit();
+
+    var e1 = try parse(std.testing.allocator, "$ITER");
+    defer e1.deinit(std.testing.allocator);
+    try e1.bindVariables(&empty_slots);
+    try std.testing.expectApproxEqAbs(@as(f64, 42.0), try e1.eval(resolver_v), 1e-9);
+
+    var e2 = try parse(std.testing.allocator, "$ITER + 1");
+    defer e2.deinit(std.testing.allocator);
+    try e2.bindVariables(&empty_slots);
+    try std.testing.expectApproxEqAbs(@as(f64, 43.0), try e2.eval(resolver_v), 1e-9);
 }
 
 test "expr functions" {
-    var vars = std.StringHashMap([]const u8).init(std.testing.allocator);
-    defer vars.deinit();
-    const r = VarResolver{ .ctx = &vars, .resolveFn = mockResolver };
+    const r = VarResolver.none();
 
     try std.testing.expectApproxEqAbs(@as(f64, 3.0), try eval(std.testing.allocator, "min(3, 5)", r), 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 5.0), try eval(std.testing.allocator, "max(3, 5)", r), 1e-9);
@@ -576,40 +666,28 @@ test "expr complex power check" {
     defer vars.deinit();
     try vars.put("voltage", "12.0");
     try vars.put("current", "9.0");
-    const r = VarResolver{ .ctx = &vars, .resolveFn = mockResolver };
 
     // power = 108, check > 100
-    try std.testing.expectApproxEqAbs(@as(f64, 1.0), try eval(std.testing.allocator, "${voltage} * ${current} > 100", r), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), try testBoundEval("${voltage} * ${current} > 100", &vars), 1e-9);
 }
 
 test "expr division by zero" {
-    var vars = std.StringHashMap([]const u8).init(std.testing.allocator);
-    defer vars.deinit();
-    const r = VarResolver{ .ctx = &vars, .resolveFn = mockResolver };
-
-    try std.testing.expectError(error.DivisionByZero, eval(std.testing.allocator, "1 / 0", r));
+    try std.testing.expectError(error.DivisionByZero, eval(std.testing.allocator, "1 / 0", VarResolver.none()));
 }
 
 test "expr missing variable" {
     var vars = std.StringHashMap([]const u8).init(std.testing.allocator);
     defer vars.deinit();
-    const r = VarResolver{ .ctx = &vars, .resolveFn = mockResolver };
 
-    try std.testing.expectError(error.VariableNotFound, eval(std.testing.allocator, "${missing}", r));
+    try std.testing.expectError(error.VariableNotFound, testBoundEval("${missing}", &vars));
 }
 
 test "expr unmatched paren" {
-    var vars = std.StringHashMap([]const u8).init(std.testing.allocator);
-    defer vars.deinit();
-    const r = VarResolver{ .ctx = &vars, .resolveFn = mockResolver };
-
-    try std.testing.expectError(error.UnmatchedParen, eval(std.testing.allocator, "(1 + 2", r));
+    try std.testing.expectError(error.UnmatchedParen, eval(std.testing.allocator, "(1 + 2", VarResolver.none()));
 }
 
 test "expr negative literal" {
-    var vars = std.StringHashMap([]const u8).init(std.testing.allocator);
-    defer vars.deinit();
-    const r = VarResolver{ .ctx = &vars, .resolveFn = mockResolver };
+    const r = VarResolver.none();
 
     try std.testing.expectApproxEqAbs(@as(f64, -3.0), try eval(std.testing.allocator, "-3", r), 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, -1.0), try eval(std.testing.allocator, "2 + -3", r), 1e-9);
@@ -619,9 +697,8 @@ test "expr unary negation of variable" {
     var vars = std.StringHashMap([]const u8).init(std.testing.allocator);
     defer vars.deinit();
     try vars.put("x", "5");
-    const r = VarResolver{ .ctx = &vars, .resolveFn = mockResolver };
 
-    try std.testing.expectApproxEqAbs(@as(f64, -5.0), try eval(std.testing.allocator, "-${x}", r), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, -5.0), try testBoundEval("-${x}", &vars), 1e-9);
 }
 
 test "expr parse reuse" {
@@ -631,9 +708,21 @@ test "expr parse reuse" {
     var expr_obj = try parse(std.testing.allocator, "${x} * 2 + 1");
     defer expr_obj.deinit(std.testing.allocator);
 
+    var tc = TestContext{ .vars = &vars };
+    var slots = std.StringArrayHashMap(void).init(std.testing.allocator);
+    defer slots.deinit();
+    var it = expr_obj.variables();
+    while (it.next()) |name| {
+        if (slots.getIndex(name) == null) {
+            _ = tc.addVar(name);
+            try slots.put(name, {});
+        }
+    }
+    try expr_obj.bindVariables(&slots);
+
     try vars.put("x", "3");
-    try std.testing.expectApproxEqAbs(@as(f64, 7.0), try expr_obj.eval(VarResolver{ .ctx = &vars, .resolveFn = mockResolver }), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 7.0), try expr_obj.eval(tc.resolver()), 1e-9);
 
     try vars.put("x", "10");
-    try std.testing.expectApproxEqAbs(@as(f64, 21.0), try expr_obj.eval(VarResolver{ .ctx = &vars, .resolveFn = mockResolver }), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 21.0), try expr_obj.eval(tc.resolver()), 1e-9);
 }

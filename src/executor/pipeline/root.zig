@@ -16,7 +16,6 @@ pub const AsyncLog = sinks.AsyncLog;
 pub const FileSink = sinks.FileSink;
 pub const NetworkSink = sinks.NetworkSink;
 
-pub const FrameField = types.FrameField;
 pub const Frame = types.Frame;
 
 pub const Runtime = runtime.Runtime;

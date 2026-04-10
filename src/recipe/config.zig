@@ -90,11 +90,11 @@ pub const StopWhenConfig = struct {
 
 /// Parsed top-level recipe document.
 pub const RecipeConfig = struct {
-    instruments: std.StringHashMap(InstrumentConfig),
+    instruments: std.StringArrayHashMap(InstrumentConfig),
     tasks: []TaskConfig,
     pipeline: ?PipelineConfig = null,
     stop_when: ?StopWhenConfig = null,
-    vars: ?std.StringHashMap(ArgScalarDoc) = null,
+    vars: ?std.StringArrayHashMap(ArgScalarDoc) = null,
 };
 
 test "parse recipe arg object values" {

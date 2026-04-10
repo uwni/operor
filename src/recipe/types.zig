@@ -7,6 +7,49 @@ const diagnostic = @import("diagnostic.zig");
 const expr = @import("../expr.zig");
 const visa = @import("../visa/root.zig");
 
+pub const Value = union(enum) {
+    float: f64,
+    int: i64,
+    bool: bool,
+    string: []const u8,
+
+    pub fn toResolvedValue(self: Value) expr.ResolvedValue {
+        return switch (self) {
+            .float => |f| .{ .number = f },
+            .int => |i| .{ .number = @floatFromInt(i) },
+            .bool => |b| .{ .number = if (b) 1.0 else 0.0 },
+            .string => |s| .{ .string = s },
+        };
+    }
+
+    pub fn format(self: Value, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (self) {
+            .float => |f| try writer.print("{d}", .{f}),
+            .int => |i| try writer.print("{d}", .{i}),
+            .bool => |b| try writer.writeAll(if (b) "true" else "false"),
+            .string => |s| try writer.writeAll(s),
+        }
+    }
+};
+
+/// Render-time value used by command templates.
+pub const RenderValue = union(enum) {
+    scalar: Value,
+    list: []const Value,
+
+    pub fn format(self: RenderValue, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (self) {
+            .scalar => |value| try value.format(writer),
+            .list => |items| {
+                for (items, 0..) |item, idx| {
+                    if (idx > 0) try writer.writeByte(',');
+                    try item.format(writer);
+                }
+            },
+        }
+    }
+};
+
 /// Borrowed-or-owned bytes produced by rendering a precompiled command.
 pub const RenderedCommand = struct {
     /// Rendered bytes that can be sent directly to the instrument.
@@ -20,31 +63,55 @@ pub const RenderedCommand = struct {
     }
 };
 
+pub const CompiledSegment = union(enum) {
+    literal: []const u8,
+    arg: usize,
+};
+
+pub const CompiledArgValue = union(enum) {
+    const_value: Value,
+    binding: expr.VariableBinding,
+};
+
+pub const StepArg = union(enum) {
+    scalar: CompiledArgValue,
+    list: []const CompiledArgValue,
+};
+
 /// Executable command prepared during recipe precompilation.
 pub const PrecompiledCommand = struct {
     /// Precompiled instrument that owns this command.
     instrument: *const PrecompiledInstrument,
     /// Response encoding declared by the source driver command.
     response: ?Driver.Encoding,
-    /// Allocator-owned cloned template segments used at execution time.
-    template: []const template.Segment,
-    /// Unique placeholder names referenced by the command template.
-    placeholders: []const []const u8,
+    /// Allocator-owned compiled render segments used at execution time.
+    segments: []const CompiledSegment,
+    /// Unique placeholder names in render order.
+    arg_names: []const []const u8,
     /// Errors that can occur while rendering the precompiled template.
     pub const RenderError = template.RenderError;
 
     /// Releases heap-owned template and placeholder data.
     pub fn deinit(self: PrecompiledCommand, allocator: std.mem.Allocator) void {
-        allocator.free(self.placeholders);
-        template.freeSegments(allocator, self.template);
+        for (self.arg_names) |name| allocator.free(name);
+        allocator.free(self.arg_names);
+        for (self.segments) |segment| switch (segment) {
+            .literal => |literal| allocator.free(literal),
+            .arg => {},
+        };
+        allocator.free(self.segments);
     }
 
     /// Returns whether the compiled template expects a given placeholder.
     pub fn hasPlaceholder(self: *const PrecompiledCommand, name: []const u8) bool {
-        for (self.placeholders) |placeholder| {
-            if (std.mem.eql(u8, placeholder, name)) return true;
+        return self.argIndex(name) != null;
+    }
+
+    pub fn argIndex(self: *const PrecompiledCommand, name: []const u8) ?usize {
+        for (self.arg_names, 0..) |arg_name, idx| {
+            if (std.mem.eql(u8, arg_name, name)) return idx;
         }
-        return false;
+        return null;
     }
 
     /// Renders the command plus optional suffix using a stack buffer with automatic heap fallback.
@@ -52,47 +119,33 @@ pub const PrecompiledCommand = struct {
         self: *const PrecompiledCommand,
         allocator: std.mem.Allocator,
         stack_buffer: []u8,
-        values: anytype,
+        args: []const RenderValue,
         suffix: []const u8,
     ) RenderError!RenderedCommand {
-        if (template.renderIntoWithSuffix(stack_buffer, self.template, values, suffix)) |rendered| {
-            return .{ .bytes = rendered };
-        } else |err| switch (err) {
-            error.BufferTooSmall => {},
-            else => return err,
+        if (stack_buffer.len >= suffix.len) {
+            const render_buffer = stack_buffer[0 .. stack_buffer.len - suffix.len];
+            var fbs = std.io.fixedBufferStream(render_buffer);
+            renderInternal(fbs.writer(), self.segments, args) catch |err| switch (err) {
+                error.NoSpaceLeft => {
+                    const owned = try renderAllocWithSuffix(allocator, self.segments, args, suffix);
+                    return .{ .bytes = owned, .owned = owned };
+                },
+                else => unreachable,
+            };
+
+            const rendered = fbs.getWritten();
+            const combined_len = rendered.len + suffix.len;
+            @memcpy(stack_buffer[rendered.len..combined_len], suffix);
+            return .{ .bytes = stack_buffer[0..combined_len] };
         }
 
-        const owned = try template.renderAllocWithSuffix(allocator, self.template, values, suffix);
+        const owned = try renderAllocWithSuffix(allocator, self.segments, args, suffix);
         return .{ .bytes = owned, .owned = owned };
     }
 };
 
-/// Parsed representation of a single step argument item.
-pub const StepScalar = union(enum) {
-    /// String literal preserved as-is.
-    string: []const u8,
-    /// Integer literal preserved until execution-time rendering.
-    int: i64,
-    /// Floating-point literal preserved until execution-time rendering.
-    float: f64,
-    /// Boolean literal preserved until execution-time rendering.
-    bool: bool,
-    /// Execution-context reference declared as `${name}`. Stores the bare `name` key.
-    ref: []const u8,
-};
-
-/// Parsed representation of a step argument value.
-pub const StepArg = union(enum) {
-    /// Single typed literal or `${name}` reference.
-    scalar: StepScalar,
-    /// Ordered list argument preserved item-by-item.
-    list: []const StepScalar,
-};
-
 /// Recipe instrument bound to a driver and the subset of commands it actually uses.
 pub const PrecompiledInstrument = struct {
-    /// Zero-based position into the executor runtime array.
-    instrument_idx: usize,
     /// Driver name resolved during precompile.
     driver_name: []const u8,
     /// VISA resource address for opening the instrument.
@@ -125,19 +178,25 @@ pub const Step = struct {
         call: []const u8,
         /// Recipe instrument name preserved for preview and diagnostics.
         instrument: []const u8,
+        /// Zero-based position into the executor runtime array.
+        instrument_idx: usize,
         /// Precompiled command resolved during recipe precompile.
         command: *const PrecompiledCommand,
-        /// Parsed argument map keyed by placeholder name.
-        args: std.StringHashMap(StepArg),
-        /// Optional context key that receives the parsed response value.
-        save_as: ?[]const u8 = null,
+        /// Compiled arguments aligned to `command.arg_names`.
+        args: []const StepArg,
+        /// Optional slot that receives the parsed response value.
+        save_slot: ?usize = null,
+        /// Optional column index into the pipeline record for frame persistence.
+        save_column: ?usize = null,
     };
 
     pub const Compute = struct {
         /// Expression to evaluate (pre-parsed AST).
         expression: expr.Expression,
-        /// Context key that receives the formatted f64 result.
-        save_as: []const u8,
+        /// Slot that receives the computed result.
+        save_slot: usize,
+        /// Optional column index into the pipeline record for frame persistence.
+        save_column: ?usize = null,
     };
 };
 
@@ -198,15 +257,15 @@ pub const StopWhen = struct {
 /// Owns arena-backed data and should have a single logical owner until `deinit`.
 pub const PrecompiledRecipe = struct {
     arena: std.heap.ArenaAllocator,
-    instruments: std.StringHashMap(PrecompiledInstrument),
+    instruments: std.StringArrayHashMap(PrecompiledInstrument),
     tasks: []Task,
     pipeline: PipelineConfig,
     stop_when: StopWhen,
     /// Estimated total number of task iterations across all tasks.
     /// Null when the recipe runs indefinitely or stop conditions are dynamic.
     expected_iterations: ?u64,
-    /// Default values for context variables at execution startup.
-    initial_vars: std.StringHashMap(StepScalar),
+    /// Default values for slot-based context variables at execution startup.
+    initial_values: []const ?Value,
 
     /// Releases all arena-owned precompiled recipe data.
     pub fn deinit(self: *PrecompiledRecipe) void {
@@ -232,3 +291,30 @@ pub const PrecompiledRecipe = struct {
         return @import("precompile.zig").precompilePathWithDiagnostic(allocator, recipe_path, driver_reg, diagnostic_ctx);
     }
 };
+
+fn renderInternal(writer: anytype, segments: []const CompiledSegment, args: []const RenderValue) !void {
+    for (segments) |segment| {
+        switch (segment) {
+            .literal => |literal| try writer.writeAll(literal),
+            .arg => |arg_idx| try writer.print("{f}", .{args[arg_idx]}),
+        }
+    }
+}
+
+fn renderAllocWithSuffix(
+    allocator: std.mem.Allocator,
+    segments: []const CompiledSegment,
+    args: []const RenderValue,
+    suffix: []const u8,
+) PrecompiledCommand.RenderError![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+
+    renderInternal(out.writer(allocator), segments, args) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => |e| return e,
+    };
+
+    out.appendSlice(allocator, suffix) catch return error.OutOfMemory;
+    return out.toOwnedSlice(allocator) catch error.OutOfMemory;
+}
