@@ -276,7 +276,7 @@ pub fn runTasksThread(state: *SamplerState) void {
         state.ctx,
         state.pipeline_runtime,
         .{
-            .driver_dir = "",
+            .adapter_dir = "",
             .recipe_path = "",
             .dry_run = state.dry_run,
             .max_duration_ms = state.max_duration_ms,

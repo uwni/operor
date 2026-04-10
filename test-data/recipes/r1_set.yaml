@@ -1,6 +1,6 @@
 instruments:
   d1:
-    driver: psu.toml
+    adapter: psu.toml
     resource: USB0::1::INSTR
 pipeline:
   record: all

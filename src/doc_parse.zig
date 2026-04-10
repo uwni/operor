@@ -1,7 +1,7 @@
 const std = @import("std");
 const serde = @import("serde");
 
-/// Supported document formats for driver and recipe configuration files.
+/// Supported document formats for adapter and recipe configuration files.
 pub const DocFormat = enum {
     toml,
     yaml,

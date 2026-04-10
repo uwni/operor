@@ -2,7 +2,7 @@
 
 An automated experimental workflow engine for VISA-controlled instruments.
 
-Ordo loads instrument drivers from TOML, recipes from YAML, precompiles command templates and expressions, and executes scheduled tasks with optional preview, dry-run, CSV output, and TCP streaming.
+Ordo loads instrument adapters from TOML, recipes from YAML, precompiles command templates and expressions, and executes scheduled tasks with optional preview, dry-run, CSV output, and TCP streaming.
 
 ## Requirements
 
@@ -32,7 +32,7 @@ Ordo loads instrument drivers from TOML, recipes from YAML, precompiles command 
 
 ## Requirements
 
-To run an existing Ordo binary, only the VISA runtime is required. You can download it from [National Instrument](https://www.ni.com/en/support/downloads/drivers/download.ni-visa.html).
+To run an existing Ordo binary, only the VISA runtime is required. You can download it from [National Instrument](https://www.ni.com/en/support/downloads/adapters/download.ni-visa.html).
 
 If your VISA library is not installed in a standard location, pass it explicitly with `--visa-lib <path>`.
 
@@ -41,7 +41,7 @@ If your VISA library is not installed in a standard location, pass it explicitly
 Preview the bundled example recipe without opening instruments:
 
 ```sh
-ordo run -d test-data/drivers test-data/recipes/r1_set.yaml --preview
+ordo run -d test-data/adapters test-data/recipes/r1_set.yaml --preview
 ```
 
 Open an interactive REPL and discover instruments:
@@ -59,20 +59,20 @@ ordo repl -r USB0::0x0957::0x1798::MY12345678::INSTR
 Execute a recipe:
 
 ```sh
-ordo run -d ./drivers ./recipes/measure.yaml --duration-ms 5000
+ordo run -d ./adapters ./recipes/measure.yaml --duration-ms 5000
 ```
 
 ## CLI
 
 ```text
-ordo run -d <driver_dir> <recipe> [--preview] [--dry-run] [--duration-ms <ms>] [--visa-lib <path>]
+ordo run -d <adapter_dir> <recipe> [--preview] [--dry-run] [--duration-ms <ms>] [--visa-lib <path>]
 ordo repl [-r <resource>] [--visa-lib <path>]
 ```
 
 Command behavior:
 
-- `run` loads drivers, precompiles the recipe, and executes scheduled tasks.
-- `run --preview` validates the recipe, drivers, commands, variables, and pipeline configuration without instrument I/O.
+- `run` loads adapters, precompiles the recipe, and executes scheduled tasks.
+- `run --preview` validates the recipe, adapters, commands, variables, and pipeline configuration without instrument I/O.
 - `run --dry-run` renders commands and logs them instead of writing to the instrument.
 - `run --duration-ms` adds a hard runtime limit from the CLI.
 - `repl` opens a stateful interactive session. Use `-r` to connect on startup, or discover instruments with `list` and `open` inside the REPL.
@@ -81,12 +81,12 @@ Command behavior:
 
 Ordo has two configuration layers:
 
-- Drivers define instrument metadata and command templates in TOML.
+- Adapters define instrument metadata and command templates in TOML.
 - Recipes define instruments, variables, task schedules, expressions, and sinks in YAML.
 
-### Driver Files
+### Adapter Files
 
-Driver documents are TOML files with optional metadata, an optional `instrument` section for VISA session defaults, and a `commands` table.
+Adapter documents are TOML files with optional metadata, an optional `instrument` section for VISA session defaults, and a `commands` table.
 
 ```toml
 [metadata]
@@ -116,14 +116,14 @@ Notes:
 - Command template placeholders use `{name}` syntax.
 - Placeholder names must be valid identifiers.
 - A command with `read = "raw" | "float" | "int" | "string"` reads and parses a response after the write.
-- `write_termination` is appended automatically to every command sent through that driver.
-- `read_termination`, `timeout_ms`, `query_delay_ms`, and `chunk_size` tune the VISA session used for instruments that reference the driver.
+- `write_termination` is appended automatically to every command sent through that adapter.
+- `read_termination`, `timeout_ms`, `query_delay_ms`, and `chunk_size` tune the VISA session used for instruments that reference the adapter.
 
 ### Recipe Files
 
 Recipe documents are YAML files with these top-level sections:
 
-- `instruments`: named instrument instances with a driver file and VISA resource string
+- `instruments`: named instrument instances with a adapter file and VISA resource string
 - `vars`: initial variable values used by expressions and `save_as` slots
 - `tasks`: periodic work definitions
 - `pipeline`: optional CSV and TCP sink configuration
@@ -134,7 +134,7 @@ Example:
 ```yaml
 instruments:
 	psu:
-		driver: psu.toml
+		adapter: psu.toml
 		resource: USB0::1::INSTR
 
 vars:
@@ -196,7 +196,7 @@ All expression math is evaluated as `f64`. A non-zero result is treated as true.
 
 Important distinction:
 
-- Driver command templates use `{name}` placeholders.
+- Adapter command templates use `{name}` placeholders.
 - Recipe expressions use `${name}` variable references.
 
 ## Preview And Dry-Run
@@ -287,13 +287,13 @@ ordo repl -r USB0::0x0957::0x1798::MY12345678::INSTR
 
 Bundled examples live in:
 
-- `test-data/drivers/`
+- `test-data/adapters/`
 - `test-data/recipes/`
 
 Useful starting points:
 
-- `test-data/drivers/psu.toml`
-- `test-data/drivers/dmm.toml`
+- `test-data/adapters/psu.toml`
+- `test-data/adapters/dmm.toml`
 - `test-data/recipes/r1_set.yaml`
 - `test-data/recipes/r1_set_voltage.yaml`
 - `test-data/recipes/r2_stop_when.yaml`

@@ -1,5 +1,5 @@
 const std = @import("std");
-const Driver = @import("../driver/Driver.zig");
+const Adapter = @import("../adapter/Adapter.zig");
 const recipe_mod = @import("../recipe/root.zig");
 const testing = @import("../testing.zig");
 const visa = @import("../visa/root.zig");
@@ -25,10 +25,10 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
     defer precompile_diagnostic.deinit();
 
     var compiled = blk: {
-        var dir = if (std.fs.path.isAbsolute(opts.driver_dir))
-            try std.fs.openDirAbsolute(opts.driver_dir, .{})
+        var dir = if (std.fs.path.isAbsolute(opts.adapter_dir))
+            try std.fs.openDirAbsolute(opts.adapter_dir, .{})
         else
-            try std.fs.cwd().openDir(opts.driver_dir, .{});
+            try std.fs.cwd().openDir(opts.adapter_dir, .{});
         defer dir.close();
         break :blk recipe_mod.PrecompiledRecipe.precompilePathWithDiagnostic(allocator, opts.recipe_path, dir, &precompile_diagnostic) catch |err| {
             try precompile_diagnostic.write(log, err);
@@ -146,7 +146,7 @@ fn prepareRuntime(
     }
 }
 
-const vendor_psu_driver =
+const vendor_psu_adapter =
     \\[metadata]
     \\
     \\[commands.set_voltage]
@@ -159,11 +159,11 @@ test "executor execute dry run" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
     try workspace.writeFile("recipes/r1_set_voltage.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record: all
@@ -179,8 +179,8 @@ test "executor execute dry run" {
         \\            - 2
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.yaml");
     defer gpa.free(recipe_path);
 
@@ -188,7 +188,7 @@ test "executor execute dry run" {
     defer out.deinit();
 
     const opts = common.ExecOptions{
-        .driver_dir = driver_dir,
+        .adapter_dir = adapter_dir,
         .recipe_path = recipe_path,
         .dry_run = true,
         .log = &out.writer,
@@ -206,11 +206,11 @@ test "executor pipeline creates csv frame sink during dry run" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
     try workspace.writeFile("recipes/pipeline.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  buffer_size: 64
@@ -232,8 +232,8 @@ test "executor pipeline creates csv frame sink during dry run" {
         \\  max_iterations: 2
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/pipeline.yaml");
     defer gpa.free(recipe_path);
 
@@ -241,7 +241,7 @@ test "executor pipeline creates csv frame sink during dry run" {
     defer out.deinit();
 
     try execute(gpa, .{
-        .driver_dir = driver_dir,
+        .adapter_dir = adapter_dir,
         .recipe_path = recipe_path,
         .dry_run = true,
         .log = &out.writer,

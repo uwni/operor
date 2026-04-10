@@ -10,7 +10,7 @@ pub fn main() void {
         // Errors already explained to the user — just exit quietly.
         error.UnknownCommand,
         error.MissingCommand,
-        error.MissingDriverDirectory,
+        error.MissingAdapterDirectory,
         error.MissingRecipePath,
         error.MissingResourceAddress,
         => std.process.exit(1),

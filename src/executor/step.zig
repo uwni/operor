@@ -1,5 +1,5 @@
 const std = @import("std");
-const Driver = @import("../driver/Driver.zig");
+const Adapter = @import("../adapter/Adapter.zig");
 const recipe_mod = @import("../recipe/root.zig");
 const common = @import("common.zig");
 const pipeline_mod = @import("pipeline/root.zig");
@@ -7,7 +7,7 @@ const expr = @import("../expr.zig");
 
 const command_stack_bytes: usize = 512;
 /// Parsed response value in the native Zig type indicated by the command encoding.
-pub const ParsedValue = union(Driver.Encoding) {
+pub const ParsedValue = union(Adapter.Encoding) {
     raw: []const u8,
     float: f64,
     int: i64,
@@ -123,7 +123,7 @@ fn executeInstrumentCall(
     scratch: *StepScratch,
 ) !?SavedValue {
     const cmd = step.command;
-    const driver_name = cmd.instrument.driver_name;
+    const adapter_name = cmd.instrument.adapter_name;
 
     scratch.reset();
     const alloc = scratch.tempAllocator();
@@ -146,14 +146,14 @@ fn executeInstrumentCall(
     defer rendered.deinit(allocator);
 
     if (dry_run) {
-        logDryRun(log_sink, driver_name, rendered.bytes);
+        logDryRun(log_sink, adapter_name, rendered.bytes);
         return null;
     }
 
     const instr = &(instrument.handle orelse unreachable);
     instr.write(rendered.bytes) catch |err| {
         var warning_buf: [192]u8 = undefined;
-        const warning = try std.fmt.bufPrint(warning_buf[0..], "write failed {s}: {any}", .{ driver_name, err });
+        const warning = try std.fmt.bufPrint(warning_buf[0..], "write failed {s}: {any}", .{ adapter_name, err });
         logWarning(log_sink, warning);
         return null;
     };
@@ -162,7 +162,7 @@ fn executeInstrumentCall(
         instr.waitQueryDelay();
         const resp = instr.readToOwned(allocator) catch |err| {
             var warning_buf: [192]u8 = undefined;
-            const warning = try std.fmt.bufPrint(warning_buf[0..], "read failed {s}: {any}", .{ driver_name, err });
+            const warning = try std.fmt.bufPrint(warning_buf[0..], "read failed {s}: {any}", .{ adapter_name, err });
             logWarning(log_sink, warning);
             return null;
         };
@@ -195,7 +195,7 @@ fn executeInstrumentCall(
 }
 
 /// Convert the raw response byte string into a ParsedValue according to the specified encoding.
-pub fn parseResponse(encoding: Driver.Encoding, resp: []const u8) !ParsedValue {
+pub fn parseResponse(encoding: Adapter.Encoding, resp: []const u8) !ParsedValue {
     const trimmed = std.mem.trim(u8, resp, &std.ascii.whitespace);
     return switch (encoding) {
         .raw => .{ .raw = resp },
@@ -236,8 +236,8 @@ fn logWarning(log_sink: pipeline_mod.AsyncLog, message: []const u8) void {
     log_sink.print("[WARN] {s}\n", .{message});
 }
 
-fn logDryRun(log_sink: pipeline_mod.AsyncLog, driver_name: []const u8, rendered: []const u8) void {
-    log_sink.print("[dry-run] {s} -> {s}\n", .{ driver_name, rendered });
+fn logDryRun(log_sink: pipeline_mod.AsyncLog, adapter_name: []const u8, rendered: []const u8) void {
+    log_sink.print("[dry-run] {s} -> {s}\n", .{ adapter_name, rendered });
 }
 
 test "executor parse response" {

@@ -1,7 +1,7 @@
 const std = @import("std");
 const doc_parse = @import("../doc_parse.zig");
-const Driver = @import("../driver/Driver.zig");
-const parse_mod = @import("../driver/parse.zig");
+const Adapter = @import("../adapter/Adapter.zig");
+const parse_mod = @import("../adapter/parse.zig");
 const testing = @import("../testing.zig");
 const config = @import("config.zig");
 const diagnostic = @import("diagnostic.zig");
@@ -16,25 +16,25 @@ const VarsMap = std.StringArrayHashMap(config.ArgScalarDoc);
 pub fn precompilePath(
     allocator: std.mem.Allocator,
     recipe_path: []const u8,
-    driver_dir: std.fs.Dir,
+    adapter_dir: std.fs.Dir,
 ) !types.PrecompiledRecipe {
-    return precompilePathInternal(allocator, recipe_path, driver_dir, null);
+    return precompilePathInternal(allocator, recipe_path, adapter_dir, null);
 }
 
 pub fn precompilePathWithDiagnostic(
     allocator: std.mem.Allocator,
     recipe_path: []const u8,
-    driver_dir: std.fs.Dir,
+    adapter_dir: std.fs.Dir,
     precompile_diagnostic: *diagnostic.PrecompileDiagnostic,
 ) !types.PrecompiledRecipe {
     precompile_diagnostic.reset();
-    return precompilePathInternal(allocator, recipe_path, driver_dir, precompile_diagnostic);
+    return precompilePathInternal(allocator, recipe_path, adapter_dir, precompile_diagnostic);
 }
 
 fn precompilePathInternal(
     allocator: std.mem.Allocator,
     recipe_path: []const u8,
-    driver_dir: std.fs.Dir,
+    adapter_dir: std.fs.Dir,
     precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
 ) !types.PrecompiledRecipe {
     var parse_arena = std.heap.ArenaAllocator.init(allocator);
@@ -47,16 +47,16 @@ fn precompilePathInternal(
         return error.MissingPipeline;
     }
 
-    return try precompileInternal(allocator, &recipe_cfg, driver_dir, precompile_diagnostic);
+    return try precompileInternal(allocator, &recipe_cfg, adapter_dir, precompile_diagnostic);
 }
 
 /// Converts a parsed recipe document into the arena-owned runtime form used by preview and execution.
 ///
 /// Precompile walks the recipe in a strict fail-fast order:
-/// 1. Create the arena that will own the returned recipe plus a temporary driver cache used only during validation.
-/// 2. Walk `recipe.instruments`, eagerly load every referenced driver, assign each instrument a dense `instrument_idx`, and copy it into a `PrecompiledInstrument` with an empty per-instrument command cache.
+/// 1. Create the arena that will own the returned recipe plus a temporary adapter cache used only during validation.
+/// 2. Walk `recipe.instruments`, eagerly load every referenced adapter, assign each instrument a dense `instrument_idx`, and copy it into a `PrecompiledInstrument` with an empty per-instrument command cache.
 /// 3. Walk `recipe.tasks`, normalize each interval from `every_ms` or parsed `every`, and allocate the arena-owned `Task` and `Step` arrays.
-/// 4. For every step, resolve the referenced instrument and driver command, compiling that command on first use so runtime only keeps commands this recipe actually calls while binding each command to its owning precompiled instrument.
+/// 4. For every step, resolve the referenced instrument and adapter command, compiling that command on first use so runtime only keeps commands this recipe actually calls while binding each command to its owning precompiled instrument.
 /// 5. Clone step arguments into the runtime representation, preserving literal types while validating them against the compiled command placeholders, and bind each step directly to the precompiled command pointer it will execute.
 /// 6. Parse `stop_when` and return a fully validated `PrecompiledRecipe` whose data is owned by the arena.
 ///
@@ -64,33 +64,33 @@ fn precompilePathInternal(
 fn precompileInternal(
     allocator: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
-    driver_dir: std.fs.Dir,
+    adapter_dir: std.fs.Dir,
     precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
 ) !types.PrecompiledRecipe {
-    // 1. Create the arena-owned result lifetime and a temporary driver cache used only while validating the recipe.
+    // 1. Create the arena-owned result lifetime and a temporary adapter cache used only while validating the recipe.
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const alloc = arena.allocator();
 
-    var driver_arena = std.heap.ArenaAllocator.init(allocator);
-    defer driver_arena.deinit();
+    var adapter_arena = std.heap.ArenaAllocator.init(allocator);
+    defer adapter_arena.deinit();
 
     const vars: VarsMap = recipe.vars orelse VarsMap.init(alloc);
     const initial_values = try buildInitialValues(alloc, &vars);
 
-    // 2. Eagerly load every referenced driver.
-    var loaded_drivers = try loadDrivers(driver_arena.allocator(), recipe, driver_dir, precompile_diagnostic);
+    // 2. Eagerly load every referenced adapter.
+    var loaded_adapters = try loadAdapters(adapter_arena.allocator(), recipe, adapter_dir, precompile_diagnostic);
     defer {
-        var it = loaded_drivers.valueIterator();
-        while (it.next()) |driver| driver.deinit();
+        var it = loaded_adapters.valueIterator();
+        while (it.next()) |adapter| adapter.deinit();
     }
 
-    // 3. Compile instrument metadata from loaded drivers.
-    var precompiled_instruments = try precompileInstruments(alloc, recipe, &loaded_drivers);
+    // 3. Compile instrument metadata from loaded adapters.
+    var precompiled_instruments = try precompileInstruments(alloc, recipe, &loaded_adapters);
 
     // 3-5. Normalize tasks and steps, resolving commands and validating arguments.
     var save_as_set = std.StringArrayHashMap(void).init(alloc);
-    const tasks = try precompileTasks(alloc, recipe, &vars, &loaded_drivers, &precompiled_instruments, &save_as_set, precompile_diagnostic);
+    const tasks = try precompileTasks(alloc, recipe, &vars, &loaded_adapters, &precompiled_instruments, &save_as_set, precompile_diagnostic);
 
     // 6. Validate and resolve pipeline record configuration.
     const pipeline = try resolvePipelineConfig(alloc, recipe, &vars, &save_as_set, precompile_diagnostic);
@@ -111,20 +111,20 @@ fn precompileInternal(
     };
 }
 
-fn loadDrivers(
+fn loadAdapters(
     allocator: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
-    driver_dir: std.fs.Dir,
+    adapter_dir: std.fs.Dir,
     precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
-) !std.StringHashMap(Driver) {
-    var map = std.StringHashMap(Driver).init(allocator);
+) !std.StringHashMap(Adapter) {
+    var map = std.StringHashMap(Adapter).init(allocator);
     var instrument_it = recipe.instruments.iterator();
     while (instrument_it.next()) |entry| {
         const cfg = entry.value_ptr.*;
-        _ = getOrParseDriver(allocator, &map, driver_dir, cfg.driver) catch |err| {
+        _ = getOrParseAdapter(allocator, &map, adapter_dir, cfg.adapter) catch |err| {
             captureDiagnostic(precompile_diagnostic, .{
                 .instrument_name = entry.key_ptr.*,
-                .driver_name = cfg.driver,
+                .adapter_name = cfg.adapter,
             });
             return err;
         };
@@ -135,7 +135,7 @@ fn loadDrivers(
 fn precompileInstruments(
     alloc: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
-    loaded_drivers: *const std.StringHashMap(Driver),
+    loaded_adapters: *const std.StringHashMap(Adapter),
 ) !std.StringArrayHashMap(types.PrecompiledInstrument) {
     var precompiled_instruments = std.StringArrayHashMap(types.PrecompiledInstrument).init(alloc);
     try precompiled_instruments.ensureTotalCapacity(recipe.instruments.count());
@@ -144,22 +144,22 @@ fn precompileInstruments(
     while (instrument_it.next()) |entry| {
         const instrument_name = entry.key_ptr.*;
         const instrument_cfg = entry.value_ptr.*;
-        const driver = loaded_drivers.getPtr(instrument_cfg.driver).?;
+        const adapter = loaded_adapters.getPtr(instrument_cfg.adapter).?;
 
         const name_copy = try alloc.dupe(u8, instrument_name);
-        const driver_copy = try alloc.dupe(u8, instrument_cfg.driver);
+        const adapter_copy = try alloc.dupe(u8, instrument_cfg.adapter);
         const resource_copy = try alloc.dupe(u8, instrument_cfg.resource);
-        const write_termination = try cloneOptionalBytes(alloc, driver.write_termination);
+        const write_termination = try cloneOptionalBytes(alloc, adapter.write_termination);
         try precompiled_instruments.put(name_copy, .{
-            .driver_name = driver_copy,
+            .adapter_name = adapter_copy,
             .resource = resource_copy,
             .commands = std.StringHashMap(*const types.PrecompiledCommand).init(alloc),
             .write_termination = write_termination,
             .options = .{
-                .timeout_ms = driver.options.timeout_ms,
-                .read_termination = try cloneOptionalBytes(alloc, driver.options.read_termination),
-                .query_delay_ms = driver.options.query_delay_ms,
-                .chunk_size = driver.options.chunk_size,
+                .timeout_ms = adapter.options.timeout_ms,
+                .read_termination = try cloneOptionalBytes(alloc, adapter.options.read_termination),
+                .query_delay_ms = adapter.options.query_delay_ms,
+                .chunk_size = adapter.options.chunk_size,
             },
         });
     }
@@ -170,7 +170,7 @@ fn precompileTasks(
     arena_alloc: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
     vars: *const VarsMap,
-    loaded_drivers: *const std.StringHashMap(Driver),
+    loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMap(types.PrecompiledInstrument),
     save_as_set: *std.StringArrayHashMap(void),
     precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
@@ -197,7 +197,7 @@ fn precompileTasks(
                 .call => |*cfg| try precompileCallStep(
                     arena_alloc,
                     vars,
-                    loaded_drivers,
+                    loaded_adapters,
                     precompiled_instruments,
                     save_as_set,
                     cfg,
@@ -249,7 +249,7 @@ fn precompileComputeStep(
 fn precompileCallStep(
     arena_alloc: std.mem.Allocator,
     vars: *const VarsMap,
-    loaded_drivers: *const std.StringHashMap(Driver),
+    loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMap(types.PrecompiledInstrument),
     save_as_set: *std.StringArrayHashMap(void),
     cfg: *const config.CallStepConfig,
@@ -270,9 +270,9 @@ fn precompileCallStep(
 
     const precompiled_instrument = precompiled_instruments.getPtr(instrument_name) orelse return error.InstrumentNotFound;
 
-    diag_ctx.driver_name = precompiled_instrument.driver_name;
-    const loaded_driver = loaded_drivers.getPtr(precompiled_instrument.driver_name).?;
-    const command = try getOrCompileCommand(arena_alloc, precompiled_instrument, loaded_driver, cfg.call);
+    diag_ctx.adapter_name = precompiled_instrument.adapter_name;
+    const loaded_adapter = loaded_adapters.getPtr(precompiled_instrument.adapter_name).?;
+    const command = try getOrCompileCommand(arena_alloc, precompiled_instrument, loaded_adapter, cfg.call);
 
     const call_copy = try arena_alloc.dupe(u8, cfg.call);
     const instrument_copy = try arena_alloc.dupe(u8, instrument_name);
@@ -392,32 +392,32 @@ fn cloneOptionalBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]const 
     return allocator.dupe(u8, bytes);
 }
 
-fn getOrParseDriver(
+fn getOrParseAdapter(
     allocator: std.mem.Allocator,
-    loaded_drivers: *std.StringHashMap(Driver),
-    driver_dir: std.fs.Dir,
-    driver_name: []const u8,
-) !*const Driver {
-    if (loaded_drivers.getPtr(driver_name)) |loaded| return loaded;
+    loaded_adapters: *std.StringHashMap(Adapter),
+    adapter_dir: std.fs.Dir,
+    adapter_name: []const u8,
+) !*const Adapter {
+    if (loaded_adapters.getPtr(adapter_name)) |loaded| return loaded;
 
-    const key = try allocator.dupe(u8, driver_name);
+    const key = try allocator.dupe(u8, adapter_name);
 
-    var loaded = try parse_mod.parseDriverInDir(allocator, driver_dir, driver_name);
+    var loaded = try parse_mod.parseAdapterInDir(allocator, adapter_dir, adapter_name);
     errdefer loaded.deinit();
 
-    try loaded_drivers.put(key, loaded);
-    return loaded_drivers.getPtr(driver_name).?;
+    try loaded_adapters.put(key, loaded);
+    return loaded_adapters.getPtr(adapter_name).?;
 }
 
 fn getOrCompileCommand(
     allocator: std.mem.Allocator,
     instrument: *types.PrecompiledInstrument,
-    loaded_driver: *const Driver,
+    loaded_adapter: *const Adapter,
     call: []const u8,
 ) !*const types.PrecompiledCommand {
     if (instrument.commands.get(call)) |command| return command;
 
-    const source = loaded_driver.commands.get(call) orelse return error.CommandNotFound;
+    const source = loaded_adapter.commands.get(call) orelse return error.CommandNotFound;
     const key = try allocator.dupe(u8, call);
     const compiled_value = try compileCommand(allocator, source, instrument);
 
@@ -441,7 +441,7 @@ fn buildInitialValues(
 
 fn compileCommand(
     allocator: std.mem.Allocator,
-    source: Driver.Command,
+    source: Adapter.Command,
     instrument: *const types.PrecompiledInstrument,
 ) !types.PrecompiledCommand {
     var arg_names = std.ArrayList([]const u8).empty;
@@ -638,13 +638,13 @@ fn referenceName(text: []const u8) ?[]const u8 {
     return null;
 }
 
-test "load recipe and drivers" {
+test "load recipe and adapters" {
     const gpa = std.testing.allocator;
 
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu.toml",
+    try workspace.writeFile("adapters/psu.toml",
         \\[metadata]
         \\
         \\[commands.set]
@@ -653,7 +653,7 @@ test "load recipe and drivers" {
     try workspace.writeFile("recipes/r1_set.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu.toml
+        \\    adapter: psu.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record: all
@@ -668,12 +668,12 @@ test "load recipe and drivers" {
         \\          voltage: "5"
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/r1_set.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     var compiled = try precompilePath(gpa, recipe_path, dir);
@@ -681,7 +681,7 @@ test "load recipe and drivers" {
 
     const instrument = compiled.instruments.getPtr("d1") orelse return error.TestUnexpectedResult;
     try std.testing.expect(std.mem.eql(u8, instrument.resource, "USB0::1::INSTR"));
-    try std.testing.expect(std.mem.eql(u8, instrument.driver_name, "psu.toml"));
+    try std.testing.expect(std.mem.eql(u8, instrument.adapter_name, "psu.toml"));
     try std.testing.expectEqual(@as(usize, 1), instrument.commands.count());
 
     const command = instrument.commands.get("set") orelse return error.TestUnexpectedResult;
@@ -716,7 +716,7 @@ test "parse durations and stop conditions" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu.toml",
+    try workspace.writeFile("adapters/psu.toml",
         \\[metadata]
         \\
         \\[commands.set]
@@ -725,7 +725,7 @@ test "parse durations and stop conditions" {
     try workspace.writeFile("recipes/r2_stop_when.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu.toml
+        \\    adapter: psu.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record: all
@@ -741,12 +741,12 @@ test "parse durations and stop conditions" {
         \\  max_iterations: 3
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/r2_stop_when.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     var compiled = try precompilePath(gpa, recipe_path, dir);
@@ -778,7 +778,7 @@ test "precompile preserves initial variables" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.makePath("drivers");
+    try workspace.makePath("adapters");
     try workspace.writeFile("recipes/initial_vars.yaml",
         \\instruments: {}
         \\pipeline:
@@ -789,12 +789,12 @@ test "precompile preserves initial variables" {
         \\tasks: []
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/initial_vars.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     var compiled = try precompilePath(gpa, recipe_path, dir);
@@ -827,7 +827,7 @@ test "precompile estimates iterations for run-once recipes" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu.toml",
+    try workspace.writeFile("adapters/psu.toml",
         \\[metadata]
         \\
         \\[commands.set]
@@ -836,7 +836,7 @@ test "precompile estimates iterations for run-once recipes" {
     try workspace.writeFile("recipes/run_once.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu.toml
+        \\    adapter: psu.toml
         \\    resource: R
         \\pipeline:
         \\  record: all
@@ -854,12 +854,12 @@ test "precompile estimates iterations for run-once recipes" {
         \\        args: {}
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/run_once.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     var compiled = try precompilePath(gpa, recipe_path, dir);
@@ -875,7 +875,7 @@ test "precompile marks iterations unknown for time-limited infinite loops" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu.toml",
+    try workspace.writeFile("adapters/psu.toml",
         \\[metadata]
         \\
         \\[commands.set]
@@ -884,7 +884,7 @@ test "precompile marks iterations unknown for time-limited infinite loops" {
     try workspace.writeFile("recipes/time_limited.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu.toml
+        \\    adapter: psu.toml
         \\    resource: R
         \\pipeline:
         \\  record: all
@@ -899,12 +899,12 @@ test "precompile marks iterations unknown for time-limited infinite loops" {
         \\  time_elapsed: 1s
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/time_limited.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     var compiled = try precompilePath(gpa, recipe_path, dir);
@@ -920,7 +920,7 @@ test "precompile preserves typed literal step arguments" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/cfg.toml",
+    try workspace.writeFile("adapters/cfg.toml",
         \\[metadata]
         \\
         \\[commands.configure]
@@ -929,7 +929,7 @@ test "precompile preserves typed literal step arguments" {
     try workspace.writeFile("recipes/typed_args.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: cfg.toml
+        \\    adapter: cfg.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record: all
@@ -950,12 +950,12 @@ test "precompile preserves typed literal step arguments" {
         \\          mirror: "${target}"
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/typed_args.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     var compiled = try precompilePath(gpa, recipe_path, dir);
@@ -1036,7 +1036,7 @@ test "precompile preserves typed literal step arguments" {
     }
 }
 
-const vendor_psu_driver =
+const vendor_psu_adapter =
     \\[metadata]
     \\
     \\[commands.set_voltage]
@@ -1049,7 +1049,7 @@ test "precompile stores only referenced commands" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml",
+    try workspace.writeFile("adapters/psu0.toml",
         \\[metadata]
         \\
         \\[commands.set_voltage]
@@ -1061,7 +1061,7 @@ test "precompile stores only referenced commands" {
     try workspace.writeFile("recipes/r1_set_voltage.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record: all
@@ -1075,12 +1075,12 @@ test "precompile stores only referenced commands" {
         \\          voltage: "1.0"
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     var compiled = try precompilePath(gpa, recipe_path, dir);
@@ -1098,11 +1098,11 @@ test "precompile rejects missing instrument references" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
     try workspace.writeFile("recipes/missing_instrument.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record: all
@@ -1116,12 +1116,12 @@ test "precompile rejects missing instrument references" {
         \\          voltage: "1.0"
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/missing_instrument.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     try std.testing.expectError(error.InstrumentNotFound, precompilePath(gpa, recipe_path, dir));
@@ -1133,11 +1133,11 @@ test "precompile validates command arguments" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
     try workspace.writeFile("recipes/missing_argument.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record: all
@@ -1150,7 +1150,7 @@ test "precompile validates command arguments" {
     try workspace.writeFile("recipes/unexpected_argument.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record: all
@@ -1166,14 +1166,14 @@ test "precompile validates command arguments" {
         \\          channel: 1
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const missing_argument_path = try workspace.realpathAlloc("recipes/missing_argument.yaml");
     defer gpa.free(missing_argument_path);
     const unexpected_argument_path = try workspace.realpathAlloc("recipes/unexpected_argument.yaml");
     defer gpa.free(unexpected_argument_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     try std.testing.expectError(error.MissingCommandArgument, precompilePath(gpa, missing_argument_path, dir));
@@ -1183,11 +1183,11 @@ test "precompile validates command arguments" {
 test "precompiled command renders via helper" {
     const gpa = std.testing.allocator;
 
-    const source = try Driver.Command.parse(gpa, "VOLT {voltage}", null);
+    const source = try Adapter.Command.parse(gpa, "VOLT {voltage}", null);
     defer source.deinit(gpa);
 
     var instrument = types.PrecompiledInstrument{
-        .driver_name = "psu",
+        .adapter_name = "psu",
         .resource = "USB0::1::INSTR",
         .commands = std.StringHashMap(*const types.PrecompiledCommand).init(gpa),
         .write_termination = "\n",
@@ -1217,11 +1217,11 @@ test "precompiled command renders via helper" {
 test "precompiled command render falls back to heap when suffix leaves too little stack space" {
     const gpa = std.testing.allocator;
 
-    const source = try Driver.Command.parse(gpa, "VOLT {voltage}", null);
+    const source = try Adapter.Command.parse(gpa, "VOLT {voltage}", null);
     defer source.deinit(gpa);
 
     var instrument = types.PrecompiledInstrument{
-        .driver_name = "psu",
+        .adapter_name = "psu",
         .resource = "USB0::1::INSTR",
         .commands = std.StringHashMap(*const types.PrecompiledCommand).init(gpa),
         .write_termination = "\r\n",
@@ -1250,11 +1250,11 @@ test "precompile diagnostic includes step context" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
     try workspace.writeFile("recipes/missing_command.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record: all
@@ -1267,12 +1267,12 @@ test "precompile diagnostic includes step context" {
         \\          voltage: "1.0"
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/missing_command.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     var precompile_diagnostic = diagnostic.PrecompileDiagnostic.init(gpa);
@@ -1287,7 +1287,7 @@ test "precompile diagnostic includes step context" {
         try precompile_diagnostic.write(&out.writer, err);
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "task 0 step 0"));
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "instrument=d1"));
-        try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "driver=psu0"));
+        try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "adapter=psu0"));
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "command=missing"));
         return;
     };
@@ -1301,11 +1301,11 @@ test "precompile compute step" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
     try workspace.writeFile("recipes/compute.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record: all
@@ -1325,12 +1325,12 @@ test "precompile compute step" {
         \\        save_as: doubled
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/compute.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     var compiled = try precompilePath(gpa, recipe_path, dir);
@@ -1359,11 +1359,11 @@ test "precompile compute step rejects missing save_as" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
     try workspace.writeFile("recipes/compute_no_save.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record: all
@@ -1373,12 +1373,12 @@ test "precompile compute step rejects missing save_as" {
         \\      - compute: 1 + 2
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/compute_no_save.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     // With the union-based StepConfig, missing required fields (save_as) results in a parse error.
@@ -1391,11 +1391,11 @@ test "precompile step with when guard" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
     try workspace.writeFile("recipes/when_guard.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record: all
@@ -1412,12 +1412,12 @@ test "precompile step with when guard" {
         \\        when: "${power} > 100"
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/when_guard.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     var compiled = try precompilePath(gpa, recipe_path, dir);
@@ -1432,11 +1432,11 @@ test "precompile rejects invalid step (neither call nor compute)" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
     try workspace.writeFile("recipes/invalid_step.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record: all
@@ -1446,12 +1446,12 @@ test "precompile rejects invalid step (neither call nor compute)" {
         \\      - save_as: orphan
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/invalid_step.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     // With the union-based StepConfig, an object matching neither variant results in a parse error.
@@ -1464,11 +1464,11 @@ test "precompile rejects record with unknown save_as variable" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
     try workspace.writeFile("recipes/bad_record.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record:
@@ -1490,12 +1490,12 @@ test "precompile rejects record with unknown save_as variable" {
         \\        save_as: voltage
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/bad_record.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     try std.testing.expectError(error.RecordVariableNotFound, precompilePath(gpa, recipe_path, dir));
@@ -1507,11 +1507,11 @@ test "precompile accepts valid record subset" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
     try workspace.writeFile("recipes/record_ok.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record:
@@ -1534,12 +1534,12 @@ test "precompile accepts valid record subset" {
         \\        save_as: doubled
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/record_ok.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     var compiled = try precompilePath(gpa, recipe_path, dir);
@@ -1560,11 +1560,11 @@ test "precompile diagnostic for missing pipeline" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
     try workspace.writeFile("recipes/no_pipeline.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\tasks:
         \\  - every_ms: 0
@@ -1577,12 +1577,12 @@ test "precompile diagnostic for missing pipeline" {
         \\            - 1
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/no_pipeline.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     var precompile_diagnostic = diagnostic.PrecompileDiagnostic.init(gpa);
@@ -1608,11 +1608,11 @@ test "precompile diagnostic for missing record" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
     try workspace.writeFile("recipes/no_record.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline: {}
         \\tasks:
@@ -1626,12 +1626,12 @@ test "precompile diagnostic for missing record" {
         \\            - 1
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/no_record.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     var precompile_diagnostic = diagnostic.PrecompileDiagnostic.init(gpa);
@@ -1657,11 +1657,11 @@ test "precompile expands record all into explicit save_as list" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
     try workspace.writeFile("recipes/record_all.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record: all
@@ -1682,12 +1682,12 @@ test "precompile expands record all into explicit save_as list" {
         \\        save_as: doubled
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/record_all.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     var compiled = try precompilePath(gpa, recipe_path, dir);
@@ -1710,7 +1710,7 @@ test "precompile rejects undeclared variable use" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu.toml",
+    try workspace.writeFile("adapters/psu.toml",
         \\[metadata]
         \\
         \\[commands.set]
@@ -1719,7 +1719,7 @@ test "precompile rejects undeclared variable use" {
     try workspace.writeFile("recipes/undeclared.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu.toml
+        \\    adapter: psu.toml
         \\    resource: R
         \\pipeline:
         \\  record: all
@@ -1735,12 +1735,12 @@ test "precompile rejects undeclared variable use" {
         \\        save_as: undeclared_var
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/undeclared.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     try std.testing.expectError(error.UndeclaredVariable, precompilePath(gpa, recipe_path, dir));
@@ -1752,7 +1752,7 @@ test "precompile rejects undeclared variable in expression" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.makePath("drivers");
+    try workspace.makePath("adapters");
     try workspace.writeFile("recipes/undeclared_expr.yaml",
         \\instruments: {}
         \\pipeline:
@@ -1766,12 +1766,12 @@ test "precompile rejects undeclared variable in expression" {
         \\        save_as: v
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/undeclared_expr.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
     try std.testing.expectError(error.UndeclaredVariable, precompilePath(gpa, recipe_path, dir));

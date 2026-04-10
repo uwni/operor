@@ -1,20 +1,20 @@
 const std = @import("std");
 const template = @import("template.zig");
 
-/// Human-readable metadata declared in a driver document.
-pub const DriverMeta = struct {
-    /// Optional semantic version string for the driver definition.
+/// Human-readable metadata declared in a adapter document.
+pub const AdapterMeta = struct {
+    /// Optional semantic version string for the adapter definition.
     version: ?[]const u8 = null,
     /// Optional free-form description shown to operators.
     description: ?[]const u8 = null,
-    /// Optional author or maintainer of the driver definition.
+    /// Optional author or maintainer of the adapter definition.
     author: ?[]const u8 = null,
 };
 
-/// Instrument-level defaults declared in a driver document.
+/// Instrument-level defaults declared in a adapter document.
 /// These fields configure VISA session behaviour and identity matching.
 pub const InstrumentSpec = struct {
-    /// Optional timeout applied to VISA I/O for this driver's instruments.
+    /// Optional timeout applied to VISA I/O for this adapter's instruments.
     timeout_ms: ?u32 = null,
     /// Optional response suffix removed from owned reads.
     read_termination: ?[]const u8 = null,
@@ -33,7 +33,7 @@ pub const InstrumentSpec = struct {
     firmware: ?[]const u8 = null,
 };
 
-/// Supported response encodings declared by driver commands.
+/// Supported response encodings declared by adapter commands.
 pub const Encoding = enum {
     raw,
     float,
@@ -58,7 +58,7 @@ pub const Encoding = enum {
     }
 };
 
-/// Parsed command entry from a driver document.
+/// Parsed command entry from a adapter document.
 pub const Command = struct {
     /// Expected response encoding when the command reads back data.
     response: ?Encoding,
@@ -147,7 +147,7 @@ pub const Command = struct {
     }
 };
 
-test "driver command clones and reports placeholders" {
+test "adapter command clones and reports placeholders" {
     const gpa = std.testing.allocator;
 
     const parsed = try Command.parse(gpa, "VOLT {voltage},(@{channels})", null);

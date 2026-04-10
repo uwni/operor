@@ -5,7 +5,7 @@ pub const DiagnosticContext = struct {
     task_idx: ?usize = null,
     step_idx: ?usize = null,
     instrument_name: ?[]const u8 = null,
-    driver_name: ?[]const u8 = null,
+    adapter_name: ?[]const u8 = null,
     command_name: ?[]const u8 = null,
     argument_name: ?[]const u8 = null,
     argument_spec: ?[]const u8 = null,
@@ -17,7 +17,7 @@ pub const PrecompileDiagnostic = struct {
     task_idx: ?usize = null,
     step_idx: ?usize = null,
     instrument_name: ?[]u8 = null,
-    driver_name: ?[]u8 = null,
+    adapter_name: ?[]u8 = null,
     command_name: ?[]u8 = null,
     argument_name: ?[]u8 = null,
     argument_spec: ?[]u8 = null,
@@ -35,7 +35,7 @@ pub const PrecompileDiagnostic = struct {
     /// Clears all currently captured diagnostic fields.
     pub fn reset(self: *PrecompileDiagnostic) void {
         self.freeTextField(&self.instrument_name);
-        self.freeTextField(&self.driver_name);
+        self.freeTextField(&self.adapter_name);
         self.freeTextField(&self.command_name);
         self.freeTextField(&self.argument_name);
         self.freeTextField(&self.argument_spec);
@@ -49,7 +49,7 @@ pub const PrecompileDiagnostic = struct {
         self.task_idx = context.task_idx;
         self.step_idx = context.step_idx;
         try self.setTextField(&self.instrument_name, context.instrument_name);
-        try self.setTextField(&self.driver_name, context.driver_name);
+        try self.setTextField(&self.adapter_name, context.adapter_name);
         try self.setTextField(&self.command_name, context.command_name);
         try self.setTextField(&self.argument_name, context.argument_name);
         try self.setTextField(&self.argument_spec, context.argument_spec);
@@ -68,8 +68,8 @@ pub const PrecompileDiagnostic = struct {
         if (self.instrument_name) |instrument_name| {
             try writer.print(" instrument={s}", .{instrument_name});
         }
-        if (self.driver_name) |driver_name| {
-            try writer.print(" driver={s}", .{driver_name});
+        if (self.adapter_name) |adapter_name| {
+            try writer.print(" adapter={s}", .{adapter_name});
         }
         if (self.command_name) |command_name| {
             try writer.print(" command={s}", .{command_name});
@@ -83,9 +83,9 @@ pub const PrecompileDiagnostic = struct {
         try writer.writeAll(": ");
 
         switch (err) {
-            error.DriverNotFound => try writer.writeAll("driver not found"),
+            error.AdapterNotFound => try writer.writeAll("adapter not found"),
             error.InstrumentNotFound => try writer.writeAll("instrument not declared in recipe"),
-            error.CommandNotFound => try writer.writeAll("command not found in driver"),
+            error.CommandNotFound => try writer.writeAll("command not found in adapter"),
             error.MissingCommandArgument => try writer.writeAll("missing required command argument"),
             error.UnexpectedCommandArgument => try writer.writeAll("unexpected command argument"),
             error.InvalidArgument => try writer.writeAll("invalid step argument syntax"),

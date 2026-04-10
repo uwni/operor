@@ -2,29 +2,29 @@ const std = @import("std");
 const types = @import("types.zig");
 const visa = @import("../visa/root.zig");
 
-/// Loaded driver document with parsed command templates and metadata.
+/// Loaded adapter document with parsed command templates and metadata.
 /// Owns arena-backed data and should have a single logical owner until `deinit`.
-const Driver = @This();
+const Adapter = @This();
 
 arena: std.heap.ArenaAllocator,
 path: []const u8,
-meta: types.DriverMeta,
+meta: types.AdapterMeta,
 instrument: types.InstrumentSpec,
 commands: std.StringHashMap(Command),
 /// Suffix appended to every write command (e.g. "\n", "\r\n").
-/// Empty string means no write termination. Owned by the driver arena.
+/// Empty string means no write termination. Owned by the adapter arena.
 write_termination: []const u8,
-/// Resolved session options derived from driver metadata, excluding write termination.
+/// Resolved session options derived from adapter metadata, excluding write termination.
 options: visa.InstrumentOptions,
 
-/// Parsed command entry from a driver document.
+/// Parsed command entry from a adapter document.
 pub const Command = types.Command;
 
-/// Supported response encodings declared by driver commands.
+/// Supported response encodings declared by adapter commands.
 pub const Encoding = types.Encoding;
 
-/// Releases all arena-owned memory associated with a parsed driver.
-pub fn deinit(self: *Driver) void {
+/// Releases all arena-owned memory associated with a parsed adapter.
+pub fn deinit(self: *Adapter) void {
     self.arena.deinit();
 }
 

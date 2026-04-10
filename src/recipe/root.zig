@@ -19,7 +19,7 @@ pub const Task = types.Task;
 pub const PipelineMode = types.PipelineMode;
 /// Optional pipeline configuration attached to a recipe.
 pub const PipelineConfig = types.PipelineConfig;
-/// Recipe instrument bound to a driver and the subset of commands it actually uses.
+/// Recipe instrument bound to a adapter and the subset of commands it actually uses.
 pub const PrecompiledInstrument = types.PrecompiledInstrument;
 /// Optional stop conditions applied to the scheduler loop.
 pub const StopWhen = types.StopWhen;

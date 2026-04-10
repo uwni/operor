@@ -33,7 +33,7 @@ pub const ArgValueDoc = union(enum) {
 
 /// Parsed instrument object straight from the recipe document.
 pub const InstrumentConfig = struct {
-    driver: []const u8,
+    adapter: []const u8,
     resource: []const u8,
 };
 
@@ -55,7 +55,7 @@ pub const CallStepConfig = struct {
     call: []const u8,
     /// Target instrument name.
     instrument: []const u8,
-    /// Arguments forwarded to the driver command template.
+    /// Arguments forwarded to the adapter command template.
     args: ?std.StringHashMap(ArgValueDoc) = null,
     /// Context key that receives the step result (response or computed value).
     save_as: ?[]const u8 = null,

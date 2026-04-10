@@ -5,8 +5,8 @@ pub const Context = @import("Context.zig");
 
 /// Runtime options for recipe execution.
 pub const ExecOptions = struct {
-    /// Directory containing driver documents and the registry cache.
-    driver_dir: []const u8,
+    /// Directory containing adapter documents and the registry cache.
+    adapter_dir: []const u8,
     /// Path to the recipe document to execute.
     recipe_path: []const u8,
     /// If true, rendered commands are logged instead of being sent to instruments.

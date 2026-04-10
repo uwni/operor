@@ -1,15 +1,15 @@
 const std = @import("std");
-const Driver = @import("Driver.zig");
+const Adapter = @import("Adapter.zig");
 const doc_parse = @import("../doc_parse.zig");
 const testing = @import("../testing.zig");
 const types = @import("types.zig");
 const visa = @import("../visa/root.zig");
 
-const max_driver_file_size: usize = 512 * 1024;
+const max_adapter_file_size: usize = 512 * 1024;
 
-/// Raw serialized shape of a driver document.
-const DriverDoc = struct {
-    metadata: types.DriverMeta = .{},
+/// Raw serialized shape of a adapter document.
+const AdapterDoc = struct {
+    metadata: types.AdapterMeta = .{},
     instrument: types.InstrumentSpec = .{},
     commands: std.StringHashMap(CommandDoc),
 };
@@ -20,13 +20,13 @@ const CommandDoc = struct {
     read: ?[]const u8 = null,
 };
 
-/// Parses a driver document from an already-open directory.
-pub fn parseDriverInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_name: []const u8) !Driver {
-    var driver_arena = std.heap.ArenaAllocator.init(allocator);
-    errdefer driver_arena.deinit();
-    const alloc = driver_arena.allocator();
+/// Parses a adapter document from an already-open directory.
+pub fn parseAdapterInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_name: []const u8) !Adapter {
+    var adapter_arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer adapter_arena.deinit();
+    const alloc = adapter_arena.allocator();
 
-    const parsed = try doc_parse.parseFileInDir(DriverDoc, alloc, dir, file_name, max_driver_file_size);
+    const parsed = try doc_parse.parseFileInDir(AdapterDoc, alloc, dir, file_name, max_adapter_file_size);
 
     var commands = std.StringHashMap(types.Command).init(alloc);
     var it = parsed.commands.iterator();
@@ -39,8 +39,8 @@ pub fn parseDriverInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_name
     const inst = parsed.instrument;
     const write_termination = inst.write_termination orelse "";
 
-    return Driver{
-        .arena = driver_arena,
+    return Adapter{
+        .arena = adapter_arena,
         .path = try dir.realpathAlloc(alloc, file_name),
         .meta = parsed.metadata,
         .instrument = inst,
@@ -55,29 +55,29 @@ pub fn parseDriverInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_name
     };
 }
 
-test "parse driver templates and placeholders" {
+test "parse adapter templates and placeholders" {
     const gpa = std.testing.allocator;
 
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/vendor_psu_set_voltage.toml",
+    try workspace.writeFile("adapters/vendor_psu_set_voltage.toml",
         \\[metadata]
         \\
         \\[commands.set_voltage]
         \\write = "VOLT {voltage},(@{channels})"
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var driver = try parseDriverInDir(gpa, dir, "vendor_psu_set_voltage.toml");
-    defer driver.deinit();
+    var adapter = try parseAdapterInDir(gpa, dir, "vendor_psu_set_voltage.toml");
+    defer adapter.deinit();
 
-    const cmd = driver.commands.get("set_voltage") orelse return error.TestUnexpectedResult;
+    const cmd = adapter.commands.get("set_voltage") orelse return error.TestUnexpectedResult;
     try std.testing.expect(cmd.response == null);
     try std.testing.expectEqual(@as(usize, 5), cmd.template.len);
 
@@ -91,13 +91,13 @@ test "parse driver templates and placeholders" {
     }
 }
 
-test "parse driver response encoding" {
+test "parse adapter response encoding" {
     const gpa = std.testing.allocator;
 
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/vendor_dmm_measure_voltage.toml",
+    try workspace.writeFile("adapters/vendor_dmm_measure_voltage.toml",
         \\[metadata]
         \\
         \\[commands.measure_voltage]
@@ -105,27 +105,27 @@ test "parse driver response encoding" {
         \\read = "float"
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var driver = try parseDriverInDir(gpa, dir, "vendor_dmm_measure_voltage.toml");
-    defer driver.deinit();
+    var adapter = try parseAdapterInDir(gpa, dir, "vendor_dmm_measure_voltage.toml");
+    defer adapter.deinit();
 
-    const cmd = driver.commands.get("measure_voltage") orelse return error.TestUnexpectedResult;
+    const cmd = adapter.commands.get("measure_voltage") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(types.Encoding.float, cmd.response.?);
     try std.testing.expectEqual(@as(usize, 1), cmd.template.len);
 }
 
-test "parse driver with write termination" {
+test "parse adapter with write termination" {
     const gpa = std.testing.allocator;
 
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/serial_psu.toml",
+    try workspace.writeFile("adapters/serial_psu.toml",
         \\[metadata]
         \\version = "1.0"
         \\description = "PSU over serial"
@@ -137,25 +137,25 @@ test "parse driver with write termination" {
         \\write = "VOLT {voltage}"
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var driver = try parseDriverInDir(gpa, dir, "serial_psu.toml");
-    defer driver.deinit();
+    var adapter = try parseAdapterInDir(gpa, dir, "serial_psu.toml");
+    defer adapter.deinit();
 
-    try std.testing.expectEqualStrings("\n", driver.write_termination);
+    try std.testing.expectEqualStrings("\n", adapter.write_termination);
 }
 
-test "parse driver without write termination defaults to none" {
+test "parse adapter without write termination defaults to none" {
     const gpa = std.testing.allocator;
 
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/gpib_dmm.toml",
+    try workspace.writeFile("adapters/gpib_dmm.toml",
         \\[metadata]
         \\
         \\[commands.measure]
@@ -163,25 +163,25 @@ test "parse driver without write termination defaults to none" {
         \\read = "float"
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var driver = try parseDriverInDir(gpa, dir, "gpib_dmm.toml");
-    defer driver.deinit();
+    var adapter = try parseAdapterInDir(gpa, dir, "gpib_dmm.toml");
+    defer adapter.deinit();
 
-    try std.testing.expectEqualStrings("", driver.write_termination);
+    try std.testing.expectEqualStrings("", adapter.write_termination);
 }
 
-test "parse driver instrument options" {
+test "parse adapter instrument options" {
     const gpa = std.testing.allocator;
 
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/tcp_scope.toml",
+    try workspace.writeFile("adapters/tcp_scope.toml",
         \\[metadata]
         \\version = "1.0"
         \\description = "Scope over TCPIP"
@@ -198,18 +198,18 @@ test "parse driver instrument options" {
         \\read = "string"
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
 
-    var dir = try std.fs.openDirAbsolute(driver_dir, .{});
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var driver = try parseDriverInDir(gpa, dir, "tcp_scope.toml");
-    defer driver.deinit();
+    var adapter = try parseAdapterInDir(gpa, dir, "tcp_scope.toml");
+    defer adapter.deinit();
 
-    try std.testing.expectEqual(@as(?u32, 2500), driver.options.timeout_ms);
-    try std.testing.expectEqualStrings("\n", driver.options.read_termination);
-    try std.testing.expectEqualStrings("\r\n", driver.write_termination);
-    try std.testing.expectEqual(@as(u32, 25), driver.options.query_delay_ms);
-    try std.testing.expectEqual(@as(usize, 4096), driver.options.chunk_size);
+    try std.testing.expectEqual(@as(?u32, 2500), adapter.options.timeout_ms);
+    try std.testing.expectEqualStrings("\n", adapter.options.read_termination);
+    try std.testing.expectEqualStrings("\r\n", adapter.write_termination);
+    try std.testing.expectEqual(@as(u32, 25), adapter.options.query_delay_ms);
+    try std.testing.expectEqual(@as(usize, 4096), adapter.options.chunk_size);
 }

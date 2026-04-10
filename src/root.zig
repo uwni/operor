@@ -1,11 +1,11 @@
 const std = @import("std");
 
-/// Document parsing helpers for driver and recipe files.
+/// Document parsing helpers for adapter and recipe files.
 pub const doc_parse = @import("doc_parse.zig");
 /// Expression parser and evaluator for compute steps and `when` guards.
 pub const expr = @import("expr.zig");
-/// Driver parsing APIs.
-pub const Driver = @import("driver/Driver.zig");
+/// Adapter parsing APIs.
+pub const Adapter = @import("adapter/Adapter.zig");
 /// Recipe execution engine.
 pub const executor = @import("executor/root.zig");
 /// Recipe parsing and precompilation APIs.
@@ -52,7 +52,7 @@ pub fn repl(
 /// Precompiles and prints a human-readable preview of a recipe without opening VISA sessions.
 pub fn preview(
     allocator: std.mem.Allocator,
-    driver_dir: []const u8,
+    adapter_dir: []const u8,
     recipe_path: []const u8,
     log: *std.Io.Writer,
 ) !void {
@@ -60,10 +60,10 @@ pub fn preview(
     defer precompile_diagnostic.deinit();
 
     var compiled = blk: {
-        var dir = if (std.fs.path.isAbsolute(driver_dir))
-            try std.fs.openDirAbsolute(driver_dir, .{})
+        var dir = if (std.fs.path.isAbsolute(adapter_dir))
+            try std.fs.openDirAbsolute(adapter_dir, .{})
         else
-            try std.fs.cwd().openDir(driver_dir, .{});
+            try std.fs.cwd().openDir(adapter_dir, .{});
         defer dir.close();
         break :blk recipe.PrecompiledRecipe.precompilePathWithDiagnostic(allocator, recipe_path, dir, &precompile_diagnostic) catch |err| {
             try precompile_diagnostic.write(log, err);
@@ -134,7 +134,7 @@ test "preview output" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/psu0.toml",
+    try workspace.writeFile("adapters/psu0.toml",
         \\[metadata]
         \\
         \\[commands.set_voltage]
@@ -143,7 +143,7 @@ test "preview output" {
     try workspace.writeFile("recipes/r1_set_voltage.yaml",
         \\instruments:
         \\  d1:
-        \\    driver: psu0.toml
+        \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\pipeline:
         \\  record: all
@@ -159,15 +159,15 @@ test "preview output" {
         \\            - 2
     );
 
-    const driver_dir = try workspace.realpathAlloc("drivers");
-    defer gpa.free(driver_dir);
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.yaml");
     defer gpa.free(recipe_path);
 
     var out = std.Io.Writer.Allocating.init(gpa);
     defer out.deinit();
 
-    try preview(gpa, driver_dir, recipe_path, &out.writer);
+    try preview(gpa, adapter_dir, recipe_path, &out.writer);
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "Instruments: 1"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "Tasks: 1"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "call=set_voltage"));

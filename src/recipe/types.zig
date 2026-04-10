@@ -1,7 +1,7 @@
 const std = @import("std");
 const serde_lib = @import("serde");
-const Driver = @import("../driver/Driver.zig");
-const template = @import("../driver/template.zig");
+const Adapter = @import("../adapter/Adapter.zig");
+const template = @import("../adapter/template.zig");
 const diagnostic = @import("diagnostic.zig");
 const expr = @import("../expr.zig");
 const visa = @import("../visa/root.zig");
@@ -81,8 +81,8 @@ pub const StepArg = union(enum) {
 pub const PrecompiledCommand = struct {
     /// Precompiled instrument that owns this command.
     instrument: *const PrecompiledInstrument,
-    /// Response encoding declared by the source driver command.
-    response: ?Driver.Encoding,
+    /// Response encoding declared by the source adapter command.
+    response: ?Adapter.Encoding,
     /// Allocator-owned compiled render segments used at execution time.
     segments: []const CompiledSegment,
     /// Unique placeholder names in render order.
@@ -143,10 +143,10 @@ pub const PrecompiledCommand = struct {
     }
 };
 
-/// Recipe instrument bound to a driver and the subset of commands it actually uses.
+/// Recipe instrument bound to a adapter and the subset of commands it actually uses.
 pub const PrecompiledInstrument = struct {
-    /// Driver name resolved during precompile.
-    driver_name: []const u8,
+    /// Adapter name resolved during precompile.
+    adapter_name: []const u8,
     /// VISA resource address for opening the instrument.
     resource: []const u8,
     /// Stable store of precompiled command pointers referenced by this recipe instrument.
@@ -173,7 +173,7 @@ pub const Step = struct {
     };
 
     pub const InstrumentCall = struct {
-        /// Driver command name preserved for preview and diagnostics.
+        /// Adapter command name preserved for preview and diagnostics.
         call: []const u8,
         /// Recipe instrument name preserved for preview and diagnostics.
         instrument: []const u8,
@@ -275,19 +275,19 @@ pub const PrecompiledRecipe = struct {
     pub fn precompilePath(
         allocator: std.mem.Allocator,
         recipe_path: []const u8,
-        driver_dir: std.fs.Dir,
+        adapter_dir: std.fs.Dir,
     ) !PrecompiledRecipe {
-        return @import("precompile.zig").precompilePath(allocator, recipe_path, driver_dir);
+        return @import("precompile.zig").precompilePath(allocator, recipe_path, adapter_dir);
     }
 
     /// Loads and precompiles a recipe document while capturing failure context.
     pub fn precompilePathWithDiagnostic(
         allocator: std.mem.Allocator,
         recipe_path: []const u8,
-        driver_dir: std.fs.Dir,
+        adapter_dir: std.fs.Dir,
         diagnostic_ctx: *diagnostic.PrecompileDiagnostic,
     ) !PrecompiledRecipe {
-        return @import("precompile.zig").precompilePathWithDiagnostic(allocator, recipe_path, driver_dir, diagnostic_ctx);
+        return @import("precompile.zig").precompilePathWithDiagnostic(allocator, recipe_path, adapter_dir, diagnostic_ctx);
     }
 };
 
