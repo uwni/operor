@@ -43,7 +43,7 @@ jobs:
           - target: aarch64-linux-musl
             os: linux
             ext: ""
-          - target: x86_64-windows-gnu
+          - target: x86_64-windows
             os: windows
             ext: ".exe"
 
