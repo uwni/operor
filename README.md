@@ -50,16 +50,16 @@ Preview the bundled example recipe without opening instruments:
 ordo run -d test-data/drivers test-data/recipes/r1_set.yaml --preview
 ```
 
-List visible VISA resources:
+Open an interactive REPL and discover instruments:
 
 ```sh
-ordo instrument list
+ordo repl
 ```
 
-Open an interactive REPL against one resource:
+Or connect directly to a known resource:
 
 ```sh
-ordo repl USB0::0x0957::0x1798::MY12345678::INSTR
+ordo repl -r USB0::0x0957::0x1798::MY12345678::INSTR
 ```
 
 Execute a recipe:
@@ -72,8 +72,7 @@ ordo run -d ./drivers ./recipes/measure.yaml --duration-ms 5000
 
 ```text
 ordo run -d <driver_dir> <recipe> [--preview] [--dry-run] [--duration-ms <ms>] [--visa-lib <path>]
-ordo instrument list [--visa-lib <path>]
-ordo repl <resource> [--visa-lib <path>]
+ordo repl [-r <resource>] [--visa-lib <path>]
 ```
 
 Command behavior:
@@ -82,8 +81,7 @@ Command behavior:
 - `run --preview` validates the recipe, drivers, commands, variables, and pipeline configuration without instrument I/O.
 - `run --dry-run` renders commands and logs them instead of writing to the instrument.
 - `run --duration-ms` adds a hard runtime limit from the CLI.
-- `instrument list` enumerates VISA resources through the default resource manager.
-- `repl` opens a line-oriented interactive session against one VISA resource.
+- `repl` opens a stateful interactive session. Use `-r` to connect on startup, or discover instruments with `list` and `open` inside the REPL.
 
 ## Core Concepts
 
@@ -260,20 +258,37 @@ Notes:
 
 ## REPL
 
-The REPL opens one VISA resource and supports these commands:
+The REPL is a stateful interactive session with two modes: **disconnected** and **connected**.
+
+In disconnected mode:
 
 ```text
-write <command>
-read
-query <command>
-help
-exit
+list              List available VISA instruments.
+open [<resource>]  Connect by address, or scan and pick interactively.
+help              Show available commands.
+quit              Leave the REPL.
 ```
 
-Example:
+In connected mode, instrument I/O commands become available:
+
+```text
+write <command>   Send a command to the instrument.
+read              Read a response from the instrument.
+query <command>   Send a command and then read the response.
+list              List available VISA instruments.
+close             Disconnect from the current instrument.
+help              Show available commands.
+quit              Leave the REPL.
+```
+
+Examples:
 
 ```sh
-ordo repl USB0::0x0957::0x1798::MY12345678::INSTR
+# Start disconnected, discover and connect interactively
+ordo repl
+
+# Connect to a known resource on startup
+ordo repl -r USB0::0x0957::0x1798::MY12345678::INSTR
 ```
 
 ## Examples
