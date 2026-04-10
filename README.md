@@ -10,37 +10,33 @@ Ordo loads instrument drivers from TOML, recipes from YAML, precompiles command 
 
 `--preview` does not open VISA sessions, so it can be used without a VISA library installed.
 
+
 ## Installation
+For Linux or macOS users, Run
+```sh
+curl -fsSL https://raw.githubusercontent.com/uwni/ordo/main/install.sh | sh
+```
 
-To run an existing Ordo binary, only the VISA runtime is required.
+Or
 
-The commands below assume `ordo` is already available in your shell `PATH`.
+
+
+```sh
+wget -qO- https://raw.githubusercontent.com/uwni/ordo/main/install.sh | sh
+```
+
+For Microsoft Windows users, Run
+
+```ps
+irm https://raw.githubusercontent.com/uwni/ordo/main/install.ps1 | iex
+```
+
+
+## Requirements
+
+To run an existing Ordo binary, only the VISA runtime is required. You can download it from [National Instrument](https://www.ni.com/en/support/downloads/drivers/download.ni-visa.html).
 
 If your VISA library is not installed in a standard location, pass it explicitly with `--visa-lib <path>`.
-
-## Build
-
-Building Ordo from source requires Zig 0.15.2 or newer.
-
-Build the executable:
-
-```sh
-zig build
-```
-
-The executable is produced at:
-
-```text
-zig-out/bin/ordo
-```
-
-If you build from source and do not install it into `PATH`, run it as `./zig-out/bin/ordo`.
-
-Run tests with:
-
-```sh
-zig build test
-```
 
 ## Quick Start
 
