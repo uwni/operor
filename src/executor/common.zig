@@ -1,7 +1,7 @@
 const std = @import("std");
 const recipe_types = @import("../recipe/types.zig");
 const visa = @import("../visa/root.zig");
-const context_mod = @import("Context.zig");
+pub const Context = @import("Context.zig");
 
 /// Runtime options for recipe execution.
 pub const ExecOptions = struct {
@@ -31,6 +31,5 @@ pub const InstrumentRuntime = struct {
     handle: ?visa.Instrument,
 };
 
-pub const Value = context_mod.Value;
-pub const RenderValue = context_mod.RenderValue;
-pub const Context = context_mod.Context;
+pub const Value = Context.Value;
+pub const RenderValue = Context.RenderValue;

@@ -1,4 +1,4 @@
-pub const Context = @This();
+const Context = @This();
 const std = @import("std");
 const expr = @import("../expr.zig");
 const recipe_types = @import("../recipe/types.zig");
