@@ -24,3 +24,5 @@ zig build test
 
 ## TODO
 - [] Fantasy command line output
+- [] User mannual or documentation
+- [] Official website
