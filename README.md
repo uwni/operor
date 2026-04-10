@@ -12,25 +12,23 @@ Ordo loads instrument drivers from TOML, recipes from YAML, precompiles command 
 
 
 ## Installation
-For Linux or macOS users, Run
-```sh
-curl -fsSL https://raw.githubusercontent.com/uwni/ordo/main/install.sh | sh
-```
+- For **Linux** or **macOS** users, Run
+  ```sh
+  # download and install ordo via a install script
+  curl -fsSL https://raw.githubusercontent.com/uwni/ordo/main/install.sh | sh
+  # or use wget instead via
+  wget -qO- https://raw.githubusercontent.com/uwni/ordo/main/install.sh | sh
+  ```
 
-Or
+  - **macOS** users may get a Gatekeeper warning because the binary is not signed/notarized. If that happens, allow it manually in **System Settings -> Privacy & Security**, or run:
+    ```sh
+    xattr -d com.apple.quarantine ./ordo
+    ```
 
-
-
-```sh
-wget -qO- https://raw.githubusercontent.com/uwni/ordo/main/install.sh | sh
-```
-
-For Microsoft Windows users, Run
-
-```ps
-irm https://raw.githubusercontent.com/uwni/ordo/main/install.ps1 | iex
-```
-
+- For **Microsoft Windows** users, Run
+  ```ps
+  irm https://raw.githubusercontent.com/uwni/ordo/main/install.ps1 | iex
+  ```
 
 ## Requirements
 
@@ -158,9 +156,7 @@ tasks:
 				instrument: psu
 				args:
 					voltage: "${target_voltage}"
-					channels:
-						- 1
-						- 2
+					channels: [1, 2]
 			- call: measure_voltage
 				instrument: psu
 				save_as: measured_voltage
