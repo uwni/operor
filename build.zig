@@ -1,4 +1,5 @@
 const std = @import("std");
+const pkg = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
@@ -18,9 +19,12 @@ pub fn build(b: *std.Build) !void {
     ordo_mod.addIncludePath(b.path("include/"));
     ordo_mod.addImport("serde", serde_dep.module("serde"));
 
+    const semver = std.SemanticVersion.parse(pkg.version) catch unreachable;
+
     // Create the executable
     const exe = b.addExecutable(.{
         .name = "ordo",
+        .version = semver,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -35,6 +39,8 @@ pub fn build(b: *std.Build) !void {
     // Inject build-time constants (exe name, version, etc.) into the CLI module.
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "exe_name", exe.name);
+
+    build_options.addOption([]const u8, "version", pkg.version);
     exe.root_module.addOptions("build_options", build_options);
 
     b.installArtifact(exe);

@@ -5,6 +5,9 @@ const build_options = @import("build_options");
 /// The executable name as set in build.zig (e.g. "ordo").
 pub const exe_name = build_options.exe_name;
 
+/// The package version from build.zig.zon, injected at build time.
+pub const version = build_options.version;
+
 /// Top-level CLI subcommands.
 pub const Command = enum {
     run,
@@ -20,6 +23,7 @@ pub fn usageAndHelpToFile(
 ) !void {
     var buf: [512]u8 = undefined;
     var w = file.writer(&buf);
+    try w.interface.print("{s} is an automated experimental workflow engine for VISA-controlled instruments. ({s})\n\n", .{exe_name, version});
     try w.interface.print("Usage: {s} ", .{name});
     try clap.usage(&w.interface, Id, params);
     try w.interface.print("\n\n", .{});
@@ -41,21 +45,17 @@ pub fn reportUnknownPositional(
     valid: []const u8,
 ) !void {
     const stderr = std.fs.File.stderr();
+    try usageAndHelpToFile(stderr, name, Id, params);
+
     var buf: [256]u8 = undefined;
     var w = stderr.writer(&buf);
     if (arg.len > 0) {
         try w.interface.print(
-            "Unknown command '{s}'. Valid commands: {s}.\n\n",
+            "\n\nUnknown command '{s}'. Valid commands: {s}.",
             .{ arg, valid },
         );
-    } else {
-        try w.interface.print(
-            "Missing command. Valid commands: {s}.\n\n",
-            .{valid},
-        );
+        try w.interface.flush();
     }
-    try w.interface.flush();
-    try usageAndHelpToFile(stderr, name, Id, params);
 }
 
 /// Parser table for the root command: the positional is parsed as a raw string
