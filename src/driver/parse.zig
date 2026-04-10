@@ -40,6 +40,7 @@ pub fn parseDriverInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_name
     return Driver{
         .arena = driver_arena,
         .path = try dir.realpathAlloc(alloc, file_name),
+        .meta = parsed.metadata,
         .commands = commands,
         .write_termination = write_termination,
         .options = .{

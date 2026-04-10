@@ -17,6 +17,13 @@ pub const DriverMeta = struct {
     query_delay_ms: ?u32 = null,
     /// Optional read chunk size for owned response collection.
     chunk_size: ?usize = null,
+    /// Manufacturer name expected in `*IDN?` responses (e.g. `"Keysight Technologies"`).
+    manufacturer: ?[]const u8 = null,
+    /// Optional list of supported device models (e.g. `["PSU-3303", "PSU-3305"]`).
+    /// Matched against the model field in `*IDN?` responses.
+    models: ?[]const []const u8 = null,
+    /// Optional firmware version or pattern for `*IDN?` validation.
+    firmware: ?[]const u8 = null,
 };
 
 /// Supported response encodings declared by driver commands.
