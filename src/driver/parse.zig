@@ -20,7 +20,7 @@ const CommandDoc = struct {
 };
 
 /// Parses a driver document from an already-open directory.
-pub fn parseDriverInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_name: []const u8) anyerror!Driver {
+pub fn parseDriverInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_name: []const u8) !Driver {
     var driver_arena = std.heap.ArenaAllocator.init(allocator);
     errdefer driver_arena.deinit();
     const alloc = driver_arena.allocator();

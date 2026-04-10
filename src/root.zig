@@ -107,11 +107,15 @@ pub fn preview(
         for (task.steps, 0..) |*step, step_idx| {
             switch (step.action) {
                 .instrument_call => |ic| {
-                    const save_label = if (ic.save_as) |save_as| save_as else "-";
-                    try log.print("    [{d}] call={s} instrument={s} save_as={s}\n", .{ step_idx, ic.call, ic.instrument, save_label });
+                    try log.print("    [{d}] call={s} instrument={s}", .{ step_idx, ic.call, ic.instrument });
+                    if (ic.save_slot) |slot| try log.print(" slot={d}", .{slot});
+                    if (ic.save_column) |col| try log.print(" col={d}", .{col});
+                    try log.print("\n", .{});
                 },
                 .compute => |comp| {
-                    try log.print("    [{d}] compute -> save_as={s}\n", .{ step_idx, comp.save_as });
+                    try log.print("    [{d}] compute -> slot={d}", .{ step_idx, comp.save_slot });
+                    if (comp.save_column) |col| try log.print(" col={d}", .{col});
+                    try log.print("\n", .{});
                 },
             }
             if (step.when != null) {
