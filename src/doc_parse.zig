@@ -4,12 +4,12 @@ const serde = @import("serde");
 /// Supported document formats for driver and recipe configuration files.
 pub const DocFormat = enum {
     toml,
-    json,
+    yaml,
 
-    /// Infers a document format from a file extension such as `.json`.
+    /// Infers a document format from a file extension such as `.yaml`.
     pub fn fromExtension(ext: []const u8) ?DocFormat {
         if (std.ascii.eqlIgnoreCase(ext, ".toml")) return .toml;
-        if (std.ascii.eqlIgnoreCase(ext, ".json")) return .json;
+        if (std.ascii.eqlIgnoreCase(ext, ".yaml")) return .yaml;
         return null;
     }
 };
@@ -23,9 +23,8 @@ pub fn detectFormat(path_or_name: []const u8) ?DocFormat {
 /// Caller owns the returned value and is responsible for freeing any allocated memory if T contains owned data.
 pub fn parseByFormat(comptime T: type, format: DocFormat, allocator: std.mem.Allocator, content: []const u8) !T {
     return switch (format) {
-        // not fully implemented yet, only json and toml are supported for now. yaml and xml parsing can be added later when needed.
         .toml => try serde.toml.fromSlice(T, allocator, content),
-        .json => try serde.json.fromSlice(T, allocator, content),
+        .yaml => try serde.yaml.fromSlice(T, allocator, content),
     };
 }
 
@@ -60,17 +59,15 @@ test "parse by format from dir handle content" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("misc/config_psu.json",
-        \\{
-        \\  "name": "psu"
-        \\}
+    try workspace.writeFile("misc/config_psu.yaml",
+        \\name: psu
     );
 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
-    const content = try workspace.readFileAlloc(arena.allocator(), "misc/config_psu.json", 1024);
-    const parsed = try parseByFormat(Parsed, .json, arena.allocator(), content);
+    const content = try workspace.readFileAlloc(arena.allocator(), "misc/config_psu.yaml", 1024);
+    const parsed = try parseByFormat(Parsed, .yaml, arena.allocator(), content);
     try std.testing.expectEqualStrings("psu", parsed.name);
 }
 
@@ -85,13 +82,11 @@ test "parse file path opens file directly" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("misc/config_psu.json",
-        \\{
-        \\  "name": "psu"
-        \\}
+    try workspace.writeFile("misc/config_psu.yaml",
+        \\name: psu
     );
 
-    const path = try workspace.realpathAlloc("misc/config_psu.json");
+    const path = try workspace.realpathAlloc("misc/config_psu.yaml");
     defer gpa.free(path);
 
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -112,10 +107,8 @@ test "parse file in dir opens file directly" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("misc/config_psu.json",
-        \\{
-        \\  "name": "psu"
-        \\}
+    try workspace.writeFile("misc/config_psu.yaml",
+        \\name: psu
     );
 
     const misc_dir_path = try workspace.realpathAlloc("misc");
@@ -127,6 +120,6 @@ test "parse file in dir opens file directly" {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
-    const parsed = try parseFileInDir(Parsed, arena.allocator(), misc_dir, "config_psu.json", 1024);
+    const parsed = try parseFileInDir(Parsed, arena.allocator(), misc_dir, "config_psu.yaml", 1024);
     try std.testing.expectEqualStrings("psu", parsed.name);
 }

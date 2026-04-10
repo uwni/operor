@@ -2,7 +2,6 @@ const std = @import("std");
 const serde_lib = @import("serde");
 const Driver = @import("../driver/Driver.zig");
 const template = @import("../driver/template.zig");
-const DriverRegistry = @import("../driver/DriverRegistry.zig");
 const diagnostic = @import("diagnostic.zig");
 const expr = @import("../expr.zig");
 const visa = @import("../visa/root.zig");
@@ -276,19 +275,19 @@ pub const PrecompiledRecipe = struct {
     pub fn precompilePath(
         allocator: std.mem.Allocator,
         recipe_path: []const u8,
-        driver_reg: *DriverRegistry,
+        driver_dir: std.fs.Dir,
     ) !PrecompiledRecipe {
-        return @import("precompile.zig").precompilePath(allocator, recipe_path, driver_reg);
+        return @import("precompile.zig").precompilePath(allocator, recipe_path, driver_dir);
     }
 
     /// Loads and precompiles a recipe document while capturing failure context.
     pub fn precompilePathWithDiagnostic(
         allocator: std.mem.Allocator,
         recipe_path: []const u8,
-        driver_reg: *DriverRegistry,
+        driver_dir: std.fs.Dir,
         diagnostic_ctx: *diagnostic.PrecompileDiagnostic,
     ) !PrecompiledRecipe {
-        return @import("precompile.zig").precompilePathWithDiagnostic(allocator, recipe_path, driver_reg, diagnostic_ctx);
+        return @import("precompile.zig").precompilePathWithDiagnostic(allocator, recipe_path, driver_dir, diagnostic_ctx);
     }
 };
 

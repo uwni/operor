@@ -1,0 +1,4 @@
+[metadata]
+
+[commands.set_voltage]
+write = "VOLT {voltage},(@{channels})"

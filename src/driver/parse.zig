@@ -40,7 +40,6 @@ pub fn parseDriverInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_name
     return Driver{
         .arena = driver_arena,
         .path = try dir.realpathAlloc(alloc, file_name),
-        .meta = parsed.metadata,
         .commands = commands,
         .write_termination = write_termination,
         .options = .{
@@ -58,17 +57,11 @@ test "parse driver templates and placeholders" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/vendor_psu_set_voltage.json",
-        \\{
-        \\  "metadata": {
-        \\    "name": "psu0",
-        \\  },
-        \\  "commands": {
-        \\    "set_voltage": {
-        \\      "write": "VOLT {voltage},(@{channels})",
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("drivers/vendor_psu_set_voltage.toml",
+        \\[metadata]
+        \\
+        \\[commands.set_voltage]
+        \\write = "VOLT {voltage},(@{channels})"
     );
 
     const driver_dir = try workspace.realpathAlloc("drivers");
@@ -77,10 +70,9 @@ test "parse driver templates and placeholders" {
     var dir = try std.fs.openDirAbsolute(driver_dir, .{});
     defer dir.close();
 
-    var driver = try parseDriverInDir(gpa, dir, "vendor_psu_set_voltage.json");
+    var driver = try parseDriverInDir(gpa, dir, "vendor_psu_set_voltage.toml");
     defer driver.deinit();
 
-    try std.testing.expectEqualStrings("psu0", driver.meta.name);
     const cmd = driver.commands.get("set_voltage") orelse return error.TestUnexpectedResult;
     try std.testing.expect(cmd.response == null);
     try std.testing.expectEqual(@as(usize, 5), cmd.template.len);
@@ -101,20 +93,12 @@ test "parse driver response encoding" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/vendor_dmm_measure_voltage.json",
-        \\{
-        \\  "metadata": {
-        \\    "name": "dmm",
-        \\    "version": null,
-        \\    "description": null
-        \\  },
-        \\  "commands": {
-        \\    "measure_voltage": {
-        \\      "write": "MEAS:VOLT?",
-        \\      "read": "float"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("drivers/vendor_dmm_measure_voltage.toml",
+        \\[metadata]
+        \\
+        \\[commands.measure_voltage]
+        \\write = "MEAS:VOLT?"
+        \\read = "float"
     );
 
     const driver_dir = try workspace.realpathAlloc("drivers");
@@ -123,10 +107,9 @@ test "parse driver response encoding" {
     var dir = try std.fs.openDirAbsolute(driver_dir, .{});
     defer dir.close();
 
-    var driver = try parseDriverInDir(gpa, dir, "vendor_dmm_measure_voltage.json");
+    var driver = try parseDriverInDir(gpa, dir, "vendor_dmm_measure_voltage.toml");
     defer driver.deinit();
 
-    try std.testing.expectEqualStrings("dmm", driver.meta.name);
     const cmd = driver.commands.get("measure_voltage") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(types.Encoding.float, cmd.response.?);
     try std.testing.expectEqual(@as(usize, 1), cmd.template.len);
@@ -138,21 +121,14 @@ test "parse driver with write termination" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/serial_psu.json",
-        \\{
-        \\  "metadata": {
-        \\    "name": "serial_psu",
-        \\    "version": "1.0",
-        \\    "description": "PSU over serial",
-        \\    "write_termination": "\n"
-        \\  },
-        \\  "commands": {
-        \\    "set_voltage": {
-        \\      "write": "VOLT {voltage}",
-        \\      "read": null
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("drivers/serial_psu.toml",
+        \\[metadata]
+        \\version = "1.0"
+        \\description = "PSU over serial"
+        \\write_termination = "\n"
+        \\
+        \\[commands.set_voltage]
+        \\write = "VOLT {voltage}"
     );
 
     const driver_dir = try workspace.realpathAlloc("drivers");
@@ -161,10 +137,9 @@ test "parse driver with write termination" {
     var dir = try std.fs.openDirAbsolute(driver_dir, .{});
     defer dir.close();
 
-    var driver = try parseDriverInDir(gpa, dir, "serial_psu.json");
+    var driver = try parseDriverInDir(gpa, dir, "serial_psu.toml");
     defer driver.deinit();
 
-    try std.testing.expectEqualStrings("serial_psu", driver.meta.name);
     try std.testing.expectEqualStrings("\n", driver.write_termination);
 }
 
@@ -174,20 +149,12 @@ test "parse driver without write termination defaults to none" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/gpib_dmm.json",
-        \\{
-        \\  "metadata": {
-        \\    "name": "gpib_dmm",
-        \\    "version": null,
-        \\    "description": null
-        \\  },
-        \\  "commands": {
-        \\    "measure": {
-        \\      "write": "MEAS?",
-        \\      "read": "float"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("drivers/gpib_dmm.toml",
+        \\[metadata]
+        \\
+        \\[commands.measure]
+        \\write = "MEAS?"
+        \\read = "float"
     );
 
     const driver_dir = try workspace.realpathAlloc("drivers");
@@ -196,7 +163,7 @@ test "parse driver without write termination defaults to none" {
     var dir = try std.fs.openDirAbsolute(driver_dir, .{});
     defer dir.close();
 
-    var driver = try parseDriverInDir(gpa, dir, "gpib_dmm.json");
+    var driver = try parseDriverInDir(gpa, dir, "gpib_dmm.toml");
     defer driver.deinit();
 
     try std.testing.expectEqualStrings("", driver.write_termination);
@@ -208,25 +175,19 @@ test "parse driver instrument options" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/tcp_scope.json",
-        \\{
-        \\  "metadata": {
-        \\    "name": "tcp_scope",
-        \\    "version": "1.0",
-        \\    "description": "Scope over TCPIP",
-        \\    "timeout_ms": 2500,
-        \\    "read_termination": "\n",
-        \\    "write_termination": "\r\n",
-        \\    "query_delay_ms": 25,
-        \\    "chunk_size": 4096
-        \\  },
-        \\  "commands": {
-        \\    "idn": {
-        \\      "write": "*IDN?",
-        \\      "read": "string"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("drivers/tcp_scope.toml",
+        \\[metadata]
+        \\version = "1.0"
+        \\description = "Scope over TCPIP"
+        \\timeout_ms = 2500
+        \\read_termination = "\n"
+        \\write_termination = "\r\n"
+        \\query_delay_ms = 25
+        \\chunk_size = 4096
+        \\
+        \\[commands.idn]
+        \\write = "*IDN?"
+        \\read = "string"
     );
 
     const driver_dir = try workspace.realpathAlloc("drivers");
@@ -235,7 +196,7 @@ test "parse driver instrument options" {
     var dir = try std.fs.openDirAbsolute(driver_dir, .{});
     defer dir.close();
 
-    var driver = try parseDriverInDir(gpa, dir, "tcp_scope.json");
+    var driver = try parseDriverInDir(gpa, dir, "tcp_scope.toml");
     defer driver.deinit();
 
     try std.testing.expectEqual(@as(?u32, 2500), driver.options.timeout_ms);

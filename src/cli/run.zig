@@ -80,7 +80,7 @@ test "main parses run command" {
         "run",
         "--driver-dir",
         "drivers",
-        "recipes/r1.json",
+        "recipes/r1.yaml",
         "--preview",
         "--duration-ms",
         "250",
@@ -102,7 +102,7 @@ test "main parses run command" {
 
     try std.testing.expectEqual(@as(usize, 0), run.args.help);
     try std.testing.expectEqualStrings("drivers", run.args.@"driver-dir".?);
-    try std.testing.expectEqualStrings("recipes/r1.json", run.positionals[0].?);
+    try std.testing.expectEqualStrings("recipes/r1.yaml", run.positionals[0].?);
     try std.testing.expect(run.args.preview != 0);
     try std.testing.expect(run.args.@"dry-run" == 0);
     try std.testing.expectEqual(@as(?u64, 250), run.args.@"duration-ms");

@@ -1,6 +1,5 @@
 const std = @import("std");
 const Driver = @import("../driver/Driver.zig");
-const DriverRegistry = @import("../driver/DriverRegistry.zig");
 const recipe_mod = @import("../recipe/root.zig");
 const testing = @import("../testing.zig");
 const visa = @import("../visa/root.zig");
@@ -26,9 +25,12 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
     defer precompile_diagnostic.deinit();
 
     var compiled = blk: {
-        var registry = try DriverRegistry.init(allocator, opts.driver_dir);
-        defer registry.deinit();
-        break :blk recipe_mod.PrecompiledRecipe.precompilePathWithDiagnostic(allocator, opts.recipe_path, &registry, &precompile_diagnostic) catch |err| {
+        var dir = if (std.fs.path.isAbsolute(opts.driver_dir))
+            try std.fs.openDirAbsolute(opts.driver_dir, .{})
+        else
+            try std.fs.cwd().openDir(opts.driver_dir, .{});
+        defer dir.close();
+        break :blk recipe_mod.PrecompiledRecipe.precompilePathWithDiagnostic(allocator, opts.recipe_path, dir, &precompile_diagnostic) catch |err| {
             try precompile_diagnostic.write(log, err);
             return err;
         };
@@ -145,19 +147,10 @@ fn prepareRuntime(
 }
 
 const vendor_psu_driver =
-    \\{
-    \\  "metadata": {
-    \\    "name": "psu0",
-    \\    "version": null,
-    \\    "description": null
-    \\  },
-    \\  "commands": {
-    \\    "set_voltage": {
-    \\      "write": "VOLT {voltage},(@{channels})",
-    \\      "read": null
-    \\    }
-    \\  }
-    \\}
+    \\[metadata]
+    \\
+    \\[commands.set_voltage]
+    \\write = "VOLT {voltage},(@{channels})"
 ;
 
 test "executor execute dry run" {
@@ -166,39 +159,29 @@ test "executor execute dry run" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/vendor_psu_set_voltage.json", vendor_psu_driver);
-    try workspace.writeFile("recipes/r1_set_voltage.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "driver": "psu0",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": "all"
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "every_ms": 0,
-        \\      "steps": [
-        \\        {
-        \\          "call": "set_voltage",
-        \\          "instrument": "d1",
-        \\          "args": {
-        \\            "voltage": 5,
-        \\            "channels": [1, 2]
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("recipes/r1_set_voltage.yaml",
+        \\instruments:
+        \\  d1:
+        \\    driver: psu0.toml
+        \\    resource: USB0::1::INSTR
+        \\pipeline:
+        \\  record: all
+        \\tasks:
+        \\  - every_ms: 0
+        \\    steps:
+        \\      - call: set_voltage
+        \\        instrument: d1
+        \\        args:
+        \\          voltage: 5
+        \\          channels:
+        \\            - 1
+        \\            - 2
     );
 
     const driver_dir = try workspace.realpathAlloc("drivers");
     defer gpa.free(driver_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.yaml");
     defer gpa.free(recipe_path);
 
     var out = std.Io.Writer.Allocating.init(gpa);
@@ -223,46 +206,35 @@ test "executor pipeline creates csv frame sink during dry run" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/vendor_psu_set_voltage.json", vendor_psu_driver);
-    try workspace.writeFile("recipes/pipeline.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "driver": "psu0",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "buffer_size": 64,
-        \\    "warn_usage_percent": 80,
-        \\    "mode": "safe",
-        \\    "file_path": "samples.csv",
-        \\    "record": "all"
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "every_ms": 0,
-        \\      "steps": [
-        \\        {
-        \\          "call": "set_voltage",
-        \\          "instrument": "d1",
-        \\          "args": {
-        \\            "voltage": 5,
-        \\            "channels": [1, 2]
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ],
-        \\  "stop_when": {
-        \\    "max_iterations": 2
-        \\  }
-        \\}
+    try workspace.writeFile("drivers/psu0.toml", vendor_psu_driver);
+    try workspace.writeFile("recipes/pipeline.yaml",
+        \\instruments:
+        \\  d1:
+        \\    driver: psu0.toml
+        \\    resource: USB0::1::INSTR
+        \\pipeline:
+        \\  buffer_size: 64
+        \\  warn_usage_percent: 80
+        \\  mode: safe
+        \\  file_path: samples.csv
+        \\  record: all
+        \\tasks:
+        \\  - every_ms: 0
+        \\    steps:
+        \\      - call: set_voltage
+        \\        instrument: d1
+        \\        args:
+        \\          voltage: 5
+        \\          channels:
+        \\            - 1
+        \\            - 2
+        \\stop_when:
+        \\  max_iterations: 2
     );
 
     const driver_dir = try workspace.realpathAlloc("drivers");
     defer gpa.free(driver_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/pipeline.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/pipeline.yaml");
     defer gpa.free(recipe_path);
 
     var out = std.Io.Writer.Allocating.init(gpa);

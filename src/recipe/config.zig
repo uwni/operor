@@ -104,19 +104,18 @@ test "parse recipe arg object values" {
 
     const gpa = std.testing.allocator;
     const content =
-        \\{
-        \\  "args": {
-        \\    "voltage": "5",
-        \\    "channels": [1, 2],
-        \\    "enabled": true
-        \\  }
-        \\}
+        \\args:
+        \\  voltage: "5"
+        \\  channels:
+        \\    - 1
+        \\    - 2
+        \\  enabled: true
     ;
 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
-    const parsed = try doc_parse.parseByFormat(Parsed, .json, arena.allocator(), content);
+    const parsed = try doc_parse.parseByFormat(Parsed, .yaml, arena.allocator(), content);
 
     const voltage = parsed.args.get("voltage") orelse return error.TestUnexpectedResult;
     switch (voltage) {

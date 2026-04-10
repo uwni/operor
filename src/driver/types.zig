@@ -3,12 +3,10 @@ const template = @import("template.zig");
 
 /// Human-readable metadata declared in a driver document.
 pub const DriverMeta = struct {
-    /// Canonical driver name referenced by recipes.
-    name: []const u8,
     /// Optional semantic version string for the driver definition.
-    version: ?[]const u8,
+    version: ?[]const u8 = null,
     /// Optional free-form description shown to operators.
-    description: ?[]const u8,
+    description: ?[]const u8 = null,
     /// Optional timeout applied to VISA I/O for this driver's instruments.
     timeout_ms: ?u32 = null,
     /// Optional response suffix removed from owned reads.

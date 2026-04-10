@@ -1,0 +1,16 @@
+instruments:
+  d1:
+    driver: psu.toml
+    resource: USB0::1::INSTR
+pipeline:
+  record: all
+tasks:
+  - every: 250ms
+    steps:
+      - call: set
+        instrument: d1
+        args:
+          voltage: "5"
+stop_when:
+  time_elapsed: 2s
+  max_iterations: 3

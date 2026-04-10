@@ -8,16 +8,12 @@ const Driver = @This();
 
 arena: std.heap.ArenaAllocator,
 path: []const u8,
-meta: DriverMeta,
 commands: std.StringHashMap(Command),
 /// Suffix appended to every write command (e.g. "\n", "\r\n").
 /// Empty string means no write termination. Owned by the driver arena.
 write_termination: []const u8,
 /// Resolved session options derived from driver metadata, excluding write termination.
 options: visa.InstrumentOptions,
-
-/// Human-readable metadata declared in a driver document.
-pub const DriverMeta = types.DriverMeta;
 
 /// Parsed command entry from a driver document.
 pub const Command = types.Command;

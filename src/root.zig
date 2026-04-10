@@ -4,9 +4,8 @@ const std = @import("std");
 pub const doc_parse = @import("doc_parse.zig");
 /// Expression parser and evaluator for compute steps and `when` guards.
 pub const expr = @import("expr.zig");
-/// Driver registry and parsing APIs.
+/// Driver parsing APIs.
 pub const Driver = @import("driver/Driver.zig");
-const DriverRegistry = @import("driver/DriverRegistry.zig");
 /// Recipe execution engine.
 pub const executor = @import("executor/root.zig");
 /// Recipe parsing and precompilation APIs.
@@ -61,9 +60,12 @@ pub fn preview(
     defer precompile_diagnostic.deinit();
 
     var compiled = blk: {
-        var registry = try DriverRegistry.init(allocator, driver_dir);
-        defer registry.deinit();
-        break :blk recipe.PrecompiledRecipe.precompilePathWithDiagnostic(allocator, recipe_path, &registry, &precompile_diagnostic) catch |err| {
+        var dir = if (std.fs.path.isAbsolute(driver_dir))
+            try std.fs.openDirAbsolute(driver_dir, .{})
+        else
+            try std.fs.cwd().openDir(driver_dir, .{});
+        defer dir.close();
+        break :blk recipe.PrecompiledRecipe.precompilePathWithDiagnostic(allocator, recipe_path, dir, &precompile_diagnostic) catch |err| {
             try precompile_diagnostic.write(log, err);
             return err;
         };
@@ -132,55 +134,34 @@ test "preview output" {
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("drivers/vendor_psu_set_voltage.json",
-        \\{
-        \\  "metadata": {
-        \\    "name": "psu0",
-        \\    "version": null,
-        \\    "description": null
-        \\  },
-        \\  "commands": {
-        \\    "set_voltage": {
-        \\      "write": "VOLT {voltage},(@{channels})",
-        \\      "read": null
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("drivers/psu0.toml",
+        \\[metadata]
+        \\
+        \\[commands.set_voltage]
+        \\write = "VOLT {voltage},(@{channels})"
     );
-    try workspace.writeFile("recipes/r1_set_voltage.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "driver": "psu0",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\
-        \\  "pipeline": {
-        \\    "record": "all"
-        \\  },
-        \\
-        \\  "tasks": [
-        \\    {
-        \\      "every_ms": 0,
-        \\      "steps": [
-        \\        {
-        \\          "call": "set_voltage",
-        \\          "instrument": "d1",
-        \\          "args": {
-        \\            "voltage": 5,
-        \\            "channels": [1, 2]
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/r1_set_voltage.yaml",
+        \\instruments:
+        \\  d1:
+        \\    driver: psu0.toml
+        \\    resource: USB0::1::INSTR
+        \\pipeline:
+        \\  record: all
+        \\tasks:
+        \\  - every_ms: 0
+        \\    steps:
+        \\      - call: set_voltage
+        \\        instrument: d1
+        \\        args:
+        \\          voltage: 5
+        \\          channels:
+        \\            - 1
+        \\            - 2
     );
 
     const driver_dir = try workspace.realpathAlloc("drivers");
     defer gpa.free(driver_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.yaml");
     defer gpa.free(recipe_path);
 
     var out = std.Io.Writer.Allocating.init(gpa);
