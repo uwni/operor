@@ -1,123 +1,290 @@
 # Ordo
 
-A CI Engine for excute experiment plan on your instruments.
+An automated experimental workflow engine for VISA-controlled instruments.
+
+Ordo loads instrument drivers from TOML, recipes from YAML, precompiles command templates and expressions, and executes scheduled tasks with optional preview, dry-run, CSV output, and TCP streaming.
+
+## Requirements
+
+- A VISA implementation to talk to instruments at runtime, such as NI-VISA or Keysight IO Libraries
+
+`--preview` does not open VISA sessions, so it can be used without a VISA library installed.
 
 ## Installation
 
+To run an existing Ordo binary, only the VISA runtime is required.
 
-## Usage
+The commands below assume `ordo` is already available in your shell `PATH`.
 
-Run the `run` subcommand with a driver directory and recipe path:
+If your VISA library is not installed in a standard location, pass it explicitly with `--visa-lib <path>`.
 
-```sh
-ordo run <driver_dir> <recipe> [--preview] [--dry-run] [--duration-ms <ms>]
-```
+## Build
 
-`--preview` validates referenced drivers, instruments, commands, and command arguments without opening VISA sessions.
+Building Ordo from source requires Zig 0.15.2 or newer.
 
-## Sampling Pipeline
-
-Execution now uses a dedicated sampler thread plus an SPSC ring buffer boundary so slow sinks never block device sampling.
-
-- The sampler only performs instrument I/O, captures task-level result frames, and pushes them into the ring buffer.
-- A worker thread drains the buffer and performs slow console, file, and network writes.
-- When the buffer fills, the executor emits a warning, stops scheduling new work, and reports frame buffer overflow counts plus buffer high-water marks.
-
-Recipe documents can optionally tune the pipeline:
-
-```json
-{
-	"pipeline": {
-		"mode": "realtime",
-		"buffer_size": 8192,
-		"warn_usage_percent": 90,
-		"file_path": "samples.csv",
-		"network_host": "127.0.0.1",
-		"network_port": 9000
-	}
-}
-```
-
-Notes:
-
-- `buffer_size` is optional and normalized to a power of two with sane defaults.
-- `mode` currently mainly affects pipeline defaults such as buffer sizing; `realtime` favors throughput, while `safe` keeps more conservative defaults.
-- Relative sink paths are resolved from the recipe file directory.
-- `file_path` writes one CSV row per task iteration frame. The columns come from the recipe's `save_as` labels, so values captured in the same task iteration are persisted in the same row.
-- `network_host` and `network_port` stream the same task-level result frames as self-contained JSON.
-- Runtime warnings report high buffer usage and frame buffer overflows; execution ends with a summary of capacity, max usage, current usage ratio, and overflows.
-
-## Command Lifecycle
-
-Each driver command moves through three explicit representations:
-
-| Stage | Input | Processing | Output |
-| --- | --- | --- | --- |
-| Driver parse | Driver document `commands.<name>.write` plus optional `read` | Parse the template string into literal/placeholder segments and resolve the optional response encoding. | `driver.Command` |
-| Recipe precompile | `driver.Command` referenced by a recipe step | Clone the parsed template into recipe-owned memory, collect placeholder names, validate step arguments, bind each precompiled command to its owning instrument, and bind each step directly to the precompiled command it will execute. Only commands actually used by the recipe are kept. | `recipe.PrecompiledCommand` |
-| Step execution | Bound `recipe.PrecompiledCommand` plus resolved step values | Resolve `${name}` references from runtime context, join list arguments, render the template into concrete bytes, and fall back to a heap buffer if the stack buffer is too small. | `recipe.RenderedCommand` |
-
-In short, the command path is:
-
-```text
-driver.Command -> recipe.PrecompiledCommand -> recipe.RenderedCommand
-```
-
-What each stage means in practice:
-
-1. Driver parse happens when a driver file is loaded. At this point the command is still a reusable driver definition: it knows the parsed template structure and optional response encoding, but it is not tied to any recipe step yet.
-2. Recipe precompile happens before preview or execution starts. This is where a recipe step selects a driver command, the system copies it into recipe-owned memory, records the placeholders it expects, validates the step arguments against that placeholder list, stores the owning instrument pointer on that `PrecompiledCommand`, and binds each step directly to the resolved precompiled command pointer. `--preview` stops at this stage.
-3. Step execution happens when the scheduler runs a step. The executor resolves runtime values, starts from `step.command`, recovers the owning instrument through `command.instrument`, calls `PrecompiledCommand.render`, and gets a `RenderedCommand` whose `bytes` can be sent directly to VISA. `--dry-run` stops after rendering and logs the rendered bytes instead of writing them to the instrument.
-4. If the command declares a response encoding, the executor reads the instrument response after writing and parses it according to the encoding stored on the `PrecompiledCommand`.
-
-Open an interactive VISA REPL against a single resource:
+Build the executable:
 
 ```sh
-ordo repl <resource>
+zig build
 ```
 
-## Driver I/O Options
-
-Driver metadata can tune the VISA session opened for each recipe instrument:
-
-```json
-{
-  "metadata": {
-    "name": "scope",
-    "write_termination": "\n",
-    "read_termination": "\n",
-    "timeout_ms": 2500,
-    "query_delay_ms": 25,
-    "chunk_size": 4096
-  }
-}
-```
-
-Notes:
-
-- `write_termination` is the explicit write-side suffix appended before the VISA write.
-- `read_termination` is removed from owned read buffers when present at the end of the response.
-- `query_delay_ms` inserts a delay between a write and the following read for commands that expect a response.
-- `chunk_size` controls the temporary buffer used while collecting multi-chunk responses.
-
-Inside the REPL you can use:
+The executable is produced at:
 
 ```text
-write <command>
-read
-query <command>
+zig-out/bin/ordo
 ```
 
-List all VISA instrument resources:
+If you build from source and do not install it into `PATH`, run it as `./zig-out/bin/ordo`.
+
+Run tests with:
+
+```sh
+zig build test
+```
+
+## Quick Start
+
+Preview the bundled example recipe without opening instruments:
+
+```sh
+ordo run -d test-data/drivers test-data/recipes/r1_set.yaml --preview
+```
+
+List visible VISA resources:
 
 ```sh
 ordo instrument list
 ```
 
-# Expression
-`{name[:format]}`
+Open an interactive REPL against one resource:
 
-# Todo List
-- [ ] Exception Handle: Not throw the errors instead of giving a comprehensive text
-- [x] Github CI Config
-- [ ] add description entry for driver. generate documentation for a driver
+```sh
+ordo repl USB0::0x0957::0x1798::MY12345678::INSTR
+```
+
+Execute a recipe:
+
+```sh
+ordo run -d ./drivers ./recipes/measure.yaml --duration-ms 5000
+```
+
+## CLI
+
+```text
+ordo run -d <driver_dir> <recipe> [--preview] [--dry-run] [--duration-ms <ms>] [--visa-lib <path>]
+ordo instrument list [--visa-lib <path>]
+ordo repl <resource> [--visa-lib <path>]
+```
+
+Command behavior:
+
+- `run` loads drivers, precompiles the recipe, and executes scheduled tasks.
+- `run --preview` validates the recipe, drivers, commands, variables, and pipeline configuration without instrument I/O.
+- `run --dry-run` renders commands and logs them instead of writing to the instrument.
+- `run --duration-ms` adds a hard runtime limit from the CLI.
+- `instrument list` enumerates VISA resources through the default resource manager.
+- `repl` opens a line-oriented interactive session against one VISA resource.
+
+## Core Concepts
+
+Ordo has two configuration layers:
+
+- Drivers define instrument metadata and command templates in TOML.
+- Recipes define instruments, variables, task schedules, expressions, and sinks in YAML.
+
+### Driver Files
+
+Driver documents are TOML files with optional metadata plus a `commands` table.
+
+```toml
+[metadata]
+version = "1.2.3"
+description = "Bench power supply"
+timeout_ms = 2500
+write_termination = "\n"
+read_termination = "\n"
+query_delay_ms = 25
+chunk_size = 4096
+manufacturer = "Keysight Technologies"
+models = ["E36312A"]
+firmware = "1.10"
+
+[commands.set_voltage]
+write = "VOLT {voltage},(@{channels})"
+
+[commands.measure_voltage]
+write = "MEAS:VOLT?"
+read = "float"
+```
+
+Notes:
+
+- Command template placeholders use `{name}` syntax.
+- Placeholder names must be valid identifiers.
+- A command with `read = "raw" | "float" | "int" | "string"` reads and parses a response after the write.
+- `write_termination` is appended automatically to every command sent through that driver.
+- `read_termination`, `timeout_ms`, `query_delay_ms`, and `chunk_size` tune the VISA session used for instruments that reference the driver.
+
+### Recipe Files
+
+Recipe documents are YAML files with these top-level sections:
+
+- `instruments`: named instrument instances with a driver file and VISA resource string
+- `vars`: initial variable values used by expressions and `save_as` slots
+- `tasks`: periodic work definitions
+- `pipeline`: optional CSV and TCP sink configuration
+- `stop_when`: optional runtime stop conditions
+
+Example:
+
+```yaml
+instruments:
+	psu:
+		driver: psu.toml
+		resource: USB0::1::INSTR
+
+vars:
+	target_voltage: 5
+	measured_voltage: 0
+	delta: 0
+
+pipeline:
+	mode: realtime
+	record:
+		- measured_voltage
+		- delta
+	file_path: samples.csv
+
+tasks:
+	- every: 100ms
+		steps:
+			- call: set_voltage
+				instrument: psu
+				args:
+					voltage: "${target_voltage}"
+					channels:
+						- 1
+						- 2
+			- call: measure_voltage
+				instrument: psu
+				save_as: measured_voltage
+			- compute: "${measured_voltage} - ${target_voltage}"
+				save_as: delta
+				when: "$ITER > 0"
+
+stop_when:
+	time_elapsed: 2s
+	max_iterations: 20
+```
+
+Recipe notes:
+
+- Task intervals can be written as `every_ms: 100` or `every: 100ms`, `2s`, `1m`.
+- Step arguments can be scalars or lists.
+- A string argument written exactly as `${name}` is treated as a runtime variable reference.
+- `save_as` stores a response or compute result into a declared variable slot.
+- Variables referenced by `${name}` or `save_as` must be declared in `vars`.
+- `when` is optional on both `call` and `compute` steps.
+
+## Expressions
+
+Expressions are used by `compute` and `when`.
+
+Supported syntax:
+
+- Variable references: `${name}`
+- Built-ins: `$ITER`, `$TASK_IDX`
+- Arithmetic: `+`, `-`, `*`, `/`
+- Comparison: `>`, `<`, `>=`, `<=`, `==`, `!=`
+- Logical: `&&`, `||`, `!`
+- Functions: `min(x, y)`, `max(x, y)`
+- Parentheses for grouping
+
+All expression math is evaluated as `f64`. A non-zero result is treated as true.
+
+Important distinction:
+
+- Driver command templates use `{name}` placeholders.
+- Recipe expressions use `${name}` variable references.
+
+## Preview And Dry-Run
+
+`--preview` stops after recipe precompilation and prints a summary of:
+
+- Instruments and resource addresses
+- Stop conditions
+- Pipeline configuration
+- Task intervals and step kinds
+
+`--dry-run` performs full scheduling and expression evaluation, but instrument calls are logged instead of written:
+
+```text
+[dry-run] psu.toml -> VOLT 5,(@1,2)
+```
+
+This is useful for validating template rendering and variable flow before touching hardware.
+
+## Sampling Pipeline
+
+Execution uses a dedicated sampler thread plus an SPSC ring buffer so slow sinks do not block instrument sampling.
+
+- The sampler thread performs instrument I/O and produces task-level result frames.
+- A worker thread drains the ring buffer and performs slower output work.
+- High buffer usage emits warnings.
+- Buffer overflow stops scheduling new work and is reported in the final summary.
+
+Pipeline fields:
+
+```yaml
+pipeline:
+	mode: realtime
+	buffer_size: 8192
+	warn_usage_percent: 90
+	file_path: samples.csv
+	network_host: 127.0.0.1
+	network_port: 9000
+	record: all
+```
+
+Notes:
+
+- `mode` currently selects default behavior such as conservative versus throughput-oriented buffer sizing.
+- `buffer_size` is normalized internally to a power of two.
+- `warn_usage_percent` must be between 1 and 100.
+- `file_path` writes CSV rows using recorded `save_as` values.
+- `network_host` and `network_port` stream the same task-level frames as JSON over TCP.
+- `record` can be `all` or an explicit list of `save_as` variable names.
+- Relative sink paths are resolved from the recipe file directory.
+
+## REPL
+
+The REPL opens one VISA resource and supports these commands:
+
+```text
+write <command>
+read
+query <command>
+help
+exit
+```
+
+Example:
+
+```sh
+ordo repl USB0::0x0957::0x1798::MY12345678::INSTR
+```
+
+## Examples
+
+Bundled examples live in:
+
+- `test-data/drivers/`
+- `test-data/recipes/`
+
+Useful starting points:
+
+- `test-data/drivers/psu.toml`
+- `test-data/drivers/dmm.toml`
+- `test-data/recipes/r1_set.yaml`
+- `test-data/recipes/r1_set_voltage.yaml`
+- `test-data/recipes/r2_stop_when.yaml`
