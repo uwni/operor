@@ -2,7 +2,7 @@ const std = @import("std");
 
 /// Document parsing helpers for adapter and recipe files.
 pub const doc_parse = @import("doc_parse.zig");
-/// Expression parser and evaluator for compute steps and `when` guards.
+/// Expression parser and evaluator for compute steps and `if` guards.
 pub const expr = @import("expr.zig");
 /// Adapter parsing APIs.
 pub const Adapter = @import("adapter/Adapter.zig");
@@ -77,10 +77,8 @@ pub fn preview(
     while (instrument_it.next()) |entry| {
         try log.print("- {s} -> {s}\n", .{ entry.key_ptr.*, entry.value_ptr.resource });
     }
-    if (compiled.stop_when.time_elapsed_ms != null or compiled.stop_when.max_iterations != null) {
-        const time_ms = compiled.stop_when.time_elapsed_ms orelse 0;
-        const max_it = compiled.stop_when.max_iterations orelse 0;
-        try log.print("Stop: time_ms={d} max_iterations={d}\n", .{ time_ms, max_it });
+    if (compiled.stop_when != null) {
+        try log.print("Stop: expression-based\n", .{});
     }
     if (compiled.pipeline.mode != null or
         compiled.pipeline.buffer_size != null or
@@ -105,8 +103,14 @@ pub fn preview(
     }
     try log.print("Tasks: {d}\n", .{compiled.tasks.len});
     for (compiled.tasks, 0..) |*task, task_idx| {
-        try log.print("  Task {d}: every {d} ms, {d} steps\n", .{ task_idx, task.every_ms, task.steps.len });
-        for (task.steps, 0..) |*step, step_idx| {
+        const task_kind: []const u8 = switch (task.*) {
+            .loop => "loop",
+            .sequential => "sequential",
+            .conditional => "conditional",
+        };
+        const task_steps = task.steps();
+        try log.print("  Task {d}: {s}, {d} steps\n", .{ task_idx, task_kind, task_steps.len });
+        for (task_steps, 0..) |*step, step_idx| {
             switch (step.action) {
                 .instrument_call => |ic| {
                     try log.print("    [{d}] call={s} instrument={s}", .{ step_idx, ic.call, ic.instrument });
@@ -119,9 +123,12 @@ pub fn preview(
                     if (comp.save_column) |col| try log.print(" col={d}", .{col});
                     try log.print("\n", .{});
                 },
+                .sleep => |s| {
+                    try log.print("    [{d}] sleep {d}ms\n", .{ step_idx, s.duration_ms });
+                },
             }
-            if (step.when != null) {
-                try log.print("         when: (guard expression)\n", .{});
+            if (step.@"if" != null) {
+                try log.print("         if: (guard expression)\n", .{});
             }
         }
     }
@@ -148,8 +155,7 @@ test "preview output" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set_voltage
         \\        instrument: d1
         \\        args:

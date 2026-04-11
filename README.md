@@ -59,13 +59,13 @@ ordo repl -r USB0::0x0957::0x1798::MY12345678::INSTR
 Execute a recipe:
 
 ```sh
-ordo run -d ./adapters ./recipes/measure.yaml --duration-ms 5000
+ordo run -d ./adapters ./recipes/measure.yaml
 ```
 
 ## CLI
 
 ```text
-ordo run -d <adapter_dir> <recipe> [--preview] [--dry-run] [--duration-ms <ms>] [--visa-lib <path>]
+ordo run -d <adapter_dir> <recipe> [--preview] [--dry-run] [--visa-lib <path>]
 ordo repl [-r <resource>] [--visa-lib <path>]
 ```
 
@@ -74,7 +74,6 @@ Command behavior:
 - `run` loads adapters, precompiles the recipe, and executes scheduled tasks.
 - `run --preview` validates the recipe, adapters, commands, variables, and pipeline configuration without instrument I/O.
 - `run --dry-run` renders commands and logs them instead of writing to the instrument.
-- `run --duration-ms` adds a hard runtime limit from the CLI.
 - `repl` opens a stateful interactive session. Use `-r` to connect on startup, or discover instruments with `list` and `open` inside the REPL.
 
 ## Core Concepts
@@ -127,7 +126,7 @@ Recipe documents are YAML files with these top-level sections:
 - `vars`: initial variable values used by expressions and `save_as` slots
 - `tasks`: periodic work definitions
 - `pipeline`: optional CSV and TCP sink configuration
-- `stop_when`: optional runtime stop conditions
+- `stop_when`: optional stop condition expression
 
 Example:
 
@@ -150,7 +149,7 @@ pipeline:
 	file_path: samples.csv
 
 tasks:
-	- every: 100ms
+	- while: true
 		steps:
 			- call: set_voltage
 				instrument: psu
@@ -162,25 +161,41 @@ tasks:
 				save_as: measured_voltage
 			- compute: "${measured_voltage} - ${target_voltage}"
 				save_as: delta
-				when: "$ITER > 0"
+				if: "$ITER > 0"
 
-stop_when:
-	time_elapsed: 2s
-	max_iterations: 20
+stop_when: "$ELAPSED_MS >= 2000 || $ITER >= 20"
 ```
 
 Recipe notes:
 
-- Task intervals can be written as `every_ms: 100` or `every: 100ms`, `2s`, `1m`.
+- Tasks can be sequential (just `steps`), conditional (`if` guard), or looping (`while` condition).
+- `if` is optional on both `call` and `compute` steps — the step is skipped when the expression is falsy.
+- Use `sleep_ms: 100` as a step to pause between iterations.
 - Step arguments can be scalars or lists.
 - A string argument written exactly as `${name}` is treated as a runtime variable reference.
 - `save_as` stores a response or compute result into a declared variable slot.
 - Variables referenced by `${name}` or `save_as` must be declared in `vars`.
-- `when` is optional on both `call` and `compute` steps.
+
+## Iterations
+
+An **iteration** is one complete execution of a task's step list. Every time a task finishes running all of its steps from top to bottom, that counts as one iteration. The global iteration counter `$ITER` starts at 0 and increments by 1 after each iteration, regardless of which task produced it.
+
+Iterations drive two key behaviors:
+
+1. **Pipeline output** — at the end of each iteration, all `save_as` values recorded during that run are collected into a single frame and pushed to the pipeline (CSV file, TCP stream). One iteration = one row in the output.
+2. **Stop conditions** — `stop_when` is evaluated between iterations. `$ITER` reflects the number of completed iterations so far.
+
+For a **sequential** task (no `while` or `if`), the steps run exactly once — that is one iteration. For a **loop** task (`while: true`), each pass through the step list is one iteration. For a **conditional** task (`if: ...`), the steps run at most once, producing zero or one iteration depending on the guard.
+
+Set `expected_iterations` at the recipe top level to tell the runtime how many iterations to expect. This enables progress reporting (e.g. progress bars).
+
+```yaml
+expected_iterations: 100
+```
 
 ## Expressions
 
-Expressions are used by `compute` and `when`.
+Expressions are used by `compute` and `if`.
 
 Supported syntax:
 

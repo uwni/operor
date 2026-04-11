@@ -37,13 +37,34 @@ pub const InstrumentConfig = struct {
     resource: []const u8,
 };
 
+/// Boolean expression source that accepts a YAML string or bool.
+///
+/// Allows writing `while: true` instead of `while: "true"` in YAML.
+pub const BooleanExpr = union(enum) {
+    string: []const u8,
+    bool: bool,
+
+    pub const serde = .{
+        .tag = serde_lib.UnionTag.untagged,
+    };
+
+    /// Returns the expression string, or a fixed literal for booleans.
+    pub fn source(self: BooleanExpr) []const u8 {
+        return switch (self) {
+            .string => |s| s,
+            .bool => |b| if (b) "1" else "0",
+        };
+    }
+};
+
 /// Parsed step object before precompile validation.
 ///
-/// A step is either an instrument `call` or a local `compute` expression.
-/// Both variants support an optional `when` guard expression.
+/// A step is either an instrument `call`, a local `compute` expression, or a `sleep_ms` pause.
+/// Both call and compute variants support an optional `if` guard expression.
 pub const StepConfig = union(enum) {
     call: CallStepConfig,
     compute: ComputeStepConfig,
+    sleep_ms: SleepStepConfig,
 
     pub const serde = .{
         .tag = serde_lib.UnionTag.untagged,
@@ -60,7 +81,7 @@ pub const CallStepConfig = struct {
     /// Context key that receives the step result (response or computed value).
     save_as: ?[]const u8 = null,
     /// Guard expression; step is skipped when the result is falsy (0.0).
-    when: ?[]const u8 = null,
+    @"if": ?BooleanExpr = null,
 };
 
 pub const ComputeStepConfig = struct {
@@ -69,32 +90,37 @@ pub const ComputeStepConfig = struct {
     /// Context key that receives the step result.
     save_as: []const u8,
     /// Guard expression; step is skipped when the result is falsy (0.0).
-    when: ?[]const u8 = null,
+    @"if": ?BooleanExpr = null,
 };
 
-/// Parsed task object before interval normalization.
+pub const SleepStepConfig = struct {
+    /// Duration in milliseconds.
+    sleep_ms: u64,
+    /// Guard expression; step is skipped when the result is falsy (0.0).
+    @"if": ?BooleanExpr = null,
+};
+
+/// Parsed task object supporting loop, sequential, and conditional variants.
 pub const TaskConfig = struct {
-    every_ms: ?u64 = null,
-    every: ?[]const u8 = null,
+    /// Steps to execute.
     steps: []StepConfig,
+    /// When present, task loops while this expression is truthy.
+    @"while": ?BooleanExpr = null,
+    /// Guard expression; task steps execute only when truthy.
+    @"if": ?BooleanExpr = null,
 };
 
 /// Parsed pipeline configuration before execution-time normalization.
 pub const PipelineConfig = types.PipelineConfig;
-
-/// Parsed stop condition object from the recipe document.
-pub const StopWhenConfig = struct {
-    time_elapsed: ?[]const u8 = null,
-    max_iterations: ?u64 = null,
-};
 
 /// Parsed top-level recipe document.
 pub const RecipeConfig = struct {
     instruments: std.StringArrayHashMap(InstrumentConfig),
     tasks: []TaskConfig,
     pipeline: ?PipelineConfig = null,
-    stop_when: ?StopWhenConfig = null,
+    stop_when: ?BooleanExpr = null,
     vars: ?std.StringArrayHashMap(ArgScalarDoc) = null,
+    expected_iterations: ?u64 = null,
 };
 
 test "parse recipe arg object values" {

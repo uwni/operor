@@ -5,8 +5,7 @@ instruments:
 pipeline:
   record: all
 tasks:
-  - every_ms: 100
-    steps:
+  - steps:
       - call: set
         instrument: d1
         args:

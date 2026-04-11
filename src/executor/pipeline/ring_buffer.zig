@@ -11,17 +11,16 @@ pub fn SpscRingBuffer(comptime T: type) type {
         capacity: usize,
         mask: u64,
         // Producer-owned hot fields stay together.
-        head: std.atomic.Value(u64) align(cache_line) = std.atomic.Value(u64).init(0),
-        overflow_count: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+        head: std.atomic.Value(u64) align(cache_line) = .init(0),
+        overflow_count: std.atomic.Value(u64) = .init(0),
         // Only the producer updates this metric, and readers only observe it after producer join.
         high_watermark: usize = 0,
         // Consumer-owned hot field gets its own cache line to reduce bouncing.
-        tail: std.atomic.Value(u64) align(cache_line) = std.atomic.Value(u64).init(0),
+        tail: std.atomic.Value(u64) align(cache_line) = .init(0),
 
         pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
             std.debug.assert(std.math.isPowerOfTwo(capacity));
             const slots = try allocator.alloc(T, capacity);
-            for (slots) |*slot| slot.* = T.empty();
             return .{
                 .allocator = allocator,
                 .slots = slots,
@@ -31,7 +30,12 @@ pub fn SpscRingBuffer(comptime T: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            for (self.slots) |*slot| slot.deinit(self.allocator);
+            const tail = self.tail.load(.monotonic);
+            const head = self.head.load(.monotonic);
+            var i = tail;
+            while (i < head) : (i += 1) {
+                self.slots[self.slotIndex(i)].deinit(self.allocator);
+            }
             self.allocator.free(self.slots);
         }
 
@@ -86,9 +90,8 @@ pub fn SpscRingBuffer(comptime T: type) type {
 }
 
 fn moveItem(dst: anytype, src: anytype) void {
-    const T = @TypeOf(dst.*);
     dst.* = src.*;
-    src.* = T.empty();
+    src.* = undefined;
 }
 
 test "ring buffer reports overflow and tracks high watermark" {
@@ -115,7 +118,7 @@ test "ring buffer preserves FIFO across wrap-around" {
         try ring.push(&item);
     }
 
-    var out = TestItem.empty();
+    var out: TestItem = .{};
     try std.testing.expect(ring.pop(&out));
     try std.testing.expectEqual(@as(i128, 0), out.seq);
     try std.testing.expect(ring.pop(&out));
@@ -163,10 +166,6 @@ test "generic ring buffer works with another payload type" {
     const AnotherItem = struct {
         value: i32 = 0,
 
-        fn empty() @This() {
-            return .{};
-        }
-
         fn deinit(_: *@This(), _: std.mem.Allocator) void {}
     };
 
@@ -180,7 +179,7 @@ test "generic ring buffer works with another payload type" {
     try ring.push(&one);
     try ring.push(&two);
 
-    var out = AnotherItem.empty();
+    var out: AnotherItem = .{};
     try std.testing.expect(ring.pop(&out));
     try std.testing.expectEqual(@as(i32, 1), out.value);
     try std.testing.expect(ring.pop(&out));
@@ -213,7 +212,7 @@ fn stressProducerMain(ctx: *StressContext) void {
 
 fn stressConsumerMain(ctx: *StressContext) void {
     var expected_seq: usize = 0;
-    var item = TestItem.empty();
+    var item: TestItem = .{};
 
     while (expected_seq < ctx.iterations) {
         if (ctx.ring.pop(&item)) {
@@ -237,10 +236,6 @@ fn stressConsumerMain(ctx: *StressContext) void {
 
 const TestItem = struct {
     seq: i128 = 0,
-
-    fn empty() TestItem {
-        return .{};
-    }
 
     fn deinit(_: *TestItem, _: std.mem.Allocator) void {}
 };

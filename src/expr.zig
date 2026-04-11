@@ -1,4 +1,4 @@
-/// Lightweight expression evaluator for compute steps and `when` guards.
+/// Lightweight expression evaluator for compute steps and `if` guards.
 ///
 /// Supports:
 ///   - Arithmetic: `+`, `-`, `*`, `/`
@@ -27,6 +27,7 @@ pub const EvalError = error{
 pub const BuiltinVar = enum {
     iter,
     task_idx,
+    elapsed_ms,
 };
 
 pub const VariableBinding = union(enum) {
@@ -269,9 +270,10 @@ fn boolToValue(b: bool) f64 {
     return if (b) 1.0 else 0.0;
 }
 
-fn resolveBuiltin(name: []const u8) ?VariableBinding {
+pub fn resolveBuiltin(name: []const u8) ?VariableBinding {
     if (std.mem.eql(u8, name, "$ITER")) return .{ .builtin = .iter };
     if (std.mem.eql(u8, name, "$TASK_IDX")) return .{ .builtin = .task_idx };
+    if (std.mem.eql(u8, name, "$ELAPSED_MS")) return .{ .builtin = .elapsed_ms };
     return null;
 }
 
@@ -632,6 +634,7 @@ test "expr built-in variables" {
                     .builtin => |b| switch (b) {
                         .iter => .{ .number = 42.0 },
                         .task_idx => null,
+                        .elapsed_ms => null,
                     },
                     .slot => null,
                 };
@@ -725,4 +728,12 @@ test "expr parse reuse" {
 
     try vars.put("x", "10");
     try std.testing.expectApproxEqAbs(@as(f64, 21.0), try expr_obj.eval(tc.resolver()), 1e-9);
+}
+
+test "resolveBuiltin recognizes $ELAPSED_MS" {
+    const binding = resolveBuiltin("$ELAPSED_MS") orelse return error.TestUnexpectedResult;
+    switch (binding) {
+        .builtin => |b| try std.testing.expect(b == .elapsed_ms),
+        .slot => return error.TestUnexpectedResult,
+    }
 }

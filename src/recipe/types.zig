@@ -163,13 +163,15 @@ pub const Step = struct {
     /// Step payload: either an instrument call or a local compute expression.
     action: Action,
     /// Optional guard expression; when present, the step is skipped if the expression evaluates to 0.0.
-    when: ?expr.Expression = null,
+    @"if": ?expr.Expression = null,
 
     pub const Action = union(enum) {
         /// Send a command to an instrument and optionally save the response.
         instrument_call: InstrumentCall,
         /// Evaluate an arithmetic expression and store the result.
         compute: Compute,
+        /// Pause execution for a fixed duration.
+        sleep: Sleep,
     };
 
     pub const InstrumentCall = struct {
@@ -197,13 +199,51 @@ pub const Step = struct {
         /// Optional column index into the pipeline record for frame persistence.
         save_column: ?usize = null,
     };
+
+    pub const Sleep = struct {
+        /// Duration to sleep in milliseconds.
+        duration_ms: u64,
+    };
 };
 
-/// Task schedule and the steps that should run at that interval.
-pub const Task = struct {
-    /// Execution period in milliseconds.
-    every_ms: u64,
-    /// Steps executed each time the task becomes due.
+/// Task variant describing when and how steps are executed.
+pub const Task = union(enum) {
+    /// Runs steps in a loop while the condition is truthy.
+    loop: LoopTask,
+    /// Runs steps exactly once in order.
+    sequential: SequentialTask,
+    /// Runs steps once if the condition is truthy.
+    conditional: ConditionalTask,
+
+    /// Returns the step slice for any task variant.
+    pub fn steps(self: *const Task) []Step {
+        return switch (self.*) {
+            .loop => |t| t.steps,
+            .sequential => |t| t.steps,
+            .conditional => |t| t.steps,
+        };
+    }
+};
+
+/// Loop task: re-executes steps while the condition remains truthy.
+pub const LoopTask = struct {
+    /// Condition expression; loop continues while this evaluates to truthy.
+    condition: expr.Expression,
+    /// Steps executed each iteration of the loop.
+    steps: []Step,
+};
+
+/// Sequential task: runs steps exactly once in declaration order.
+pub const SequentialTask = struct {
+    /// Steps executed once.
+    steps: []Step,
+};
+
+/// Conditional task: runs steps once when the guard expression is truthy.
+pub const ConditionalTask = struct {
+    /// Guard expression; steps execute only when this evaluates to truthy.
+    @"if": expr.Expression,
+    /// Steps executed if the condition is true.
     steps: []Step,
 };
 
@@ -244,14 +284,6 @@ pub const RecordConfig = union(enum) {
     };
 };
 
-/// Optional stop conditions applied to the scheduler loop.
-pub const StopWhen = struct {
-    /// Maximum wall-clock runtime in milliseconds.
-    time_elapsed_ms: ?u64 = null,
-    /// Maximum number of task executions across all tasks.
-    max_iterations: ?u64 = null,
-};
-
 /// Fully validated recipe ready for preview or execution.
 /// Owns arena-backed data and should have a single logical owner until `deinit`.
 pub const PrecompiledRecipe = struct {
@@ -259,7 +291,8 @@ pub const PrecompiledRecipe = struct {
     instruments: std.StringArrayHashMap(PrecompiledInstrument),
     tasks: []Task,
     pipeline: PipelineConfig,
-    stop_when: StopWhen,
+    /// Optional stop condition expression; scheduler stops when this evaluates to truthy.
+    stop_when: ?expr.Expression,
     /// Estimated total number of task iterations across all tasks.
     /// Null when the recipe runs indefinitely or stop conditions are dynamic.
     expected_iterations: ?u64,

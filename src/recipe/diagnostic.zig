@@ -89,7 +89,6 @@ pub const PrecompileDiagnostic = struct {
             error.MissingCommandArgument => try writer.writeAll("missing required command argument"),
             error.UnexpectedCommandArgument => try writer.writeAll("unexpected command argument"),
             error.InvalidArgument => try writer.writeAll("invalid step argument syntax"),
-            error.MissingTaskInterval => try writer.writeAll("task is missing every/every_ms interval"),
             error.InvalidDuration => try writer.writeAll("invalid duration string"),
             error.MissingPipeline => try writer.writeAll("recipe is missing required 'pipeline' section"),
             error.MissingRecordConfig => try writer.writeAll("pipeline is missing required 'record' field"),

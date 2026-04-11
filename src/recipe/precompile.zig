@@ -55,7 +55,7 @@ fn precompilePathInternal(
 /// Precompile walks the recipe in a strict fail-fast order:
 /// 1. Create the arena that will own the returned recipe plus a temporary adapter cache used only during validation.
 /// 2. Walk `recipe.instruments`, eagerly load every referenced adapter, assign each instrument a dense `instrument_idx`, and copy it into a `PrecompiledInstrument` with an empty per-instrument command cache.
-/// 3. Walk `recipe.tasks`, normalize each interval from `every_ms` or parsed `every`, and allocate the arena-owned `Task` and `Step` arrays.
+/// 3. Walk `recipe.tasks`, classify each task (sequential, loop, or conditional), and allocate the arena-owned `Task` and `Step` arrays.
 /// 4. For every step, resolve the referenced instrument and adapter command, compiling that command on first use so runtime only keeps commands this recipe actually calls while binding each command to its owning precompiled instrument.
 /// 5. Clone step arguments into the runtime representation, preserving literal types while validating them against the compiled command placeholders, and bind each step directly to the precompiled command pointer it will execute.
 /// 6. Parse `stop_when` and return a fully validated `PrecompiledRecipe` whose data is owned by the arena.
@@ -98,15 +98,20 @@ fn precompileInternal(
     // 7. Assign save_column indices to steps that contribute to recorded frames.
     assignSaveColumns(tasks, &vars, pipeline.record.?.explicit);
 
-    // 8. Return the fully validated arena-owned recipe consumed by preview and execution.
-    const stop_when = try parseStopWhen(recipe.stop_when);
+    // 8. Parse optional stop_when expression.
+    const stop_when: ?expr.Expression = if (recipe.stop_when) |src| blk: {
+        var e = try expr.parse(alloc, src.source());
+        try e.bindVariables(&vars);
+        break :blk e;
+    } else null;
+
     return .{
         .arena = arena,
         .instruments = precompiled_instruments,
         .tasks = tasks,
         .pipeline = pipeline,
         .stop_when = stop_when,
-        .expected_iterations = calculateExpectedIterations(tasks, stop_when),
+        .expected_iterations = recipe.expected_iterations,
         .initial_values = initial_values,
     };
 }
@@ -117,7 +122,7 @@ fn loadAdapters(
     adapter_dir: std.fs.Dir,
     precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
 ) !std.StringHashMap(Adapter) {
-    var map = std.StringHashMap(Adapter).init(allocator);
+    var map: std.StringHashMap(Adapter) = .init(allocator);
     var instrument_it = recipe.instruments.iterator();
     while (instrument_it.next()) |entry| {
         const cfg = entry.value_ptr.*;
@@ -177,39 +182,71 @@ fn precompileTasks(
 ) ![]types.Task {
     const tasks = try arena_alloc.alloc(types.Task, recipe.tasks.len);
     for (recipe.tasks, 0..) |*task_cfg, task_idx| {
-        const every_ms = resolveEveryMs(task_cfg) catch |err| {
-            captureDiagnostic(precompile_diagnostic, .{ .task_idx = task_idx });
-            return err;
-        };
+        const steps = try precompileSteps(arena_alloc, task_cfg.steps, vars, loaded_adapters, precompiled_instruments, save_as_set, task_idx, precompile_diagnostic);
 
-        const steps = try arena_alloc.alloc(types.Step, task_cfg.steps.len);
-        for (task_cfg.steps, 0..) |*step_cfg, step_idx| {
-            steps[step_idx] = switch (step_cfg.*) {
-                .compute => |*cfg| try precompileComputeStep(
-                    arena_alloc,
-                    vars,
-                    save_as_set,
-                    cfg,
-                    task_idx,
-                    step_idx,
-                    precompile_diagnostic,
-                ),
-                .call => |*cfg| try precompileCallStep(
-                    arena_alloc,
-                    vars,
-                    loaded_adapters,
-                    precompiled_instruments,
-                    save_as_set,
-                    cfg,
-                    task_idx,
-                    step_idx,
-                    precompile_diagnostic,
-                ),
-            };
+        if (task_cfg.@"while") |while_src| {
+            // Loop task
+            var cond_expr = try expr.parse(arena_alloc, while_src.source());
+            try cond_expr.bindVariables(vars);
+            tasks[task_idx] = .{ .loop = .{
+                .condition = cond_expr,
+                .steps = steps,
+            } };
+        } else if (task_cfg.@"if") |guard_src| {
+            // Conditional task
+            var guard_expr = try expr.parse(arena_alloc, guard_src.source());
+            try guard_expr.bindVariables(vars);
+            tasks[task_idx] = .{ .conditional = .{
+                .@"if" = guard_expr,
+                .steps = steps,
+            } };
+        } else {
+            // Sequential task
+            tasks[task_idx] = .{ .sequential = .{
+                .steps = steps,
+            } };
         }
-        tasks[task_idx] = .{ .every_ms = every_ms, .steps = steps };
     }
     return tasks;
+}
+
+fn precompileSteps(
+    arena_alloc: std.mem.Allocator,
+    step_cfgs: []config.StepConfig,
+    vars: *const VarsMap,
+    loaded_adapters: *const std.StringHashMap(Adapter),
+    precompiled_instruments: *std.StringArrayHashMap(types.PrecompiledInstrument),
+    save_as_set: *std.StringArrayHashMap(void),
+    task_idx: usize,
+    precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
+) ![]types.Step {
+    const steps = try arena_alloc.alloc(types.Step, step_cfgs.len);
+    for (step_cfgs, 0..) |*step_cfg, step_idx| {
+        steps[step_idx] = switch (step_cfg.*) {
+            .compute => |*cfg| try precompileComputeStep(
+                arena_alloc,
+                vars,
+                save_as_set,
+                cfg,
+                task_idx,
+                step_idx,
+                precompile_diagnostic,
+            ),
+            .call => |*cfg| try precompileCallStep(
+                arena_alloc,
+                vars,
+                loaded_adapters,
+                precompiled_instruments,
+                save_as_set,
+                cfg,
+                task_idx,
+                step_idx,
+                precompile_diagnostic,
+            ),
+            .sleep_ms => |*cfg| try precompileSleepStep(arena_alloc, vars, cfg),
+        };
+    }
+    return steps;
 }
 
 fn precompileComputeStep(
@@ -227,7 +264,7 @@ fn precompileComputeStep(
     };
     errdefer captureDiagnostic(precompile_diagnostic, diag_ctx);
 
-    const when_expr = try precompileWhen(arena_alloc, vars, cfg.when);
+    const if_expr = try precompileIf(arena_alloc, vars, cfg.@"if");
 
     const save_as = cfg.save_as;
     const save_slot = vars.getIndex(save_as) orelse return error.UndeclaredVariable;
@@ -242,7 +279,7 @@ fn precompileComputeStep(
             .expression = compute_expr,
             .save_slot = save_slot,
         } },
-        .when = when_expr,
+        .@"if" = if_expr,
     };
 }
 
@@ -266,7 +303,7 @@ fn precompileCallStep(
     };
     errdefer captureDiagnostic(precompile_diagnostic, diag_ctx);
 
-    const when_expr = try precompileWhen(arena_alloc, vars, cfg.when);
+    const if_expr = try precompileIf(arena_alloc, vars, cfg.@"if");
 
     const precompiled_instrument = precompiled_instruments.getPtr(instrument_name) orelse return error.InstrumentNotFound;
 
@@ -294,22 +331,33 @@ fn precompileCallStep(
             .args = compiled_args,
             .save_slot = save_slot,
         } },
-        .when = when_expr,
+        .@"if" = if_expr,
     };
 }
 
-fn precompileWhen(
+fn precompileIf(
     arena_alloc: std.mem.Allocator,
     vars: *const VarsMap,
-    when_src_opt: ?[]const u8,
+    if_src_opt: ?config.BooleanExpr,
 ) !?expr.Expression {
-    if (when_src_opt) |when_src| {
-        const e = try expr.parse(arena_alloc, when_src);
+    if (if_src_opt) |if_src| {
+        const e = try expr.parse(arena_alloc, if_src.source());
         var bound = e;
         try bound.bindVariables(vars);
         return bound;
     }
     return null;
+}
+
+fn precompileSleepStep(
+    arena_alloc: std.mem.Allocator,
+    vars: *const VarsMap,
+    cfg: *const config.SleepStepConfig,
+) !types.Step {
+    return .{
+        .action = .{ .sleep = .{ .duration_ms = cfg.sleep_ms } },
+        .@"if" = try precompileIf(arena_alloc, vars, cfg.@"if"),
+    };
 }
 
 fn resolvePipelineConfig(
@@ -344,7 +392,7 @@ fn resolvePipelineConfig(
 
 fn assignSaveColumns(tasks: []types.Task, vars: *const VarsMap, columns: []const []const u8) void {
     for (tasks) |*task| {
-        for (task.steps) |*step| {
+        for (task.steps()) |*step| {
             switch (step.action) {
                 .instrument_call => |*ic| {
                     ic.save_column = if (ic.save_slot) |slot| slotToColumn(vars, slot, columns) else null;
@@ -352,6 +400,7 @@ fn assignSaveColumns(tasks: []types.Task, vars: *const VarsMap, columns: []const
                 .compute => |*comp| {
                     comp.save_column = slotToColumn(vars, comp.save_slot, columns);
                 },
+                .sleep => {},
             }
         }
     }
@@ -362,19 +411,6 @@ fn slotToColumn(vars: *const VarsMap, save_slot: usize, columns: []const []const
     for (columns, 0..) |col_name, col_idx| {
         if (std.mem.eql(u8, col_name, name)) return col_idx;
     }
-    return null;
-}
-
-/// Estimates the total number of task executions based on stop conditions.
-fn calculateExpectedIterations(tasks: []const types.Task, stop: types.StopWhen) ?u64 {
-    // If an explicit iteration limit is set, that's our total.
-    if (stop.max_iterations) |limit| return limit;
-
-    // If no stop conditions are set, each task runs once by default in the scheduler.
-    if (stop.time_elapsed_ms == null) return tasks.len;
-
-    // If only a time limit is set, we skip estimating because it's inaccurate
-    // and depends on unknown instrument I/O latency.
     return null;
 }
 
@@ -511,12 +547,6 @@ fn compileInitialValue(allocator: std.mem.Allocator, value: config.ArgScalarDoc)
     };
 }
 
-fn resolveEveryMs(task: *const config.TaskConfig) !u64 {
-    if (task.every_ms) |ms| return ms;
-    if (task.every) |text| return try parseDurationMs(text);
-    return error.MissingTaskInterval;
-}
-
 fn clonePipelineConfig(allocator: std.mem.Allocator, cfg: config.PipelineConfig) !types.PipelineConfig {
     if (cfg.buffer_size) |size| {
         if (size == 0) return error.InvalidPipelineConfig;
@@ -553,37 +583,8 @@ fn clonePipelineConfig(allocator: std.mem.Allocator, cfg: config.PipelineConfig)
     };
 }
 
-fn parseStopWhen(stop: ?config.StopWhenConfig) !types.StopWhen {
-    if (stop == null) return .{};
-
-    const cfg = stop.?;
-    return .{
-        .time_elapsed_ms = if (cfg.time_elapsed) |value| try parseDurationMs(value) else null,
-        .max_iterations = cfg.max_iterations,
-    };
-}
-
-fn parseDurationMs(input: []const u8) !u64 {
-    const trimmed = std.mem.trim(u8, input, " \t\r\n");
-    if (trimmed.len == 0) return error.InvalidDuration;
-
-    var suffix_start: usize = trimmed.len;
-    while (suffix_start > 0 and std.ascii.isAlphabetic(trimmed[suffix_start - 1])) : (suffix_start -= 1) {}
-
-    const number_part = trimmed[0..suffix_start];
-    const suffix = trimmed[suffix_start..];
-    if (number_part.len == 0) return error.InvalidDuration;
-
-    const value = try std.fmt.parseInt(u64, number_part, 10);
-    if (suffix.len == 0 or std.mem.eql(u8, suffix, "ms")) return value;
-    if (std.mem.eql(u8, suffix, "s")) return value * 1000;
-    if (std.mem.eql(u8, suffix, "m")) return value * 60 * 1000;
-    return error.InvalidDuration;
-}
-
 fn bindingForName(vars: *const VarsMap, name: []const u8) ?expr.VariableBinding {
-    if (std.mem.eql(u8, name, "$ITER")) return .{ .builtin = .iter };
-    if (std.mem.eql(u8, name, "$TASK_IDX")) return .{ .builtin = .task_idx };
+    if (expr.resolveBuiltin(name)) |b| return b;
     const slot = vars.getIndex(name) orelse return null;
     return .{ .slot = slot };
 }
@@ -660,8 +661,7 @@ test "load recipe and adapters" {
         \\vars:
         \\  voltage: 0
         \\tasks:
-        \\  - every: 100ms
-        \\    steps:
+        \\  - steps:
         \\      - call: set
         \\        instrument: d1
         \\        args:
@@ -691,9 +691,9 @@ test "load recipe and adapters" {
     try std.testing.expect(std.mem.eql(u8, command.arg_names[0], "voltage"));
 
     try std.testing.expectEqual(@as(usize, 1), compiled.tasks.len);
-    try std.testing.expectEqual(@as(u64, 100), compiled.tasks[0].every_ms);
-    try std.testing.expectEqual(@as(usize, 1), compiled.tasks[0].steps.len);
-    const step0 = compiled.tasks[0].steps[0].action.instrument_call;
+    const task0_steps = compiled.tasks[0].steps();
+    try std.testing.expectEqual(@as(usize, 1), task0_steps.len);
+    const step0 = task0_steps[0].action.instrument_call;
     try std.testing.expect(std.mem.eql(u8, step0.call, "set"));
     try std.testing.expect(step0.command == command);
 
@@ -730,15 +730,12 @@ test "parse durations and stop conditions" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - every: 250ms
-        \\    steps:
+        \\  - steps:
         \\      - call: set
         \\        instrument: d1
         \\        args:
         \\          voltage: "5"
-        \\stop_when:
-        \\  time_elapsed: 2s
-        \\  max_iterations: 3
+        \\stop_when: "$ELAPSED_MS >= 2000 || $ITER >= 3"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
@@ -752,9 +749,7 @@ test "parse durations and stop conditions" {
     var compiled = try precompilePath(gpa, recipe_path, dir);
     defer compiled.deinit();
 
-    try std.testing.expectEqual(@as(u64, 250), compiled.tasks[0].every_ms);
-
-    const step_args = compiled.tasks[0].steps[0].action.instrument_call;
+    const step_args = compiled.tasks[0].steps()[0].action.instrument_call;
     const voltage = step_args.args[step_args.command.argIndex("voltage").?];
     switch (voltage) {
         .scalar => |value| switch (value) {
@@ -767,9 +762,7 @@ test "parse durations and stop conditions" {
         .list => return error.TestUnexpectedResult,
     }
 
-    try std.testing.expectEqual(@as(?u64, 2000), compiled.stop_when.time_elapsed_ms);
-    try std.testing.expectEqual(@as(?u64, 3), compiled.stop_when.max_iterations);
-    try std.testing.expectEqual(@as(?u64, 3), compiled.expected_iterations);
+    try std.testing.expect(compiled.stop_when != null);
 }
 
 test "precompile preserves initial variables" {
@@ -842,13 +835,11 @@ test "precompile estimates iterations for run-once recipes" {
         \\  record: all
         \\vars: {}
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set
         \\        instrument: d1
         \\        args: {}
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set
         \\        instrument: d1
         \\        args: {}
@@ -865,52 +856,7 @@ test "precompile estimates iterations for run-once recipes" {
     var compiled = try precompilePath(gpa, recipe_path, dir);
     defer compiled.deinit();
 
-    // Default run-once behavior: each task runs once.
-    try std.testing.expectEqual(@as(?u64, 2), compiled.expected_iterations);
-}
-
-test "precompile marks iterations unknown for time-limited infinite loops" {
-    const gpa = std.testing.allocator;
-
-    var workspace = testing.TestWorkspace.init(gpa);
-    defer workspace.deinit();
-
-    try workspace.writeFile("adapters/psu.toml",
-        \\[metadata]
-        \\
-        \\[commands.set]
-        \\write = "V"
-    );
-    try workspace.writeFile("recipes/time_limited.yaml",
-        \\instruments:
-        \\  d1:
-        \\    adapter: psu.toml
-        \\    resource: R
-        \\pipeline:
-        \\  record: all
-        \\vars: {}
-        \\tasks:
-        \\  - every_ms: 10
-        \\    steps:
-        \\      - call: set
-        \\        instrument: d1
-        \\        args: {}
-        \\stop_when:
-        \\  time_elapsed: 1s
-    );
-
-    const adapter_dir = try workspace.realpathAlloc("adapters");
-    defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/time_limited.yaml");
-    defer gpa.free(recipe_path);
-
-    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
-    defer dir.close();
-
-    var compiled = try precompilePath(gpa, recipe_path, dir);
-    defer compiled.deinit();
-
-    // Iterations unknown because we skip time-based estimation.
+    // No expected_iterations in recipe, so null.
     try std.testing.expectEqual(@as(?u64, null), compiled.expected_iterations);
 }
 
@@ -936,8 +882,7 @@ test "precompile preserves typed literal step arguments" {
         \\vars:
         \\  target: mir
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: configure
         \\        instrument: d1
         \\        args:
@@ -961,9 +906,9 @@ test "precompile preserves typed literal step arguments" {
     var compiled = try precompilePath(gpa, recipe_path, dir);
     defer compiled.deinit();
 
-    const args = compiled.tasks[0].steps[0].action.instrument_call.args;
+    const args = compiled.tasks[0].steps()[0].action.instrument_call.args;
 
-    const command = compiled.tasks[0].steps[0].action.instrument_call.command;
+    const command = compiled.tasks[0].steps()[0].action.instrument_call.command;
 
     const count = args[command.argIndex("count").?];
     switch (count) {
@@ -1067,8 +1012,7 @@ test "precompile stores only referenced commands" {
         \\  record: all
         \\vars: {}
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set_voltage
         \\        instrument: d1
         \\        args:
@@ -1108,8 +1052,7 @@ test "precompile rejects missing instrument references" {
         \\  record: all
         \\vars: {}
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set_voltage
         \\        instrument: missing
         \\        args:
@@ -1142,8 +1085,7 @@ test "precompile validates command arguments" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set_voltage
         \\        instrument: d1
     );
@@ -1155,8 +1097,7 @@ test "precompile validates command arguments" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set_voltage
         \\        instrument: d1
         \\        args:
@@ -1259,8 +1200,7 @@ test "precompile diagnostic includes step context" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: missing
         \\        instrument: d1
         \\        args:
@@ -1313,8 +1253,7 @@ test "precompile compute step" {
         \\  v: 0
         \\  doubled: 0
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set_voltage
         \\        instrument: d1
         \\        args:
@@ -1336,20 +1275,20 @@ test "precompile compute step" {
     var compiled = try precompilePath(gpa, recipe_path, dir);
     defer compiled.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), compiled.tasks[0].steps.len);
+    try std.testing.expectEqual(@as(usize, 2), compiled.tasks[0].steps().len);
 
     // First step: instrument call
-    switch (compiled.tasks[0].steps[0].action) {
+    switch (compiled.tasks[0].steps()[0].action) {
         .instrument_call => |ic| try std.testing.expectEqualStrings("set_voltage", ic.call),
-        .compute => return error.TestUnexpectedResult,
+        else => return error.TestUnexpectedResult,
     }
 
     // Second step: compute
-    switch (compiled.tasks[0].steps[1].action) {
+    switch (compiled.tasks[0].steps()[1].action) {
         .compute => |comp| {
             try std.testing.expect(comp.save_column != null);
         },
-        .instrument_call => return error.TestUnexpectedResult,
+        else => return error.TestUnexpectedResult,
     }
 }
 
@@ -1368,8 +1307,7 @@ test "precompile compute step rejects missing save_as" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - compute: 1 + 2
     );
 
@@ -1385,14 +1323,14 @@ test "precompile compute step rejects missing save_as" {
     try std.testing.expectError(error.WrongType, precompilePath(gpa, recipe_path, dir));
 }
 
-test "precompile step with when guard" {
+test "precompile step with if guard" {
     const gpa = std.testing.allocator;
 
     var workspace = testing.TestWorkspace.init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
-    try workspace.writeFile("recipes/when_guard.yaml",
+    try workspace.writeFile("recipes/if_guard.yaml",
         \\instruments:
         \\  d1:
         \\    adapter: psu0.toml
@@ -1402,19 +1340,18 @@ test "precompile step with when guard" {
         \\vars:
         \\  power: 0
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set_voltage
         \\        instrument: d1
         \\        args:
         \\          voltage: "5"
         \\          channels: "1"
-        \\        when: "${power} > 100"
+        \\        if: "${power} > 100"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/when_guard.yaml");
+    const recipe_path = try workspace.realpathAlloc("recipes/if_guard.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
@@ -1423,7 +1360,7 @@ test "precompile step with when guard" {
     var compiled = try precompilePath(gpa, recipe_path, dir);
     defer compiled.deinit();
 
-    try std.testing.expect(compiled.tasks[0].steps[0].when != null);
+    try std.testing.expect(compiled.tasks[0].steps()[0].@"if" != null);
 }
 
 test "precompile rejects invalid step (neither call nor compute)" {
@@ -1441,8 +1378,7 @@ test "precompile rejects invalid step (neither call nor compute)" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - save_as: orphan
     );
 
@@ -1478,8 +1414,7 @@ test "precompile rejects record with unknown save_as variable" {
         \\  voltage: 0
         \\  nonexistent: 0
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set_voltage
         \\        instrument: d1
         \\        args:
@@ -1520,8 +1455,7 @@ test "precompile accepts valid record subset" {
         \\  voltage: 0
         \\  doubled: 0
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set_voltage
         \\        instrument: d1
         \\        args:
@@ -1567,8 +1501,7 @@ test "precompile diagnostic for missing pipeline" {
         \\    adapter: psu0.toml
         \\    resource: USB0::1::INSTR
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set_voltage
         \\        instrument: d1
         \\        args:
@@ -1616,8 +1549,7 @@ test "precompile diagnostic for missing record" {
         \\    resource: USB0::1::INSTR
         \\pipeline: {}
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set_voltage
         \\        instrument: d1
         \\        args:
@@ -1669,8 +1601,7 @@ test "precompile expands record all into explicit save_as list" {
         \\  voltage: 0
         \\  doubled: 0
         \\tasks:
-        \\  - every_ms: 100
-        \\    steps:
+        \\  - steps:
         \\      - call: set_voltage
         \\        instrument: d1
         \\        args:
@@ -1726,8 +1657,7 @@ test "precompile rejects undeclared variable use" {
         \\vars:
         \\  voltage: 1
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set
         \\        instrument: d1
         \\        args:
@@ -1760,8 +1690,7 @@ test "precompile rejects undeclared variable in expression" {
         \\vars:
         \\  v: 1
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - compute: "${v} + ${x}"
         \\        save_as: v
     );
@@ -1775,4 +1704,180 @@ test "precompile rejects undeclared variable in expression" {
     defer dir.close();
 
     try std.testing.expectError(error.UndeclaredVariable, precompilePath(gpa, recipe_path, dir));
+}
+
+test "precompile sequential task" {
+    const gpa = std.testing.allocator;
+
+    var workspace = testing.TestWorkspace.init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/psu.toml",
+        \\[metadata]
+        \\
+        \\[commands.set]
+        \\write = "VOLT {voltage}"
+    );
+    try workspace.writeFile("recipes/sequential.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.toml
+        \\    resource: USB0::1::INSTR
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  voltage: 0
+        \\tasks:
+        \\  - steps:
+        \\      - call: set
+        \\        instrument: d1
+        \\        args:
+        \\          voltage: "5"
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/sequential.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
+    defer dir.close();
+
+    var compiled = try precompilePath(gpa, recipe_path, dir);
+    defer compiled.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), compiled.tasks.len);
+    try std.testing.expect(compiled.tasks[0] == .sequential);
+    try std.testing.expectEqual(@as(usize, 1), compiled.tasks[0].steps().len);
+}
+
+test "precompile loop task with while" {
+    const gpa = std.testing.allocator;
+
+    var workspace = testing.TestWorkspace.init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/psu.toml",
+        \\[metadata]
+        \\
+        \\[commands.set]
+        \\write = "VOLT {voltage}"
+    );
+    try workspace.writeFile("recipes/loop_task.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.toml
+        \\    resource: USB0::1::INSTR
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  voltage: 0
+        \\tasks:
+        \\  - while: "$ITER < 10"
+        \\    steps:
+        \\      - call: set
+        \\        instrument: d1
+        \\        args:
+        \\          voltage: "5"
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/loop_task.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
+    defer dir.close();
+
+    var compiled = try precompilePath(gpa, recipe_path, dir);
+    defer compiled.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), compiled.tasks.len);
+    try std.testing.expect(compiled.tasks[0] == .loop);
+    try std.testing.expectEqual(@as(usize, 1), compiled.tasks[0].steps().len);
+}
+
+test "precompile conditional task with if" {
+    const gpa = std.testing.allocator;
+
+    var workspace = testing.TestWorkspace.init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/psu.toml",
+        \\[metadata]
+        \\
+        \\[commands.set]
+        \\write = "VOLT {voltage}"
+    );
+    try workspace.writeFile("recipes/conditional_task.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.toml
+        \\    resource: USB0::1::INSTR
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  voltage: 5
+        \\tasks:
+        \\  - if: "${voltage} > 0"
+        \\    steps:
+        \\      - call: set
+        \\        instrument: d1
+        \\        args:
+        \\          voltage: "5"
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/conditional_task.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
+    defer dir.close();
+
+    var compiled = try precompilePath(gpa, recipe_path, dir);
+    defer compiled.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), compiled.tasks.len);
+    try std.testing.expect(compiled.tasks[0] == .conditional);
+    try std.testing.expectEqual(@as(usize, 1), compiled.tasks[0].steps().len);
+}
+
+test "precompile sleep step" {
+    const gpa = std.testing.allocator;
+
+    var workspace = testing.TestWorkspace.init(gpa);
+    defer workspace.deinit();
+
+    try workspace.makePath("adapters");
+    try workspace.writeFile("recipes/sleep_step.yaml",
+        \\instruments: {}
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  v: 0
+        \\tasks:
+        \\  - steps:
+        \\      - compute: "1 + 2"
+        \\        save_as: v
+        \\      - sleep_ms: 100
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/sleep_step.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
+    defer dir.close();
+
+    var compiled = try precompilePath(gpa, recipe_path, dir);
+    defer compiled.deinit();
+
+    const task_steps = compiled.tasks[0].steps();
+    try std.testing.expectEqual(@as(usize, 2), task_steps.len);
+    switch (task_steps[1].action) {
+        .sleep => |s| try std.testing.expectEqual(@as(u64, 100), s.duration_ms),
+        else => return error.TestUnexpectedResult,
+    }
 }

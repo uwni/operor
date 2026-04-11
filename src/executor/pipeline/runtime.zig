@@ -181,7 +181,7 @@ pub const Runtime = struct {
     }
 
     fn runWorker(self: *Runtime) !void {
-        var frame = types.Frame.empty();
+        var frame: types.Frame = .{};
         while (true) {
             if (self.frame_queue.pop(&frame)) {
                 defer frame.deinit(self.allocator);
@@ -200,11 +200,11 @@ pub const Runtime = struct {
     }
 
     fn runLogWorker(self: *Runtime) !void {
-        var message = sinks.LogMessage.empty();
+        var message: sinks.LogMessage = .{};
         while (true) {
             if (self.log_queue.pop(&message)) {
                 defer message.deinit(self.allocator);
-                try self.log_writer.writeAll(message.text_owned orelse "");
+                try self.log_writer.writeAll(message.text);
                 continue;
             }
 
@@ -214,7 +214,7 @@ pub const Runtime = struct {
 
         while (self.log_queue.pop(&message)) {
             defer message.deinit(self.allocator);
-            try self.log_writer.writeAll(message.text_owned orelse "");
+            try self.log_writer.writeAll(message.text);
         }
     }
 

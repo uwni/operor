@@ -11,8 +11,6 @@ pub const ExecOptions = struct {
     recipe_path: []const u8,
     /// If true, rendered commands are logged instead of being sent to instruments.
     dry_run: bool = true,
-    /// Optional maximum runtime in milliseconds; null means run a single pass of all tasks.
-    max_duration_ms: ?u64 = null,
     /// Optional runtime override for the ring buffer size.
     pipeline_buffer_size: ?usize = null,
     /// Optional runtime override for the pipeline mode preset.

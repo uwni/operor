@@ -17,7 +17,6 @@ const params = clap.parseParamsComptime(
     \\-d, --adapter-dir <adapter_dir>       Path to adapter directory.
     \\    --preview                       Preview the recipe without instrument I/O.
     \\    --dry-run                       Force dry-run even in run mode.
-    \\    --duration-ms <u64>             Optional max runtime in milliseconds.
     \\    --visa-lib <str>                Path to VISA shared library (overrides platform default).
     \\<recipe>
     \\
@@ -65,7 +64,6 @@ pub fn handle(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
         .adapter_dir = adapter_dir,
         .recipe_path = recipe_path,
         .dry_run = res.args.@"dry-run" != 0,
-        .max_duration_ms = res.args.@"duration-ms",
         .visa_lib = res.args.@"visa-lib",
         .log = out,
     };
@@ -82,8 +80,6 @@ test "main parses run command" {
         "adapters",
         "recipes/r1.yaml",
         "--preview",
-        "--duration-ms",
-        "250",
     } };
 
     var root = try clap.parseEx(clap.Help, &common.root_params, common.root_parsers, &iter, .{
@@ -105,5 +101,4 @@ test "main parses run command" {
     try std.testing.expectEqualStrings("recipes/r1.yaml", run.positionals[0].?);
     try std.testing.expect(run.args.preview != 0);
     try std.testing.expect(run.args.@"dry-run" == 0);
-    try std.testing.expectEqual(@as(?u64, 250), run.args.@"duration-ms");
 }

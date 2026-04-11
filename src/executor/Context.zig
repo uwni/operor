@@ -27,7 +27,7 @@ const ContextValue = union(enum) {
 /// Creates an empty execution context.
 pub fn init(allocator: std.mem.Allocator, slot_count: usize) !Context {
     const values = try allocator.alloc(ContextValue, slot_count);
-    for (values) |*slot| slot.* = .unset;
+    @memset(values, .unset);
 
     return .{
         .allocator = allocator,
@@ -57,11 +57,10 @@ pub fn setSlot(self: *Context, slot_idx: usize, value: Value) !void {
                     self.allocator.free(stored.string.buffer);
                     stored.string.buffer = replacement;
                 }
-                std.mem.copyForwards(u8, stored.string.buffer[0..s.len], s);
+                @memcpy(stored.string.buffer[0..s.len], s);
                 stored.string.len = s.len;
             } else {
-                const buffer = try self.allocator.alloc(u8, s.len);
-                std.mem.copyForwards(u8, buffer, s);
+                const buffer = try self.allocator.dupe(u8, s);
                 stored.* = .{ .string = .{ .buffer = buffer, .len = s.len } };
             }
         },
@@ -98,6 +97,10 @@ pub fn resolveBinding(self: *const Context, binding: expr.VariableBinding) ?Valu
         .builtin => |builtin| switch (builtin) {
             .iter => .{ .int = @intCast(self.iteration) },
             .task_idx => .{ .int = @intCast(self.task_idx) },
+            .elapsed_ms => .{ .int = if (self.start_ns == 0)
+                @as(i64, 0)
+            else
+                @intCast(@divTrunc(std.time.nanoTimestamp() - self.start_ns, 1_000_000)) },
         },
     };
 }
@@ -175,4 +178,20 @@ test "Context stores run start state separately from iteration state" {
     try testing.expectEqual(@as(i128, 1234), ctx.start_ns);
     try testing.expectEqual(@as(usize, 5), ctx.task_idx);
     try testing.expectEqual(@as(u64, 9), ctx.iteration);
+}
+
+test "Context resolves $ELAPSED_MS builtin as elapsed milliseconds" {
+    const testing = std.testing;
+
+    var ctx = try Context.init(testing.allocator, 0);
+    defer ctx.deinit();
+
+    // Before start_ns is set, elapsed_ms is 0.
+    const before = ctx.resolveBinding(.{ .builtin = .elapsed_ms }).?;
+    try testing.expectEqual(@as(i64, 0), before.int);
+
+    // Set start_ns to a recent past so elapsed > 0.
+    ctx.start_ns = std.time.nanoTimestamp() - 50_000_000; // 50ms ago
+    const after = ctx.resolveBinding(.{ .builtin = .elapsed_ms }).?;
+    try testing.expect(after.int >= 40 and after.int <= 200);
 }

@@ -13,7 +13,7 @@ pub const Step = types.Step;
 pub const CompiledArgValue = types.CompiledArgValue;
 /// Parsed representation of a step argument value.
 pub const StepArg = types.StepArg;
-/// Task schedule and the steps that should run at that interval.
+/// Task variant describing when and how steps are executed.
 pub const Task = types.Task;
 /// Runtime mode presets for the sampling pipeline.
 pub const PipelineMode = types.PipelineMode;
@@ -21,8 +21,6 @@ pub const PipelineMode = types.PipelineMode;
 pub const PipelineConfig = types.PipelineConfig;
 /// Recipe instrument bound to a adapter and the subset of commands it actually uses.
 pub const PrecompiledInstrument = types.PrecompiledInstrument;
-/// Optional stop conditions applied to the scheduler loop.
-pub const StopWhen = types.StopWhen;
 /// Context captured for the most recent precompile failure.
 pub const PrecompileDiagnostic = diagnostic.PrecompileDiagnostic;
 /// Fully validated recipe ready for preview or execution.

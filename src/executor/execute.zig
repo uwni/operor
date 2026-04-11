@@ -87,7 +87,6 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
         .ctx = &ctx,
         .pipeline_runtime = &pipeline_runtime,
         .dry_run = opts.dry_run,
-        .max_duration_ms = opts.max_duration_ms,
     };
 
     var monitor_state = pipeline_mod.MonitorState{};
@@ -168,8 +167,7 @@ test "executor execute dry run" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set_voltage
         \\        instrument: d1
         \\        args:
@@ -192,7 +190,6 @@ test "executor execute dry run" {
         .recipe_path = recipe_path,
         .dry_run = true,
         .log = &out.writer,
-        .max_duration_ms = null,
     };
 
     try execute(gpa, opts);
@@ -219,8 +216,7 @@ test "executor pipeline creates csv frame sink during dry run" {
         \\  file_path: samples.csv
         \\  record: all
         \\tasks:
-        \\  - every_ms: 0
-        \\    steps:
+        \\  - steps:
         \\      - call: set_voltage
         \\        instrument: d1
         \\        args:
@@ -228,8 +224,7 @@ test "executor pipeline creates csv frame sink during dry run" {
         \\          channels:
         \\            - 1
         \\            - 2
-        \\stop_when:
-        \\  max_iterations: 2
+        \\stop_when: "$ITER >= 2"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
@@ -250,6 +245,6 @@ test "executor pipeline creates csv frame sink during dry run" {
     const file_data = try workspace.readFileAlloc(gpa, "recipes/samples.csv", 8 * 1024);
     defer gpa.free(file_data);
 
-    try std.testing.expectEqualStrings("timestamp_ns,task_idx\n", file_data);
+    try std.testing.expectEqualStrings("\n", file_data);
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "[SUMMARY] buffer capacity: 64"));
 }

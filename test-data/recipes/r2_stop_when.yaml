@@ -5,12 +5,10 @@ instruments:
 pipeline:
   record: all
 tasks:
-  - every: 250ms
+  - while: true
     steps:
       - call: set
         instrument: d1
         args:
           voltage: "5"
-stop_when:
-  time_elapsed: 2s
-  max_iterations: 3
+stop_when: "$ELAPSED_MS >= 2000 || $ITER >= 3"

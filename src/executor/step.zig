@@ -54,15 +54,15 @@ pub fn executeStep(
     log_sink: pipeline_mod.AsyncLog,
     scratch: *StepScratch,
 ) !?SavedValue {
-    // Evaluate optional `when` guard.
-    if (step.when) |*when_expr| {
-        const is_true = when_expr.isTruthy(ctx.varResolver()) catch |err| switch (err) {
+    // Evaluate optional `if` guard.
+    if (step.@"if") |*if_expr| {
+        const is_true = if_expr.isTruthy(ctx.varResolver()) catch |err| switch (err) {
             error.VariableNotFound => {
-                logWarning(log_sink, "when guard: variable not found, skipping step");
+                logWarning(log_sink, "if guard: variable not found, skipping step");
                 return null;
             },
             error.InvalidNumber => {
-                logWarning(log_sink, "when guard: invalid number in variable, skipping step");
+                logWarning(log_sink, "if guard: invalid number in variable, skipping step");
                 return null;
             },
             else => return err,
@@ -73,6 +73,10 @@ pub fn executeStep(
     return switch (step.action) {
         .instrument_call => |ic| executeInstrumentCall(allocator, instrument.?, &ic, ctx, dry_run, log_sink, scratch),
         .compute => |comp| executeCompute(allocator, &comp, ctx, log_sink),
+        .sleep => |s| {
+            std.Thread.sleep(s.duration_ms * 1_000_000);
+            return null;
+        },
     };
 }
 
