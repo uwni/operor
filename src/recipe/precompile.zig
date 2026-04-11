@@ -76,6 +76,9 @@ fn precompileInternal(
     defer adapter_arena.deinit();
 
     const vars: VarsMap = recipe.vars orelse VarsMap.init(alloc);
+    for (vars.keys()) |name| {
+        if (expr.resolveBuiltin(name) != null) return error.BuiltinVariableConflict;
+    }
     const initial_values = try buildInitialValues(alloc, &vars);
 
     // 2. Eagerly load every referenced adapter.
@@ -1704,6 +1707,36 @@ test "precompile rejects undeclared variable in expression" {
     defer dir.close();
 
     try std.testing.expectError(error.UndeclaredVariable, precompilePath(gpa, recipe_path, dir));
+}
+
+test "precompile rejects variable shadowing builtin" {
+    const gpa = std.testing.allocator;
+
+    var workspace = testing.TestWorkspace.init(gpa);
+    defer workspace.deinit();
+
+    try workspace.makePath("adapters");
+    try workspace.writeFile("recipes/shadow_builtin.yaml",
+        \\instruments: {}
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  $ITER: 0
+        \\tasks:
+        \\  - steps:
+        \\      - compute: "1 + 1"
+        \\        save_as: $ITER
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/shadow_builtin.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
+    defer dir.close();
+
+    try std.testing.expectError(error.BuiltinVariableConflict, precompilePath(gpa, recipe_path, dir));
 }
 
 test "precompile sequential task" {
