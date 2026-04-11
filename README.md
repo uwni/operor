@@ -20,11 +20,9 @@ Ordo loads instrument adapters from TOML, recipes from YAML, precompiles command
   wget -qO- https://raw.githubusercontent.com/uwni/ordo/main/install.sh | sh
   ```
 
-  - **macOS** users may get a Gatekeeper warning because the binary is not signed/notarized. If that happens, allow it manually in **System Settings -> Privacy & Security**, or run:
-    ```sh
-    xattr -d com.apple.quarantine ./ordo
-    ```
-
+  > [!NOTE]
+  > **macOS** users may get a Gatekeeper warning because the binary is not signed/notarized. If that happens, allow it manually in **System Settings -> Privacy & Security**.
+  
 - For **Microsoft Windows** users, Run
   ```ps
   irm https://raw.githubusercontent.com/uwni/ordo/main/install.ps1 | iex
@@ -53,7 +51,7 @@ ordo repl
 Or connect directly to a known resource:
 
 ```sh
-ordo repl -r USB0::0x0957::0x1798::MY12345678::INSTR
+ordo repl -r USB0::...::INSTR
 ```
 
 Execute a recipe:
@@ -61,9 +59,6 @@ Execute a recipe:
 ```sh
 ordo run -d ./adapters ./recipes/measure.yaml
 ```
-
-## Notice
-Prevent your device from sleeping or power saving stragety like tgha
 
 ## CLI
 
@@ -78,6 +73,10 @@ Command behavior:
 - `run --preview` validates the recipe, adapters, commands, variables, and pipeline configuration without instrument I/O.
 - `run --dry-run` renders commands and logs them instead of writing to the instrument.
 - `repl` opens a stateful interactive session. Use `-r` to connect on startup, or discover instruments with `list` and `open` inside the REPL.
+
+> [!WARNING]
+> Prevent your device from sleeping during experiments while running a recipe. Unexpected sleep can interrupt a running workflow; for example, on macOS you can use `caffeinate` to keep the system awake.
+
 
 ## Core Concepts
 
@@ -135,36 +134,36 @@ Example:
 
 ```yaml
 instruments:
-	psu:
-		adapter: psu.toml
-		resource: USB0::1::INSTR
+    psu:
+        adapter: psu.toml
+        resource: USB0::1::INSTR
 
 vars:
-	target_voltage: 5
-	measured_voltage: 0
-	delta: 0
+    target_voltage: 5
+    measured_voltage: 0
+    delta: 0
 
 pipeline:
-	mode: realtime
-	record:
-		- measured_voltage
-		- delta
-	file_path: samples.csv
+    mode: realtime
+    record:
+        - measured_voltage
+        - delta
+    file_path: samples.csv
 
 tasks:
-	- while: true
-		steps:
-			- call: set_voltage
-				instrument: psu
-				args:
-					voltage: "${target_voltage}"
-					channels: [1, 2]
-			- call: measure_voltage
-				instrument: psu
-				save_as: measured_voltage
-			- compute: "${measured_voltage} - ${target_voltage}"
-				save_as: delta
-				if: "$ITER > 0"
+    - while: true
+        steps:
+            - call: set_voltage
+                instrument: psu
+                args:
+                    voltage: "${target_voltage}"
+                    channels: [1, 2]
+            - call: measure_voltage
+                instrument: psu
+                save_as: measured_voltage
+            - compute: "${measured_voltage} - ${target_voltage}"
+                save_as: delta
+                if: "$ITER > 0"
 
 stop_when: "$ELAPSED_MS >= 2000 || $ITER >= 20"
 ```
@@ -202,13 +201,40 @@ Expressions are used by `compute` and `if`.
 
 Supported syntax:
 
-- Variable references: `${name}`
-- Built-ins: `$ITER`, `$TASK_IDX`
-- Arithmetic: `+`, `-`, `*`, `/`
-- Comparison: `>`, `<`, `>=`, `<=`, `==`, `!=`
-- Logical: `&&`, `||`, `!`
-- Functions: `min(x, y)`, `max(x, y)`
-- Parentheses for grouping
+### Variables
+
+| Item | Meaning | Use | Example |
+| --- | --- | --- | --- |
+| `${name}` | Variable reference. Reads a value from `vars`. | Use recipe variables in `if` and `compute`. | `${target_voltage}` |
+| `$ITER` | Global iteration counter, starting at `0`. | Stop conditions, warm-up logic, periodic logic. | `$ITER >= 20` |
+| `$TASK_IDX` | Zero-based task index in the `tasks` list. | Task-specific branching in shared expressions. | `$TASK_IDX == 1` |
+| `$ELAPSED_MS` | Elapsed runtime in milliseconds since execution start. | Time-based stop/guard conditions. | `$ELAPSED_MS >= 2000` |
+
+### Operators
+
+| Item | Meaning | Use | Example |
+| --- | --- | --- | --- |
+| `+` | Addition. | Numeric sum. | `${a} + ${b}` |
+| `-` | Subtraction. | Numeric difference. | `${measured} - ${target}` |
+| `*` | Multiplication. | Numeric product/scaling. | `${voltage} * 0.1` |
+| `/` | Division. | Numeric ratio/average. | `${sum} / 2` |
+| `>` | Greater-than comparison. | True when left side is greater than right side. | `${temp} > 40` |
+| `<` | Less-than comparison. | True when left side is less than right side. | `${delta} < 0.1` |
+| `>=` | Greater-than-or-equal comparison. | Inclusive upper/lower bound checks. | `$ITER >= 10` |
+| `<=` | Less-than-or-equal comparison. | Inclusive threshold checks. | `$ELAPSED_MS <= 5000` |
+| `==` | Equality comparison. | Exact numeric equality checks. | `$TASK_IDX == 0` |
+| `!=` | Inequality comparison. | Not-equal checks. | `${state} != 0` |
+| `&&` | Logical AND. | True only if both sides are true. | `$ITER > 0 && ${delta} < 0.1` |
+| `\|\|` | Logical OR. | True if either side is true. | `$ELAPSED_MS > 2000 || $ITER > 100` |
+| `!` | Logical NOT. | Invert a condition. | `!(${ok} == 1)` |
+| `( ... )` | Parentheses/grouping. | Control evaluation order. | `(${a} + ${b}) / 2` |
+
+### Functions
+
+| Item | Meaning | Use | Example |
+| --- | --- | --- | --- |
+| `min(x, y)` | Smaller of two values. | Clamp to an upper limit. | `min(${v}, 10)` |
+| `max(x, y)` | Larger of two values. | Clamp to a lower limit. | `max(${v}, 0)` |
 
 All expression math is evaluated as `f64`. A non-zero result is treated as true.
 
@@ -247,13 +273,13 @@ Pipeline fields:
 
 ```yaml
 pipeline:
-	mode: realtime
-	buffer_size: 8192
-	warn_usage_percent: 90
-	file_path: samples.csv
-	network_host: 127.0.0.1
-	network_port: 9000
-	record: all
+    mode: realtime
+    buffer_size: 8192
+    warn_usage_percent: 90
+    file_path: samples.csv
+    network_host: 127.0.0.1
+    network_port: 9000
+    record: all
 ```
 
 Notes:
