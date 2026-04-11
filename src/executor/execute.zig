@@ -1,4 +1,6 @@
 const std = @import("std");
+const mibu = @import("mibu");
+const color = mibu.color;
 const Adapter = @import("../adapter/Adapter.zig");
 const recipe_mod = @import("../recipe/root.zig");
 const testing = @import("../testing.zig");
@@ -6,6 +8,8 @@ const visa = @import("../visa/root.zig");
 const common = @import("common.zig");
 const pipeline_mod = @import("pipeline/root.zig");
 const scheduler = @import("scheduler.zig");
+
+const plan_tag = color.print.fg(.aqua) ++ "[PLAN]" ++ color.print.reset;
 
 /// Precompiles a recipe, opens instrument sessions, and runs tasks until completion.
 pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
@@ -38,9 +42,9 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
     defer compiled.deinit();
 
     if (compiled.expected_iterations) |total| {
-        try log.print("[PLAN] Expected iterations: {d}\n", .{total});
+        try log.print(plan_tag ++ " Expected iterations: {d}\n", .{total});
     } else {
-        try log.print("[PLAN] Expected iterations: Unknown (running until manual stop or time limit)\n", .{});
+        try log.print(plan_tag ++ " Expected iterations: Unknown (running until manual stop or time limit)\n", .{});
     }
 
     const instruments = try allocator.alloc(common.InstrumentRuntime, compiled.instruments.count());
@@ -194,7 +198,8 @@ test "executor execute dry run" {
 
     try execute(gpa, opts);
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "dry-run"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "[SUMMARY] frame buffer overflows: 0"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "[SUMMARY]"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "frame buffer overflows: 0"));
 }
 
 test "executor pipeline creates csv frame sink during dry run" {
@@ -246,5 +251,6 @@ test "executor pipeline creates csv frame sink during dry run" {
     defer gpa.free(file_data);
 
     try std.testing.expectEqualStrings("\n", file_data);
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "[SUMMARY] buffer capacity: 64"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "[SUMMARY]"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "buffer capacity: 64"));
 }

@@ -62,6 +62,9 @@ Execute a recipe:
 ordo run -d ./adapters ./recipes/measure.yaml
 ```
 
+## Notice
+Prevent your device from sleeping or power saving stragety like tgha
+
 ## CLI
 
 ```text

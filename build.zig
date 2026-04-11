@@ -6,18 +6,21 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
     const test_filters = b.option([]const []const u8, "test-filter", "Skip tests that do not match filters") orelse &.{};
 
-    const serde_dep = b.dependency("serde", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
     const ordo_mod = b.addModule("ordo", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .link_libc = true,
     });
     ordo_mod.addIncludePath(b.path("include/"));
+    const serde_dep = b.dependency("serde", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     ordo_mod.addImport("serde", serde_dep.module("serde"));
+
+    const mibu_dep = b.dependency("mibu", .{});
+    ordo_mod.addImport("mibu", mibu_dep.module("mibu"));
 
     const semver = std.SemanticVersion.parse(pkg.version) catch unreachable;
 

@@ -1,9 +1,14 @@
 const std = @import("std");
+const mibu = @import("mibu");
+const color = mibu.color;
 const Adapter = @import("../adapter/Adapter.zig");
 const recipe_mod = @import("../recipe/root.zig");
 const common = @import("common.zig");
 const pipeline_mod = @import("pipeline/root.zig");
 const expr = @import("../expr.zig");
+
+const warn_tag = color.print.fg(.yellow) ++ "[WARN]" ++ color.print.reset;
+const dry_run_tag = color.print.fg(.fuchsia) ++ "[dry-run]" ++ color.print.reset;
 
 const command_stack_bytes: usize = 512;
 /// Parsed response value in the native Zig type indicated by the command encoding.
@@ -237,11 +242,11 @@ fn resolveStepArg(
 }
 
 fn logWarning(log_sink: pipeline_mod.AsyncLog, message: []const u8) void {
-    log_sink.print("[WARN] {s}\n", .{message});
+    log_sink.print(warn_tag ++ " {s}\n", .{message});
 }
 
 fn logDryRun(log_sink: pipeline_mod.AsyncLog, adapter_name: []const u8, rendered: []const u8) void {
-    log_sink.print("[dry-run] {s} -> {s}\n", .{ adapter_name, rendered });
+    log_sink.print(dry_run_tag ++ " {s} -> {s}\n", .{ adapter_name, rendered });
 }
 
 test "executor parse response" {

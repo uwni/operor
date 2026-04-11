@@ -1,7 +1,10 @@
 const std = @import("std");
+const mibu = @import("mibu");
+const color = mibu.color;
 const visa = @import("visa/root.zig");
 
-const repl_prompt = "repl> ";
+const repl_prompt = color.print.fg(.aqua) ++ "repl> " ++ color.print.reset;
+const err_label = color.print.fg(.red) ++ "error:" ++ color.print.reset;
 const repl_max_line_bytes: usize = 4096;
 const repl_whitespace = " \t\r\n";
 
@@ -50,7 +53,7 @@ pub fn run(
 
     if (resource_addr) |addr| {
         try ctx.open(allocator, addr);
-        try out.print("Connected to {s}\n", .{addr});
+        try out.print(color.print.fg(.green) ++ "Connected to {s}" ++ color.print.reset ++ "\n", .{addr});
     }
 
     try printHelp(out, ctx.state());
@@ -113,7 +116,7 @@ fn loop(
         const line = readLine(reader) catch |err| switch (err) {
             error.ReadFailed => return error.ReadFailed,
             error.StreamTooLong => {
-                try out.print("error: input line exceeds {d} bytes\n", .{repl_max_line_bytes});
+                try out.print(err_label ++ " input line exceeds {d} bytes\n", .{repl_max_line_bytes});
                 continue;
             },
         } orelse {
@@ -130,7 +133,7 @@ fn loop(
         };
 
         running = executeCommand(allocator, ctx, command, reader, out) catch |err| {
-            try out.print("error: {any}\n", .{err});
+            try out.print(err_label ++ " {any}\n", .{err});
             continue;
         };
     }
@@ -165,12 +168,12 @@ fn handleOpen(
     out: *std.Io.Writer,
 ) !void {
     if (ctx.state() == .connected) {
-        try out.writeAll("error: already connected; use 'close' first\n");
+        try out.writeAll(err_label ++ " already connected; use 'close' first\n");
         return;
     }
     if (maybe_addr) |addr| {
         try ctx.open(allocator, addr);
-        try out.print("Connected to {s}\n", .{addr});
+        try out.print(color.print.fg(.green) ++ "Connected to {s}" ++ color.print.reset ++ "\n", .{addr});
         return;
     }
     // Interactive mode: scan and prompt for index.
@@ -181,41 +184,41 @@ fn handleOpen(
     const idx_line = readLine(reader) catch |err| switch (err) {
         error.ReadFailed => return error.ReadFailed,
         error.StreamTooLong => {
-            try out.writeAll("error: input too long\n");
+            try out.writeAll(err_label ++ " input too long\n");
             return;
         },
     } orelse return;
     const idx_trimmed = std.mem.trim(u8, idx_line, repl_whitespace);
     const index = std.fmt.parseInt(usize, idx_trimmed, 10) catch {
-        try out.writeAll("error: invalid index\n");
+        try out.writeAll(err_label ++ " invalid index\n");
         return;
     };
     if (index == 0 or index > count) {
-        try out.writeAll("error: index out of range\n");
+        try out.writeAll(err_label ++ " index out of range\n");
         return;
     }
     // Re-fetch to get the address at the selected index.
     var resources = try ctx.listResources(allocator);
     defer resources.deinit();
     if (index > resources.items.len) {
-        try out.writeAll("error: instrument list changed; try again\n");
+        try out.writeAll(err_label ++ " instrument list changed; try again\n");
         return;
     }
     const addr = resources.items[index - 1];
     try ctx.open(allocator, addr);
-    try out.print("Connected to {s}\n", .{addr});
+    try out.print(color.print.fg(.green) ++ "Connected to {s}" ++ color.print.reset ++ "\n", .{addr});
 }
 
 fn handleClose(ctx: anytype, out: *std.Io.Writer) !void {
     if (ctx.state() == .disconnected) {
-        try out.writeAll("error: not connected; use 'open <resource>' to connect first\n");
+        try out.writeAll(err_label ++ " not connected; use 'open <resource>' to connect first\n");
         return;
     }
     ctx.close();
     try out.writeAll("Disconnected.\n");
 }
 
-const not_connected_msg = "error: not connected; use 'list' to discover instruments, then 'open <resource>' to connect\n";
+const not_connected_msg = err_label ++ " not connected; use 'list' to discover instruments, then 'open <resource>' to connect\n";
 
 fn handleWrite(ctx: anytype, payload: []const u8, out: *std.Io.Writer) !void {
     if (ctx.state() == .disconnected) {
@@ -341,7 +344,7 @@ fn printParseError(out: *std.Io.Writer, err: ParseError) !void {
         error.MissingCommandPayload => "missing command payload",
         error.UnexpectedCommandPayload => "read does not accept a payload",
     };
-    try out.print("error: {s}; type 'help' for usage\n", .{message});
+    try out.print(err_label ++ " {s}; type 'help' for usage\n", .{message});
 }
 
 /// Writes a response to the terminal, preserving existing trailing newlines when present.
@@ -480,7 +483,7 @@ test "repl loop handles open write query read close and quit" {
     try std.testing.expectEqualStrings("CONF:VOLT 10", ctx.writes.items[0]);
     try std.testing.expectEqualStrings("*IDN?", ctx.writes.items[1]);
     const output = out.written();
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Connected to USB0::INSTR\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Connected to USB0::INSTR"));
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "ok\n"));
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "TEST,MODEL,123\n"));
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "5.000\n"));
@@ -531,7 +534,7 @@ test "repl interactive open scans and prompts" {
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "1) USB0::0x0957::INSTR"));
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "2) TCPIP0::192.168.1.1::INSTR"));
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Enter index:"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Connected to TCPIP0::192.168.1.1::INSTR\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Connected to TCPIP0::192.168.1.1::INSTR"));
 }
 
 test "repl interactive open with invalid index" {

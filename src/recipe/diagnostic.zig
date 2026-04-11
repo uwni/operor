@@ -1,4 +1,6 @@
 const std = @import("std");
+const mibu = @import("mibu");
+const color = mibu.color;
 
 /// Lightweight context used while building diagnostics during precompile.
 pub const DiagnosticContext = struct {
@@ -57,7 +59,7 @@ pub const PrecompileDiagnostic = struct {
 
     /// Writes a human-readable diagnostic line for a precompile error.
     pub fn write(self: *const PrecompileDiagnostic, writer: *std.Io.Writer, err: anyerror) !void {
-        try writer.writeAll("precompile failed");
+        try writer.writeAll(color.print.fg(.red) ++ "precompile failed" ++ color.print.reset);
         if (self.task_idx) |task_idx| {
             if (self.step_idx) |step_idx| {
                 try writer.print(" at task {d} step {d}", .{ task_idx, step_idx });

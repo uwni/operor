@@ -33,6 +33,10 @@
             .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.11.0.tar.gz",
             .hash = "clap-0.11.0-oBajB-HnAQDPCKYzwF7rO3qDFwRcD39Q0DALlTSz5H7e",
         },
+        .mibu = .{
+            .url = "git+https://github.com/xyaman/mibu#fa883b8d903573ca6ac44279f31d1317f0bcb595",
+            .hash = "mibu-0.0.1-dev-Ddr1rrDIAACi6HKDko6IdyxEpm_XaGYrPpAxyGnH2B3I",
+        },
     },
     .paths = .{
         "build.zig",

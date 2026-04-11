@@ -1,10 +1,17 @@
 const std = @import("std");
+const mibu = @import("mibu");
+const color = mibu.color;
 const config_mod = @import("config.zig");
 const sinks = @import("sinks.zig");
 const types = @import("types.zig");
 
 const idle_sleep_ns: u64 = 100 * std.time.ns_per_us;
 const min_log_queue_capacity: usize = 256;
+
+const warn_tag = color.print.fg(.yellow) ++ "[WARN]" ++ color.print.reset;
+const error_tag = color.print.fg(.red) ++ "[ERROR]" ++ color.print.reset;
+const summary_tag = color.print.fg(.aqua) ++ "[SUMMARY]" ++ color.print.reset;
+const hint_tag = color.print.fg(.aqua) ++ "[HINT]" ++ color.print.reset;
 
 pub const monitor_interval_ns: u64 = 250 * std.time.ns_per_ms;
 
@@ -120,7 +127,7 @@ pub const Runtime = struct {
 
         const dropped_logs = self.log_queue.overflowCount() + self.log_drop_count.load(.monotonic);
         if (dropped_logs > 0) {
-            self.log_writer.print("[WARN] dropped log messages: {d}\n", .{dropped_logs}) catch {};
+            self.log_writer.print(warn_tag ++ " dropped log messages: {d}\n", .{dropped_logs}) catch {};
         }
     }
 
@@ -133,8 +140,8 @@ pub const Runtime = struct {
         const usage_percent = usagePercent(usage, self.frame_queue.capacity);
         if (usage_percent >= self.config.warn_usage_percent) {
             if (!state.high_usage_active) {
-                self.asyncLog().print("[WARN] buffer usage high: {d}%\n", .{usage_percent});
-                self.asyncLog().writeAll("[HINT] increase buffer size or reduce sampling rate\n");
+                self.asyncLog().print(warn_tag ++ " buffer usage high: {d}%\n", .{usage_percent});
+                self.asyncLog().writeAll(hint_tag ++ " increase buffer size or reduce sampling rate\n");
                 state.high_usage_active = true;
             }
         } else if (usage_percent + 10 < self.config.warn_usage_percent) {
@@ -143,8 +150,8 @@ pub const Runtime = struct {
 
         const overflows = self.frame_queue.overflowCount();
         if (overflows > state.last_overflow_warned) {
-            self.asyncLog().print("[WARN] frame buffer overflows: {d}\n", .{overflows});
-            self.asyncLog().writeAll("[HINT] increase buffer size or reduce sampling rate\n");
+            self.asyncLog().print(warn_tag ++ " frame buffer overflows: {d}\n", .{overflows});
+            self.asyncLog().writeAll(hint_tag ++ " increase buffer size or reduce sampling rate\n");
             state.last_overflow_warned = overflows;
         }
     }
@@ -154,19 +161,19 @@ pub const Runtime = struct {
         const current_usage = self.frame_queue.usage();
         const overflows = self.frame_queue.overflowCount();
 
-        self.asyncLog().writeAll("[SUMMARY] overflow strategy: warn_and_stop\n");
-        self.asyncLog().print("[SUMMARY] buffer capacity: {d}\n", .{self.frame_queue.capacity});
+        self.asyncLog().writeAll(summary_tag ++ " overflow strategy: warn_and_stop\n");
+        self.asyncLog().print(summary_tag ++ " buffer capacity: {d}\n", .{self.frame_queue.capacity});
         self.asyncLog().print(
-            "[SUMMARY] max buffer usage: {d}/{d} ({d}%)\n",
+            summary_tag ++ " max buffer usage: {d}/{d} ({d}%)\n",
             .{ max_usage, self.frame_queue.capacity, usagePercent(max_usage, self.frame_queue.capacity) },
         );
         self.asyncLog().print(
-            "[SUMMARY] current usage ratio: {d}/{d} ({d}%)\n",
+            summary_tag ++ " current usage ratio: {d}/{d} ({d}%)\n",
             .{ current_usage, self.frame_queue.capacity, usagePercent(current_usage, self.frame_queue.capacity) },
         );
-        self.asyncLog().print("[SUMMARY] frame buffer overflows: {d}\n", .{overflows});
+        self.asyncLog().print(summary_tag ++ " frame buffer overflows: {d}\n", .{overflows});
         if (overflows > 0) {
-            self.asyncLog().writeAll("[HINT] increase buffer size or reduce sampling rate\n");
+            self.asyncLog().writeAll(hint_tag ++ " increase buffer size or reduce sampling rate\n");
         }
     }
 
@@ -226,7 +233,7 @@ pub const Runtime = struct {
     fn writeFileSink(self: *Runtime, frame: *const types.Frame) !void {
         const sink = &(self.file_sink orelse return);
         sink.writeFrame(frame) catch |err| {
-            self.asyncLog().print("[ERROR] file sink write failed: {s}\n", .{@errorName(err)});
+            self.asyncLog().print(error_tag ++ " file sink write failed: {s}\n", .{@errorName(err)});
             return error.FileSinkFailed;
         };
     }
@@ -236,7 +243,7 @@ pub const Runtime = struct {
         self.network_sink.?.writeFrame(frame) catch |err| {
             self.network_sink.?.deinit(self.allocator);
             self.network_sink = null;
-            self.asyncLog().print("[WARN] network sink disabled: {s}\n", .{@errorName(err)});
+            self.asyncLog().print(warn_tag ++ " network sink disabled: {s}\n", .{@errorName(err)});
         };
     }
 };
