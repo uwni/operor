@@ -4,6 +4,8 @@ const pkg = @import("build.zig.zon");
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const strip = b.option(bool, "strip", "Strip debug information from the binary");
+
     const test_filters = b.option([]const []const u8, "test-filter", "Skip tests that do not match filters") orelse &.{};
 
     const ordo_mod = b.addModule("ordo", .{
@@ -32,6 +34,7 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = strip,
             .imports = &.{
                 .{ .name = "ordo", .module = ordo_mod },
             },
