@@ -127,7 +127,7 @@ test "Value and RenderValue format support formatter specifier" {
         .{ .string = "ch3" },
     };
 
-    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
 
     try out.writer.print("{f}|{f}|{f}|{f}|{f}", .{
@@ -145,7 +145,7 @@ test "Context exposes built-ins alongside stored values" {
     const testing = std.testing;
     const expr_mod = @import("../expr.zig");
 
-    var ctx = try Context.init(testing.allocator, 1);
+    var ctx: Context = try .init(testing.allocator, 1);
     defer ctx.deinit();
 
     try ctx.setSlot(0, .{ .float = 3.3 });
@@ -159,7 +159,7 @@ test "Context exposes built-ins alongside stored values" {
 
     var expr_obj = try expr_mod.parse(testing.allocator, "$ITER + $TASK_IDX");
     defer expr_obj.deinit(testing.allocator);
-    var empty_slots = std.StringArrayHashMap(void).init(testing.allocator);
+    var empty_slots: std.StringArrayHashMap(void) = .init(testing.allocator);
     defer empty_slots.deinit();
     try expr_obj.bindVariables(&empty_slots);
     try testing.expectApproxEqAbs(@as(f64, 9.0), try expr_obj.eval(ctx.varResolver()), 1e-9);
@@ -168,7 +168,7 @@ test "Context exposes built-ins alongside stored values" {
 test "Context stores run start state separately from iteration state" {
     const testing = std.testing;
 
-    var ctx = try Context.init(testing.allocator, 0);
+    var ctx: Context = try .init(testing.allocator, 0);
     defer ctx.deinit();
 
     ctx.start_ns = 1234;
@@ -183,7 +183,7 @@ test "Context stores run start state separately from iteration state" {
 test "Context resolves $ELAPSED_MS builtin as elapsed milliseconds" {
     const testing = std.testing;
 
-    var ctx = try Context.init(testing.allocator, 0);
+    var ctx: Context = try .init(testing.allocator, 0);
     defer ctx.deinit();
 
     // Before start_ns is set, elapsed_ms is 0.

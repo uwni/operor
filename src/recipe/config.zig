@@ -138,7 +138,7 @@ test "parse recipe arg object values" {
         \\  enabled: true
     ;
 
-    var arena = std.heap.ArenaAllocator.init(gpa);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
     const parsed = try doc_parse.parseByFormat(Parsed, .yaml, arena.allocator(), content);

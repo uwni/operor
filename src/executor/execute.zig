@@ -21,7 +21,7 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
         rm = try visa.ResourceManager.init(&vtable);
     }
 
-    var precompile_diagnostic = recipe_mod.PrecompileDiagnostic.init(allocator);
+    var precompile_diagnostic: recipe_mod.PrecompileDiagnostic = .init(allocator);
     defer precompile_diagnostic.deinit();
 
     var compiled = blk: {
@@ -30,7 +30,7 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
         else
             try std.fs.cwd().openDir(opts.adapter_dir, .{});
         defer dir.close();
-        break :blk recipe_mod.PrecompiledRecipe.precompilePathWithDiagnostic(allocator, opts.recipe_path, dir, &precompile_diagnostic) catch |err| {
+        break :blk recipe_mod.PrecompiledRecipe.precompilePath(allocator, opts.recipe_path, dir, &precompile_diagnostic) catch |err| {
             try precompile_diagnostic.write(log, err);
             return err;
         };
@@ -44,7 +44,7 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
     }
 
     const instruments = try allocator.alloc(common.InstrumentRuntime, compiled.instruments.count());
-    var ctx = try common.Context.init(allocator, compiled.initial_values.len);
+    var ctx: common.Context = try .init(allocator, compiled.initial_values.len);
 
     // Initialize context variables from the recipe.
     for (compiled.initial_values, 0..) |value_opt, slot_idx| {
@@ -76,7 +76,7 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
 
     const frame_columns = compiled.pipeline.record.?.explicit;
 
-    var pipeline_runtime = try pipeline_mod.Runtime.init(allocator, pipeline_config, frame_columns, log);
+    var pipeline_runtime: pipeline_mod.Runtime = try .init(allocator, pipeline_config, frame_columns, log);
     defer pipeline_runtime.deinit();
     try pipeline_runtime.start();
 
@@ -139,7 +139,7 @@ fn prepareRuntime(
     const mgr = rm orelse return;
     for (precompiled_instruments.values(), 0..) |*compiled_instrument, idx| {
         const runtime = &instruments[idx];
-        var instr = visa.Instrument.init(mgr.session, mgr.vtable);
+        var instr: visa.Instrument = .init(mgr.session, mgr.vtable);
         try instr.open(allocator, compiled_instrument.resource, compiled_instrument.options);
         runtime.handle = instr;
     }
@@ -155,7 +155,7 @@ const vendor_psu_adapter =
 test "executor execute dry run" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
@@ -182,7 +182,7 @@ test "executor execute dry run" {
     const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.yaml");
     defer gpa.free(recipe_path);
 
-    var out = std.Io.Writer.Allocating.init(gpa);
+    var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
 
     const opts = common.ExecOptions{
@@ -200,7 +200,7 @@ test "executor execute dry run" {
 test "executor pipeline creates csv frame sink during dry run" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
@@ -232,7 +232,7 @@ test "executor pipeline creates csv frame sink during dry run" {
     const recipe_path = try workspace.realpathAlloc("recipes/pipeline.yaml");
     defer gpa.free(recipe_path);
 
-    var out = std.Io.Writer.Allocating.init(gpa);
+    var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
 
     try execute(gpa, .{

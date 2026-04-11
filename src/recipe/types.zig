@@ -309,18 +309,9 @@ pub const PrecompiledRecipe = struct {
         allocator: std.mem.Allocator,
         recipe_path: []const u8,
         adapter_dir: std.fs.Dir,
+        precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
     ) !PrecompiledRecipe {
-        return @import("precompile.zig").precompilePath(allocator, recipe_path, adapter_dir);
-    }
-
-    /// Loads and precompiles a recipe document while capturing failure context.
-    pub fn precompilePathWithDiagnostic(
-        allocator: std.mem.Allocator,
-        recipe_path: []const u8,
-        adapter_dir: std.fs.Dir,
-        diagnostic_ctx: *diagnostic.PrecompileDiagnostic,
-    ) !PrecompiledRecipe {
-        return @import("precompile.zig").precompilePathWithDiagnostic(allocator, recipe_path, adapter_dir, diagnostic_ctx);
+        return @import("precompile.zig").precompilePath(allocator, recipe_path, adapter_dir, precompile_diagnostic);
     }
 };
 

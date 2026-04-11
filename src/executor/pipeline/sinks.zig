@@ -183,7 +183,7 @@ test "file sink writes one frame row with all saved fields" {
     defer gpa.free(sink_path);
 
     const columns = [_][]const u8{ "voltage", "current" };
-    var sink = try FileSink.init(gpa, sink_path, &columns);
+    var sink: FileSink = try .init(gpa, sink_path, &columns);
     defer sink.deinit();
 
     const values = try gpa.alloc(?[]u8, 2);
@@ -217,7 +217,7 @@ test "file sink leaves unrelated frame columns blank" {
     defer gpa.free(sink_path);
 
     const columns = [_][]const u8{ "voltage", "current" };
-    var sink = try FileSink.init(gpa, sink_path, &columns);
+    var sink: FileSink = try .init(gpa, sink_path, &columns);
     defer sink.deinit();
 
     const values = try gpa.alloc(?[]u8, 2);
@@ -251,7 +251,7 @@ test "file sink escapes csv quotes commas and newlines in frame values" {
     defer gpa.free(sink_path);
 
     const columns = [_][]const u8{"reading"};
-    var sink = try FileSink.init(gpa, sink_path, &columns);
+    var sink: FileSink = try .init(gpa, sink_path, &columns);
     defer sink.deinit();
 
     const values = try gpa.alloc(?[]u8, 1);
@@ -284,7 +284,7 @@ test "writeFrameJson escapes column names and values without heap allocation" {
 
     const columns = [_][]const u8{ "channel\"name", "unused" };
 
-    var out = std.Io.Writer.Allocating.init(gpa);
+    var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
 
     try writeFrameJson(&out.writer, &frame, &columns);

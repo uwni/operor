@@ -572,7 +572,7 @@ fn testBoundEval(source: []const u8, vars: *const std.StringHashMap([]const u8))
     var expr_obj = try parse(std.testing.allocator, source);
     defer expr_obj.deinit(std.testing.allocator);
     var tc = TestContext{ .vars = vars };
-    var slots = std.StringArrayHashMap(void).init(std.testing.allocator);
+    var slots: std.StringArrayHashMap(void) = .init(std.testing.allocator);
     defer slots.deinit();
     var it = expr_obj.variables();
     while (it.next()) |name| {
@@ -616,7 +616,7 @@ test "expr logical" {
 }
 
 test "expr variables" {
-    var vars = std.StringHashMap([]const u8).init(std.testing.allocator);
+    var vars: std.StringHashMap([]const u8) = .init(std.testing.allocator);
     defer vars.deinit();
     try vars.put("voltage", "4.5");
     try vars.put("current", "2.0");
@@ -642,7 +642,7 @@ test "expr built-in variables" {
         }.resolve,
     };
 
-    var empty_slots = std.StringArrayHashMap(void).init(std.testing.allocator);
+    var empty_slots: std.StringArrayHashMap(void) = .init(std.testing.allocator);
     defer empty_slots.deinit();
 
     var e1 = try parse(std.testing.allocator, "$ITER");
@@ -665,7 +665,7 @@ test "expr functions" {
 }
 
 test "expr complex power check" {
-    var vars = std.StringHashMap([]const u8).init(std.testing.allocator);
+    var vars: std.StringHashMap([]const u8) = .init(std.testing.allocator);
     defer vars.deinit();
     try vars.put("voltage", "12.0");
     try vars.put("current", "9.0");
@@ -679,7 +679,7 @@ test "expr division by zero" {
 }
 
 test "expr missing variable" {
-    var vars = std.StringHashMap([]const u8).init(std.testing.allocator);
+    var vars: std.StringHashMap([]const u8) = .init(std.testing.allocator);
     defer vars.deinit();
 
     try std.testing.expectError(error.VariableNotFound, testBoundEval("${missing}", &vars));
@@ -697,7 +697,7 @@ test "expr negative literal" {
 }
 
 test "expr unary negation of variable" {
-    var vars = std.StringHashMap([]const u8).init(std.testing.allocator);
+    var vars: std.StringHashMap([]const u8) = .init(std.testing.allocator);
     defer vars.deinit();
     try vars.put("x", "5");
 
@@ -705,14 +705,14 @@ test "expr unary negation of variable" {
 }
 
 test "expr parse reuse" {
-    var vars = std.StringHashMap([]const u8).init(std.testing.allocator);
+    var vars: std.StringHashMap([]const u8) = .init(std.testing.allocator);
     defer vars.deinit();
 
     var expr_obj = try parse(std.testing.allocator, "${x} * 2 + 1");
     defer expr_obj.deinit(std.testing.allocator);
 
     var tc = TestContext{ .vars = &vars };
-    var slots = std.StringArrayHashMap(void).init(std.testing.allocator);
+    var slots: std.StringArrayHashMap(void) = .init(std.testing.allocator);
     defer slots.deinit();
     var it = expr_obj.variables();
     while (it.next()) |name| {

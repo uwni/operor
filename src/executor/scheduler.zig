@@ -4,7 +4,7 @@ const common = @import("common.zig");
 const pipeline_mod = @import("pipeline/root.zig");
 const step_mod = @import("step.zig");
 
-var stop_requested = std.atomic.Value(bool).init(false);
+var stop_requested: std.atomic.Value(bool) = .init(false);
 
 /// Resets the stop flag and installs SIGINT handling before an execution run.
 pub fn initializeStopHandling() void {
@@ -44,7 +44,7 @@ pub fn runTasks(
     ctx.task_idx = 0;
     ctx.iteration = 0;
 
-    var scratch = step_mod.StepScratch.init(allocator);
+    var scratch: step_mod.StepScratch = .init(allocator);
     defer scratch.deinit();
 
     const column_count = if (compiled_recipe.pipeline.record) |rec| switch (rec) {
@@ -97,7 +97,7 @@ fn runTask(
     column_count: usize,
 ) !void {
     const task = compiled_recipe.tasks[task_idx];
-    var frame_builder = try TaskFrameBuilder.init(allocator, column_count);
+    var frame_builder: TaskFrameBuilder = try .init(allocator, column_count);
     defer frame_builder.deinit();
 
     ctx.task_idx = task_idx;
@@ -172,7 +172,7 @@ const TaskFrameBuilder = struct {
 };
 
 test "task frame builder groups multiple saved values into one frame" {
-    var builder = try TaskFrameBuilder.init(std.testing.allocator, 2);
+    var builder: TaskFrameBuilder = try .init(std.testing.allocator, 2);
     defer builder.deinit();
 
     builder.captureOwned(0, try std.testing.allocator.dupe(u8, "1.23"));
@@ -187,7 +187,7 @@ test "task frame builder groups multiple saved values into one frame" {
 }
 
 test "task frame builder keeps the latest value for duplicate columns" {
-    var builder = try TaskFrameBuilder.init(std.testing.allocator, 1);
+    var builder: TaskFrameBuilder = try .init(std.testing.allocator, 1);
     defer builder.deinit();
 
     builder.captureOwned(0, try std.testing.allocator.dupe(u8, "1.23"));
@@ -203,7 +203,7 @@ test "task frame builder keeps the latest value for duplicate columns" {
 test "task frame builder captures saved value by ownership transfer" {
     const gpa = std.testing.allocator;
 
-    var builder = try TaskFrameBuilder.init(gpa, 1);
+    var builder: TaskFrameBuilder = try .init(gpa, 1);
     defer builder.deinit();
 
     const saved = step_mod.SavedValue{

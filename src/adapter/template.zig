@@ -186,7 +186,7 @@ test "render template into buffer" {
     const segments = try parseTemplate(gpa, input);
     defer gpa.free(segments);
 
-    var values = std.StringHashMap([]const u8).init(gpa);
+    var values: std.StringHashMap([]const u8) = .init(gpa);
     defer values.deinit();
     try values.put("channels", "1,2,3");
 
@@ -201,7 +201,7 @@ test "render template allocates with suffix" {
     const segments = try parseTemplate(gpa, input);
     defer gpa.free(segments);
 
-    var values = std.StringHashMap([]const u8).init(gpa);
+    var values: std.StringHashMap([]const u8) = .init(gpa);
     defer values.deinit();
     try values.put("temperature_c", "23.5");
 

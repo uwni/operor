@@ -17,33 +17,17 @@ pub fn precompilePath(
     allocator: std.mem.Allocator,
     recipe_path: []const u8,
     adapter_dir: std.fs.Dir,
-) !types.PrecompiledRecipe {
-    return precompilePathInternal(allocator, recipe_path, adapter_dir, null);
-}
-
-pub fn precompilePathWithDiagnostic(
-    allocator: std.mem.Allocator,
-    recipe_path: []const u8,
-    adapter_dir: std.fs.Dir,
-    precompile_diagnostic: *diagnostic.PrecompileDiagnostic,
-) !types.PrecompiledRecipe {
-    precompile_diagnostic.reset();
-    return precompilePathInternal(allocator, recipe_path, adapter_dir, precompile_diagnostic);
-}
-
-fn precompilePathInternal(
-    allocator: std.mem.Allocator,
-    recipe_path: []const u8,
-    adapter_dir: std.fs.Dir,
     precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
 ) !types.PrecompiledRecipe {
-    var parse_arena = std.heap.ArenaAllocator.init(allocator);
+    if (precompile_diagnostic) |d| d.reset();
+
+    var parse_arena: std.heap.ArenaAllocator = .init(allocator);
     defer parse_arena.deinit();
 
     const recipe_cfg = try doc_parse.parseFilePath(config.RecipeConfig, parse_arena.allocator(), recipe_path, max_recipe_size);
 
     if (recipe_cfg.pipeline == null) {
-        captureDiagnostic(precompile_diagnostic, .{});
+        if (precompile_diagnostic) |d| d.capture(.{}) catch {};
         return error.MissingPipeline;
     }
 
@@ -68,12 +52,15 @@ fn precompileInternal(
     precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
 ) !types.PrecompiledRecipe {
     // 1. Create the arena-owned result lifetime and a temporary adapter cache used only while validating the recipe.
-    var arena = std.heap.ArenaAllocator.init(allocator);
+    var arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer arena.deinit();
     const alloc = arena.allocator();
 
-    var adapter_arena = std.heap.ArenaAllocator.init(allocator);
+    var adapter_arena: std.heap.ArenaAllocator = .init(allocator);
     defer adapter_arena.deinit();
+
+    var diag_ctx: diagnostic.DiagnosticContext = .{};
+    errdefer if (precompile_diagnostic) |d| d.capture(diag_ctx) catch {};
 
     const vars: VarsMap = recipe.vars orelse VarsMap.init(alloc);
     for (vars.keys()) |name| {
@@ -82,7 +69,7 @@ fn precompileInternal(
     const initial_values = try buildInitialValues(alloc, &vars);
 
     // 2. Eagerly load every referenced adapter.
-    var loaded_adapters = try loadAdapters(adapter_arena.allocator(), recipe, adapter_dir, precompile_diagnostic);
+    var loaded_adapters = try loadAdapters(adapter_arena.allocator(), recipe, adapter_dir, &diag_ctx);
     defer {
         var it = loaded_adapters.valueIterator();
         while (it.next()) |adapter| adapter.deinit();
@@ -92,11 +79,12 @@ fn precompileInternal(
     var precompiled_instruments = try precompileInstruments(alloc, recipe, &loaded_adapters);
 
     // 3-5. Normalize tasks and steps, resolving commands and validating arguments.
-    var save_as_set = std.StringArrayHashMap(void).init(alloc);
-    const tasks = try precompileTasks(alloc, recipe, &vars, &loaded_adapters, &precompiled_instruments, &save_as_set, precompile_diagnostic);
+    var save_as_set: std.StringArrayHashMap(void) = .init(alloc);
+    const tasks = try precompileTasks(alloc, recipe, &vars, &loaded_adapters, &precompiled_instruments, &save_as_set, &diag_ctx);
 
     // 6. Validate and resolve pipeline record configuration.
-    const pipeline = try resolvePipelineConfig(alloc, recipe, &vars, &save_as_set, precompile_diagnostic);
+    diag_ctx = .{};
+    const pipeline = try resolvePipelineConfig(alloc, recipe, &vars, &save_as_set);
 
     // 7. Assign save_column indices to steps that contribute to recorded frames.
     assignSaveColumns(tasks, &vars, pipeline.record.?.explicit);
@@ -123,17 +111,17 @@ fn loadAdapters(
     allocator: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
     adapter_dir: std.fs.Dir,
-    precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
+    diag_ctx: *diagnostic.DiagnosticContext,
 ) !std.StringHashMap(Adapter) {
     var map: std.StringHashMap(Adapter) = .init(allocator);
     var instrument_it = recipe.instruments.iterator();
     while (instrument_it.next()) |entry| {
         const cfg = entry.value_ptr.*;
         _ = getOrParseAdapter(allocator, &map, adapter_dir, cfg.adapter) catch |err| {
-            captureDiagnostic(precompile_diagnostic, .{
+            diag_ctx.* = .{
                 .instrument_name = entry.key_ptr.*,
                 .adapter_name = cfg.adapter,
-            });
+            };
             return err;
         };
     }
@@ -145,7 +133,7 @@ fn precompileInstruments(
     recipe: *const config.RecipeConfig,
     loaded_adapters: *const std.StringHashMap(Adapter),
 ) !std.StringArrayHashMap(types.PrecompiledInstrument) {
-    var precompiled_instruments = std.StringArrayHashMap(types.PrecompiledInstrument).init(alloc);
+    var precompiled_instruments: std.StringArrayHashMap(types.PrecompiledInstrument) = .init(alloc);
     try precompiled_instruments.ensureTotalCapacity(recipe.instruments.count());
 
     var instrument_it = recipe.instruments.iterator();
@@ -181,11 +169,11 @@ fn precompileTasks(
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMap(types.PrecompiledInstrument),
     save_as_set: *std.StringArrayHashMap(void),
-    precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
+    diag_ctx: *diagnostic.DiagnosticContext,
 ) ![]types.Task {
     const tasks = try arena_alloc.alloc(types.Task, recipe.tasks.len);
     for (recipe.tasks, 0..) |*task_cfg, task_idx| {
-        const steps = try precompileSteps(arena_alloc, task_cfg.steps, vars, loaded_adapters, precompiled_instruments, save_as_set, task_idx, precompile_diagnostic);
+        const steps = try precompileSteps(arena_alloc, task_cfg.steps, vars, loaded_adapters, precompiled_instruments, save_as_set, task_idx, diag_ctx);
 
         if (task_cfg.@"while") |while_src| {
             // Loop task
@@ -221,7 +209,7 @@ fn precompileSteps(
     precompiled_instruments: *std.StringArrayHashMap(types.PrecompiledInstrument),
     save_as_set: *std.StringArrayHashMap(void),
     task_idx: usize,
-    precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
+    diag_ctx: *diagnostic.DiagnosticContext,
 ) ![]types.Step {
     const steps = try arena_alloc.alloc(types.Step, step_cfgs.len);
     for (step_cfgs, 0..) |*step_cfg, step_idx| {
@@ -233,7 +221,7 @@ fn precompileSteps(
                 cfg,
                 task_idx,
                 step_idx,
-                precompile_diagnostic,
+                diag_ctx,
             ),
             .call => |*cfg| try precompileCallStep(
                 arena_alloc,
@@ -244,7 +232,7 @@ fn precompileSteps(
                 cfg,
                 task_idx,
                 step_idx,
-                precompile_diagnostic,
+                diag_ctx,
             ),
             .sleep_ms => |*cfg| try precompileSleepStep(arena_alloc, vars, cfg),
         };
@@ -259,13 +247,12 @@ fn precompileComputeStep(
     cfg: *const config.ComputeStepConfig,
     task_idx: usize,
     step_idx: usize,
-    precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
+    diag_ctx: *diagnostic.DiagnosticContext,
 ) !types.Step {
-    const diag_ctx = diagnostic.DiagnosticContext{
+    diag_ctx.* = .{
         .task_idx = task_idx,
         .step_idx = step_idx,
     };
-    errdefer captureDiagnostic(precompile_diagnostic, diag_ctx);
 
     const if_expr = try precompileIf(arena_alloc, vars, cfg.@"if");
 
@@ -295,16 +282,15 @@ fn precompileCallStep(
     cfg: *const config.CallStepConfig,
     task_idx: usize,
     step_idx: usize,
-    precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
+    diag_ctx: *diagnostic.DiagnosticContext,
 ) !types.Step {
     const instrument_name = cfg.instrument;
-    var diag_ctx = diagnostic.DiagnosticContext{
+    diag_ctx.* = .{
         .task_idx = task_idx,
         .step_idx = step_idx,
         .instrument_name = instrument_name,
         .command_name = cfg.call,
     };
-    errdefer captureDiagnostic(precompile_diagnostic, diag_ctx);
 
     const if_expr = try precompileIf(arena_alloc, vars, cfg.@"if");
 
@@ -316,7 +302,7 @@ fn precompileCallStep(
 
     const call_copy = try arena_alloc.dupe(u8, cfg.call);
     const instrument_copy = try arena_alloc.dupe(u8, instrument_name);
-    const compiled_args = try compileStepArgs(arena_alloc, command, cfg.args, vars, &diag_ctx);
+    const compiled_args = try compileStepArgs(arena_alloc, command, cfg.args, vars, diag_ctx);
 
     var save_slot: ?usize = null;
     if (cfg.save_as) |label| {
@@ -368,7 +354,6 @@ fn resolvePipelineConfig(
     recipe: *const config.RecipeConfig,
     vars: *const VarsMap,
     save_as_set: *const std.StringArrayHashMap(void),
-    precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
 ) !types.PipelineConfig {
     const pipeline_cfg = recipe.pipeline orelse return error.MissingPipeline;
     if (pipeline_cfg.record == null) return error.MissingRecordConfig;
@@ -380,11 +365,9 @@ fn resolvePipelineConfig(
         .explicit => |columns| {
             for (columns) |name| {
                 if (bindingForName(vars, name) == null) {
-                    captureDiagnostic(precompile_diagnostic, .{});
                     return error.UndeclaredVariable;
                 }
                 if (!save_as_set.contains(name)) {
-                    captureDiagnostic(precompile_diagnostic, .{});
                     return error.RecordVariableNotFound;
                 }
             }
@@ -415,15 +398,6 @@ fn slotToColumn(vars: *const VarsMap, save_slot: usize, columns: []const []const
         if (std.mem.eql(u8, col_name, name)) return col_idx;
     }
     return null;
-}
-
-fn captureDiagnostic(
-    precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
-    context: diagnostic.DiagnosticContext,
-) void {
-    if (precompile_diagnostic) |diag| {
-        diag.capture(context) catch {};
-    }
 }
 
 fn cloneOptionalBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
@@ -645,7 +619,7 @@ fn referenceName(text: []const u8) ?[]const u8 {
 test "load recipe and adapters" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu.toml",
@@ -679,7 +653,7 @@ test "load recipe and adapters" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var compiled = try precompilePath(gpa, recipe_path, dir);
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
     defer compiled.deinit();
 
     const instrument = compiled.instruments.getPtr("d1") orelse return error.TestUnexpectedResult;
@@ -716,7 +690,7 @@ test "load recipe and adapters" {
 test "parse durations and stop conditions" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu.toml",
@@ -749,7 +723,7 @@ test "parse durations and stop conditions" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var compiled = try precompilePath(gpa, recipe_path, dir);
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
     defer compiled.deinit();
 
     const step_args = compiled.tasks[0].steps()[0].action.instrument_call;
@@ -771,7 +745,7 @@ test "parse durations and stop conditions" {
 test "precompile preserves initial variables" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.makePath("adapters");
@@ -793,7 +767,7 @@ test "precompile preserves initial variables" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var compiled = try precompilePath(gpa, recipe_path, dir);
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
     defer compiled.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), compiled.initial_values.len);
@@ -820,7 +794,7 @@ test "precompile preserves initial variables" {
 test "precompile estimates iterations for run-once recipes" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu.toml",
@@ -856,7 +830,7 @@ test "precompile estimates iterations for run-once recipes" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var compiled = try precompilePath(gpa, recipe_path, dir);
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
     defer compiled.deinit();
 
     // No expected_iterations in recipe, so null.
@@ -866,7 +840,7 @@ test "precompile estimates iterations for run-once recipes" {
 test "precompile preserves typed literal step arguments" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/cfg.toml",
@@ -906,7 +880,7 @@ test "precompile preserves typed literal step arguments" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var compiled = try precompilePath(gpa, recipe_path, dir);
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
     defer compiled.deinit();
 
     const args = compiled.tasks[0].steps()[0].action.instrument_call.args;
@@ -994,7 +968,7 @@ const vendor_psu_adapter =
 test "precompile stores only referenced commands" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml",
@@ -1030,7 +1004,7 @@ test "precompile stores only referenced commands" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var compiled = try precompilePath(gpa, recipe_path, dir);
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
     defer compiled.deinit();
 
     const instrument = compiled.instruments.get("d1") orelse return error.TestUnexpectedResult;
@@ -1042,7 +1016,7 @@ test "precompile stores only referenced commands" {
 test "precompile rejects missing instrument references" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
@@ -1070,13 +1044,13 @@ test "precompile rejects missing instrument references" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    try std.testing.expectError(error.InstrumentNotFound, precompilePath(gpa, recipe_path, dir));
+    try std.testing.expectError(error.InstrumentNotFound, precompilePath(gpa, recipe_path, dir, null));
 }
 
 test "precompile validates command arguments" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
@@ -1120,8 +1094,8 @@ test "precompile validates command arguments" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    try std.testing.expectError(error.MissingCommandArgument, precompilePath(gpa, missing_argument_path, dir));
-    try std.testing.expectError(error.UnexpectedCommandArgument, precompilePath(gpa, unexpected_argument_path, dir));
+    try std.testing.expectError(error.MissingCommandArgument, precompilePath(gpa, missing_argument_path, dir, null));
+    try std.testing.expectError(error.UnexpectedCommandArgument, precompilePath(gpa, unexpected_argument_path, dir, null));
 }
 
 test "precompiled command renders via helper" {
@@ -1191,7 +1165,7 @@ test "precompiled command render falls back to heap when suffix leaves too littl
 test "precompile diagnostic includes step context" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
@@ -1218,13 +1192,13 @@ test "precompile diagnostic includes step context" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var precompile_diagnostic = diagnostic.PrecompileDiagnostic.init(gpa);
+    var precompile_diagnostic: diagnostic.PrecompileDiagnostic = .init(gpa);
     defer precompile_diagnostic.deinit();
 
-    _ = precompilePathWithDiagnostic(gpa, recipe_path, dir, &precompile_diagnostic) catch |err| {
+    _ = precompilePath(gpa, recipe_path, dir, &precompile_diagnostic) catch |err| {
         try std.testing.expectEqual(error.CommandNotFound, err);
 
-        var out = std.Io.Writer.Allocating.init(gpa);
+        var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
 
         try precompile_diagnostic.write(&out.writer, err);
@@ -1241,7 +1215,7 @@ test "precompile diagnostic includes step context" {
 test "precompile compute step" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
@@ -1275,7 +1249,7 @@ test "precompile compute step" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var compiled = try precompilePath(gpa, recipe_path, dir);
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
     defer compiled.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), compiled.tasks[0].steps().len);
@@ -1298,7 +1272,7 @@ test "precompile compute step" {
 test "precompile compute step rejects missing save_as" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
@@ -1323,13 +1297,13 @@ test "precompile compute step rejects missing save_as" {
     defer dir.close();
 
     // With the union-based StepConfig, missing required fields (save_as) results in a parse error.
-    try std.testing.expectError(error.WrongType, precompilePath(gpa, recipe_path, dir));
+    try std.testing.expectError(error.WrongType, precompilePath(gpa, recipe_path, dir, null));
 }
 
 test "precompile step with if guard" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
@@ -1360,7 +1334,7 @@ test "precompile step with if guard" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var compiled = try precompilePath(gpa, recipe_path, dir);
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
     defer compiled.deinit();
 
     try std.testing.expect(compiled.tasks[0].steps()[0].@"if" != null);
@@ -1369,7 +1343,7 @@ test "precompile step with if guard" {
 test "precompile rejects invalid step (neither call nor compute)" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
@@ -1394,13 +1368,13 @@ test "precompile rejects invalid step (neither call nor compute)" {
     defer dir.close();
 
     // With the union-based StepConfig, an object matching neither variant results in a parse error.
-    try std.testing.expectError(error.WrongType, precompilePath(gpa, recipe_path, dir));
+    try std.testing.expectError(error.WrongType, precompilePath(gpa, recipe_path, dir, null));
 }
 
 test "precompile rejects record with unknown save_as variable" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
@@ -1436,13 +1410,13 @@ test "precompile rejects record with unknown save_as variable" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    try std.testing.expectError(error.RecordVariableNotFound, precompilePath(gpa, recipe_path, dir));
+    try std.testing.expectError(error.RecordVariableNotFound, precompilePath(gpa, recipe_path, dir, null));
 }
 
 test "precompile accepts valid record subset" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
@@ -1479,7 +1453,7 @@ test "precompile accepts valid record subset" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var compiled = try precompilePath(gpa, recipe_path, dir);
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
     defer compiled.deinit();
 
     switch (compiled.pipeline.record.?) {
@@ -1494,7 +1468,7 @@ test "precompile accepts valid record subset" {
 test "precompile diagnostic for missing pipeline" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
@@ -1521,13 +1495,13 @@ test "precompile diagnostic for missing pipeline" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var precompile_diagnostic = diagnostic.PrecompileDiagnostic.init(gpa);
+    var precompile_diagnostic: diagnostic.PrecompileDiagnostic = .init(gpa);
     defer precompile_diagnostic.deinit();
 
-    _ = precompilePathWithDiagnostic(gpa, recipe_path, dir, &precompile_diagnostic) catch |err| {
+    _ = precompilePath(gpa, recipe_path, dir, &precompile_diagnostic) catch |err| {
         try std.testing.expectEqual(error.MissingPipeline, err);
 
-        var out = std.Io.Writer.Allocating.init(gpa);
+        var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
 
         try precompile_diagnostic.write(&out.writer, err);
@@ -1541,7 +1515,7 @@ test "precompile diagnostic for missing pipeline" {
 test "precompile diagnostic for missing record" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
@@ -1569,13 +1543,13 @@ test "precompile diagnostic for missing record" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var precompile_diagnostic = diagnostic.PrecompileDiagnostic.init(gpa);
+    var precompile_diagnostic: diagnostic.PrecompileDiagnostic = .init(gpa);
     defer precompile_diagnostic.deinit();
 
-    _ = precompilePathWithDiagnostic(gpa, recipe_path, dir, &precompile_diagnostic) catch |err| {
+    _ = precompilePath(gpa, recipe_path, dir, &precompile_diagnostic) catch |err| {
         try std.testing.expectEqual(error.MissingRecordConfig, err);
 
-        var out = std.Io.Writer.Allocating.init(gpa);
+        var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
 
         try precompile_diagnostic.write(&out.writer, err);
@@ -1589,7 +1563,7 @@ test "precompile diagnostic for missing record" {
 test "precompile expands record all into explicit save_as list" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
@@ -1624,7 +1598,7 @@ test "precompile expands record all into explicit save_as list" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var compiled = try precompilePath(gpa, recipe_path, dir);
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
     defer compiled.deinit();
 
     const record = compiled.pipeline.record orelse return error.TestUnexpectedResult;
@@ -1641,7 +1615,7 @@ test "precompile expands record all into explicit save_as list" {
 test "precompile rejects undeclared variable use" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu.toml",
@@ -1676,13 +1650,13 @@ test "precompile rejects undeclared variable use" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    try std.testing.expectError(error.UndeclaredVariable, precompilePath(gpa, recipe_path, dir));
+    try std.testing.expectError(error.UndeclaredVariable, precompilePath(gpa, recipe_path, dir, null));
 }
 
 test "precompile rejects undeclared variable in expression" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.makePath("adapters");
@@ -1706,13 +1680,13 @@ test "precompile rejects undeclared variable in expression" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    try std.testing.expectError(error.UndeclaredVariable, precompilePath(gpa, recipe_path, dir));
+    try std.testing.expectError(error.UndeclaredVariable, precompilePath(gpa, recipe_path, dir, null));
 }
 
 test "precompile rejects variable shadowing builtin" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.makePath("adapters");
@@ -1736,13 +1710,13 @@ test "precompile rejects variable shadowing builtin" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    try std.testing.expectError(error.BuiltinVariableConflict, precompilePath(gpa, recipe_path, dir));
+    try std.testing.expectError(error.BuiltinVariableConflict, precompilePath(gpa, recipe_path, dir, null));
 }
 
 test "precompile sequential task" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu.toml",
@@ -1776,7 +1750,7 @@ test "precompile sequential task" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var compiled = try precompilePath(gpa, recipe_path, dir);
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
     defer compiled.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), compiled.tasks.len);
@@ -1787,7 +1761,7 @@ test "precompile sequential task" {
 test "precompile loop task with while" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu.toml",
@@ -1822,7 +1796,7 @@ test "precompile loop task with while" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var compiled = try precompilePath(gpa, recipe_path, dir);
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
     defer compiled.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), compiled.tasks.len);
@@ -1833,7 +1807,7 @@ test "precompile loop task with while" {
 test "precompile conditional task with if" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu.toml",
@@ -1868,7 +1842,7 @@ test "precompile conditional task with if" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var compiled = try precompilePath(gpa, recipe_path, dir);
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
     defer compiled.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), compiled.tasks.len);
@@ -1879,7 +1853,7 @@ test "precompile conditional task with if" {
 test "precompile sleep step" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.makePath("adapters");
@@ -1904,7 +1878,7 @@ test "precompile sleep step" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    var compiled = try precompilePath(gpa, recipe_path, dir);
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
     defer compiled.deinit();
 
     const task_steps = compiled.tasks[0].steps();

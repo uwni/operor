@@ -39,7 +39,7 @@ pub fn run(
     out: *std.Io.Writer,
 ) !void {
     const vtable = try visa.loader.load(visa_lib);
-    var rm = try visa.ResourceManager.init(&vtable);
+    var rm: visa.ResourceManager = try .init(&vtable);
     defer rm.deinit();
 
     var ctx = ReplContext{
@@ -69,7 +69,7 @@ const ReplContext = struct {
     }
 
     fn open(self: *ReplContext, allocator: std.mem.Allocator, addr: []const u8) !void {
-        var inst = visa.Instrument.init(self.rm.session, self.vtable);
+        var inst: visa.Instrument = .init(self.rm.session, self.vtable);
         try inst.open(allocator, addr, .{});
         self.instrument = inst;
     }
@@ -468,10 +468,10 @@ test "repl loop handles open write query read close and quit" {
     ;
 
     var reader = std.Io.Reader.fixed(input);
-    var out = std.Io.Writer.Allocating.init(gpa);
+    var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
 
-    var ctx = MockContext.init(gpa, &.{ "TEST,MODEL,123\n", "5.000\n" });
+    var ctx: MockContext = .init(gpa, &.{ "TEST,MODEL,123\n", "5.000\n" });
     defer ctx.deinit();
 
     try loop(gpa, &reader, &out.writer, &ctx);
@@ -496,10 +496,10 @@ test "repl list command shows resources" {
     ;
 
     var reader = std.Io.Reader.fixed(input);
-    var out = std.Io.Writer.Allocating.init(gpa);
+    var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
 
-    var ctx = MockContext.init(gpa, &.{});
+    var ctx: MockContext = .init(gpa, &.{});
     ctx.mock_resources = &.{ "USB0::0x0957::INSTR", "TCPIP0::192.168.1.1::INSTR" };
     defer ctx.deinit();
 
@@ -517,11 +517,11 @@ test "repl interactive open scans and prompts" {
     // "open" without args triggers scan, then "2\n" selects the second instrument.
     const input = "open\n2\nclose\nquit\n";
 
-    var reader = std.Io.Reader.fixed(input);
-    var out = std.Io.Writer.Allocating.init(gpa);
+    var reader: std.Io.Reader = .fixed(input);
+    var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
 
-    var ctx = MockContext.init(gpa, &.{});
+    var ctx: MockContext = .init(gpa, &.{});
     ctx.mock_resources = &.{ "USB0::0x0957::INSTR", "TCPIP0::192.168.1.1::INSTR" };
     defer ctx.deinit();
 
@@ -538,11 +538,11 @@ test "repl interactive open with invalid index" {
     const gpa = std.testing.allocator;
     const input = "open\n5\nquit\n";
 
-    var reader = std.Io.Reader.fixed(input);
-    var out = std.Io.Writer.Allocating.init(gpa);
+    var reader: std.Io.Reader = .fixed(input);
+    var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
 
-    var ctx = MockContext.init(gpa, &.{});
+    var ctx: MockContext = .init(gpa, &.{});
     ctx.mock_resources = &.{"USB0::INSTR"};
     defer ctx.deinit();
 
@@ -563,11 +563,11 @@ test "repl rejects instrument commands when disconnected" {
         \\
     ;
 
-    var reader = std.Io.Reader.fixed(input);
-    var out = std.Io.Writer.Allocating.init(gpa);
+    var reader: std.Io.Reader = .fixed(input);
+    var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
 
-    var ctx = MockContext.init(gpa, &.{});
+    var ctx: MockContext = .init(gpa, &.{});
     defer ctx.deinit();
 
     try loop(gpa, &reader, &out.writer, &ctx);

@@ -22,13 +22,13 @@ const CommandDoc = struct {
 
 /// Parses a adapter document from an already-open directory.
 pub fn parseAdapterInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_name: []const u8) !Adapter {
-    var adapter_arena = std.heap.ArenaAllocator.init(allocator);
+    var adapter_arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer adapter_arena.deinit();
     const alloc = adapter_arena.allocator();
 
     const parsed = try doc_parse.parseFileInDir(AdapterDoc, alloc, dir, file_name, max_adapter_file_size);
 
-    var commands = std.StringHashMap(types.Command).init(alloc);
+    var commands: std.StringHashMap(types.Command) = .init(alloc);
     var it = parsed.commands.iterator();
     while (it.next()) |entry| {
         const cmd_doc = entry.value_ptr.*;
@@ -58,7 +58,7 @@ pub fn parseAdapterInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_nam
 test "parse adapter templates and placeholders" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/vendor_psu_set_voltage.toml",
@@ -94,7 +94,7 @@ test "parse adapter templates and placeholders" {
 test "parse adapter response encoding" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/vendor_dmm_measure_voltage.toml",
@@ -122,7 +122,7 @@ test "parse adapter response encoding" {
 test "parse adapter with write termination" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/serial_psu.toml",
@@ -152,7 +152,7 @@ test "parse adapter with write termination" {
 test "parse adapter without write termination defaults to none" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/gpib_dmm.toml",
@@ -178,7 +178,7 @@ test "parse adapter without write termination defaults to none" {
 test "parse adapter instrument options" {
     const gpa = std.testing.allocator;
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/tcp_scope.toml",

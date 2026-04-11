@@ -48,7 +48,7 @@ pub fn lastStatus(self: *const ResourceManager) ViStatus {
 
 /// Enumerates VISA instrument resources that match the default query.
 pub fn listResources(self: *ResourceManager, allocator: std.mem.Allocator) common.Error!ResourceList {
-    var arena = std.heap.ArenaAllocator.init(allocator);
+    var arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer arena.deinit();
     const alloc = arena.allocator();
 
@@ -72,7 +72,7 @@ pub fn listResources(self: *ResourceManager, allocator: std.mem.Allocator) commo
     try common.checkStatus(self.status);
     defer _ = self.vtable.close(find_list);
 
-    var resources = std.ArrayList([]const u8).empty;
+    var resources: std.ArrayList([]const u8) = .empty;
 
     try resources.append(alloc, try copyBufferString(alloc, buffer[0..]));
     var index: usize = 1;

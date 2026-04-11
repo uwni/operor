@@ -56,14 +56,14 @@ test "parse by format from dir handle content" {
     const gpa = std.testing.allocator;
     const testing = @import("testing.zig");
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("misc/config_psu.yaml",
         \\name: psu
     );
 
-    var arena = std.heap.ArenaAllocator.init(gpa);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
     const content = try workspace.readFileAlloc(arena.allocator(), "misc/config_psu.yaml", 1024);
@@ -79,7 +79,7 @@ test "parse file path opens file directly" {
     const gpa = std.testing.allocator;
     const testing = @import("testing.zig");
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("misc/config_psu.yaml",
@@ -89,7 +89,7 @@ test "parse file path opens file directly" {
     const path = try workspace.realpathAlloc("misc/config_psu.yaml");
     defer gpa.free(path);
 
-    var arena = std.heap.ArenaAllocator.init(gpa);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
     const parsed = try parseFilePath(Parsed, arena.allocator(), path, 1024);
@@ -104,7 +104,7 @@ test "parse file in dir opens file directly" {
     const gpa = std.testing.allocator;
     const testing = @import("testing.zig");
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("misc/config_psu.yaml",
@@ -117,7 +117,7 @@ test "parse file in dir opens file directly" {
     var misc_dir = try std.fs.openDirAbsolute(misc_dir_path, .{});
     defer misc_dir.close();
 
-    var arena = std.heap.ArenaAllocator.init(gpa);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
     const parsed = try parseFileInDir(Parsed, arena.allocator(), misc_dir, "config_psu.yaml", 1024);

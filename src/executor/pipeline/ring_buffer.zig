@@ -95,7 +95,7 @@ fn moveItem(dst: anytype, src: anytype) void {
 }
 
 test "ring buffer reports overflow and tracks high watermark" {
-    var ring = try TestQueue.init(std.testing.allocator, 4);
+    var ring: TestQueue = try .init(std.testing.allocator, 4);
     defer ring.deinit();
 
     var item = makeTestItem(1);
@@ -110,7 +110,7 @@ test "ring buffer reports overflow and tracks high watermark" {
 }
 
 test "ring buffer preserves FIFO across wrap-around" {
-    var ring = try TestQueue.init(std.testing.allocator, 4);
+    var ring: TestQueue = try .init(std.testing.allocator, 4);
     defer ring.deinit();
 
     for (0..3) |seq| {
@@ -137,7 +137,7 @@ test "ring buffer preserves FIFO across wrap-around" {
 }
 
 test "ring buffer usage is saturated for inconsistent snapshots" {
-    var ring = try TestQueue.init(std.testing.allocator, 4);
+    var ring: TestQueue = try .init(std.testing.allocator, 4);
     defer ring.deinit();
 
     ring.head.store(2, .monotonic);
@@ -147,7 +147,7 @@ test "ring buffer usage is saturated for inconsistent snapshots" {
 }
 
 test "ring buffer preserves FIFO under concurrent spsc access" {
-    var ring = try TestQueue.init(std.testing.allocator, 64);
+    var ring: TestQueue = try .init(std.testing.allocator, 64);
     defer ring.deinit();
 
     var stress = StressContext{ .ring = &ring, .iterations = 10_000 };

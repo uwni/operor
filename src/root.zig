@@ -56,7 +56,7 @@ pub fn preview(
     recipe_path: []const u8,
     log: *std.Io.Writer,
 ) !void {
-    var precompile_diagnostic = recipe.PrecompileDiagnostic.init(allocator);
+    var precompile_diagnostic: recipe.PrecompileDiagnostic = .init(allocator);
     defer precompile_diagnostic.deinit();
 
     var compiled = blk: {
@@ -65,7 +65,7 @@ pub fn preview(
         else
             try std.fs.cwd().openDir(adapter_dir, .{});
         defer dir.close();
-        break :blk recipe.PrecompiledRecipe.precompilePathWithDiagnostic(allocator, recipe_path, dir, &precompile_diagnostic) catch |err| {
+        break :blk recipe.PrecompiledRecipe.precompilePath(allocator, recipe_path, dir, &precompile_diagnostic) catch |err| {
             try precompile_diagnostic.write(log, err);
             return err;
         };
@@ -138,7 +138,7 @@ test "preview output" {
     const gpa = std.testing.allocator;
     const testing = @import("testing.zig");
 
-    var workspace = testing.TestWorkspace.init(gpa);
+    var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
     try workspace.writeFile("adapters/psu0.toml",
@@ -170,7 +170,7 @@ test "preview output" {
     const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.yaml");
     defer gpa.free(recipe_path);
 
-    var out = std.Io.Writer.Allocating.init(gpa);
+    var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
 
     try preview(gpa, adapter_dir, recipe_path, &out.writer);
