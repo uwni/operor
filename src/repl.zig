@@ -1,6 +1,7 @@
 const std = @import("std");
 const mibu = @import("mibu");
 const color = mibu.color;
+const style = mibu.style;
 const events = mibu.events;
 const term = mibu.term;
 const cursorctl = mibu.cursor;
@@ -488,7 +489,7 @@ fn executeCommand(
     switch (command) {
         .help => try printHelp(out, ctx.state()),
         .quit => return false,
-        .list => _ = try printResourceList(allocator, ctx, out),
+        .list => try handleList(allocator, ctx, out),
         .open => |o| try handleOpen(allocator, ctx, o, reader, out),
         .close => |name| try handleClose(ctx, name, out),
         .select => |name| try handleSelect(ctx, name, out),
@@ -526,7 +527,7 @@ fn handleOpen(
         return;
     }
     // Interactive mode: scan and prompt for index.
-    const count = try printResourceList(allocator, ctx, out);
+    const count = try printOpenCandidates(allocator, ctx, out);
     if (count == 0) return;
     try out.writeAll("Enter index: ");
     try out.flush();
@@ -548,17 +549,23 @@ fn handleOpen(
     }
     var resources = try ctx.listResources(allocator);
     defer resources.deinit();
-    if (index > resources.items.len) {
+    // Map the user index to the nth unconnected resource.
+    var n: usize = 0;
+    var addr: ?[]const u8 = null;
+    for (resources.items) |resource| {
+        if (ctx.findByAddr(resource) != null) continue;
+        n += 1;
+        if (n == index) {
+            addr = resource;
+            break;
+        }
+    }
+    const target_addr = addr orelse {
         try out.writeAll(err_label ++ " instrument list changed; try again\n");
         return;
-    }
-    const addr = resources.items[index - 1];
-    if (ctx.findByAddr(addr) != null) {
-        try out.print(err_label ++ " already connected to {s}\n", .{addr});
-        return;
-    }
-    const name = try ctx.openConnection(addr, args.name);
-    try out.print(color.print.fg(.green) ++ "Connected to {s} ({s})" ++ color.print.reset ++ "\n", .{ addr, name });
+    };
+    const name = try ctx.openConnection(target_addr, args.name);
+    try out.print(color.print.fg(.green) ++ "Connected to {s} ({s})" ++ color.print.reset ++ "\n", .{ target_addr, name });
 }
 
 fn handleClose(ctx: anytype, target: ?[]const u8, out: *std.Io.Writer) !void {
@@ -630,29 +637,49 @@ fn handleQuery(allocator: std.mem.Allocator, ctx: anytype, target: ?[]const u8, 
     try printResponse(out, response);
 }
 
-/// Scans for VISA resources and prints them numbered. Returns the count.
-/// Connected resources are annotated with their connection name and selection status.
-fn printResourceList(allocator: std.mem.Allocator, ctx: anytype, out: *std.Io.Writer) !usize {
+/// Handles the `list` command: shows all resources without numbering.
+/// Connected resources display their name; selected one is highlighted.
+fn handleList(allocator: std.mem.Allocator, ctx: anytype, out: *std.Io.Writer) !void {
+    var resources = try ctx.listResources(allocator);
+    defer resources.deinit();
+    if (resources.items.len == 0) {
+        try out.writeAll("No instruments found.\n");
+        return;
+    }
+    for (resources.items) |resource| {
+        if (ctx.findByAddr(resource)) |ci| {
+            const conn = ctx.connections.items[ci];
+            const is_selected = if (ctx.selected) |sel| sel == ci else false;
+            if (is_selected) {
+                try out.print("  " ++ style.print.bold ++ color.print.fg(.green) ++ "{s}) {s}" ++ color.print.reset ++ "\n", .{ conn.name, resource });
+            } else {
+                try out.print("  " ++ color.print.fg(.yellow) ++ "{s}) {s}" ++ color.print.reset ++ "\n", .{ conn.name, resource });
+            }
+        } else {
+            try out.print("  {s}\n", .{resource});
+        }
+    }
+}
+
+/// Scans for VISA resources and prints only unconnected ones, numbered for selection.
+/// Returns the count of displayed (unconnected) resources.
+fn printOpenCandidates(allocator: std.mem.Allocator, ctx: anytype, out: *std.Io.Writer) !usize {
     var resources = try ctx.listResources(allocator);
     defer resources.deinit();
     if (resources.items.len == 0) {
         try out.writeAll("No instruments found.\n");
         return 0;
     }
-    for (resources.items, 1..) |resource, i| {
-        try out.print("  {d}) {s}", .{ i, resource });
-        if (ctx.findByAddr(resource)) |ci| {
-            const conn = ctx.connections.items[ci];
-            const is_selected = if (ctx.selected) |sel| sel == ci else false;
-            if (is_selected) {
-                try out.print(" " ++ color.print.fg(.green) ++ "({s}, selected)" ++ color.print.reset, .{conn.name});
-            } else {
-                try out.print(" " ++ color.print.fg(.yellow) ++ "({s})" ++ color.print.reset, .{conn.name});
-            }
-        }
-        try out.writeAll("\n");
+    var count: usize = 0;
+    for (resources.items) |resource| {
+        if (ctx.findByAddr(resource) != null) continue;
+        count += 1;
+        try out.print("  {d}) {s}\n", .{ count, resource });
     }
-    return resources.items.len;
+    if (count == 0) {
+        try out.writeAll("All instruments already connected.\n");
+    }
+    return count;
 }
 
 /// Reads one newline-delimited command line from the REPL input stream.
@@ -1167,13 +1194,12 @@ test "repl list shows resources with connection status" {
     try runLoop(gpa, &reader, &out.writer, &ctx, null);
 
     const output = out.written();
-    // All resources listed with numbers.
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "1) USB0::INSTR"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "2) TCPIP0::INSTR"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "3) GPIB0::22::INSTR"));
-    // Connected resources show their names.
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "(dmm, selected)"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "(psu)"));
+    // list shows no numbers; connected resources show name, unconnected show bare address.
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "dmm) USB0::INSTR"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "psu) TCPIP0::INSTR"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "GPIB0::22::INSTR"));
+    // Unconnected resource must NOT have a number prefix.
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "3) GPIB0::22::INSTR"));
 }
 
 test "repl interactive open scans and prompts" {
