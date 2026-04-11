@@ -1,6 +1,9 @@
 const std = @import("std");
 const mibu = @import("mibu");
 const color = mibu.color;
+const events = mibu.events;
+const term = mibu.term;
+const cursorctl = mibu.cursor;
 const visa = @import("visa/root.zig");
 
 const repl_prompt = color.print.fg(.aqua) ++ "repl> " ++ color.print.reset;
@@ -57,8 +60,15 @@ pub fn run(
     }
 
     try printHelp(out, ctx.state());
+    try out.flush();
     defer out.flush() catch {};
-    try loop(allocator, reader, out, &ctx);
+    if (std.posix.isatty(std.fs.File.stdin().handle)) {
+        var editor = LineEditor.init(allocator, std.fs.File.stdin(), out);
+        defer editor.deinit();
+        try runLoop(allocator, reader, out, &ctx, &editor);
+    } else {
+        try runLoop(allocator, reader, out, &ctx, null);
+    }
 }
 
 /// Production REPL context wrapping a VISA resource manager and optional instrument.
@@ -101,30 +111,257 @@ const ReplContext = struct {
     }
 };
 
+/// Interactive line editor using mibu raw mode and event handling.
+/// Supports left/right arrow keys, Home/End, Backspace/Delete,
+/// Up/Down for command history, and Ctrl+A/E/U/K/L shortcuts.
+const LineEditor = struct {
+    allocator: std.mem.Allocator,
+    stdin: std.fs.File,
+    out: *std.Io.Writer,
+    buf: [repl_max_line_bytes]u8 = undefined,
+    len: usize = 0,
+    pos: usize = 0,
+    history: std.ArrayList([]u8),
+    history_index: ?usize = null,
+    saved_buf: [repl_max_line_bytes]u8 = undefined,
+    saved_len: usize = 0,
+
+    fn init(allocator: std.mem.Allocator, stdin: std.fs.File, out: *std.Io.Writer) LineEditor {
+        return .{
+            .allocator = allocator,
+            .stdin = stdin,
+            .out = out,
+            .history = .empty,
+        };
+    }
+
+    fn deinit(self: *LineEditor) void {
+        for (self.history.items) |item| self.allocator.free(item);
+        self.history.deinit(self.allocator);
+    }
+
+    /// Reads one line of input with full editing support.
+    /// Returns the line content, or null on Ctrl+D (empty line) / EOF.
+    fn editLine(self: *LineEditor, prompt: []const u8) !?[]const u8 {
+        // Flush pending output before entering raw mode, where \n no longer implies \r.
+        try self.out.flush();
+        var raw = try term.enableRawMode(self.stdin.handle);
+        defer raw.disableRawMode() catch {};
+
+        self.len = 0;
+        self.pos = 0;
+        self.history_index = null;
+
+        try self.out.writeAll(prompt);
+        try self.out.flush();
+
+        while (true) {
+            const event = try events.next(self.stdin);
+            switch (event) {
+                .key => |k| {
+                    if (k.mods.ctrl) {
+                        switch (k.code) {
+                            .char => |c| switch (c) {
+                                'c' => {
+                                    try self.out.writeAll("^C\r\n");
+                                    try self.out.flush();
+                                    return "";
+                                },
+                                'd' => {
+                                    if (self.len == 0) {
+                                        try self.out.writeAll("\r\n");
+                                        try self.out.flush();
+                                        return null;
+                                    }
+                                },
+                                'a' => try self.moveToPos(0),
+                                'e' => try self.moveToPos(self.len),
+                                'u' => {
+                                    const tail = self.len - self.pos;
+                                    std.mem.copyForwards(u8, self.buf[0..tail], self.buf[self.pos..self.len]);
+                                    self.len = tail;
+                                    self.pos = 0;
+                                    try self.refreshLine(prompt);
+                                },
+                                'k' => {
+                                    self.len = self.pos;
+                                    try self.refreshLine(prompt);
+                                },
+                                'l' => {
+                                    try self.out.writeAll("\x1b[2J\x1b[H");
+                                    try self.refreshLine(prompt);
+                                },
+                                else => {},
+                            },
+                            else => {},
+                        }
+                    } else {
+                        switch (k.code) {
+                            .char => |c| try self.insertChar(c, prompt),
+                            .enter => {
+                                try self.out.writeAll("\r\n");
+                                try self.out.flush();
+                                const line = self.buf[0..self.len];
+                                const trimmed = std.mem.trim(u8, line, repl_whitespace);
+                                if (trimmed.len > 0) try self.addHistory(trimmed);
+                                return line;
+                            },
+                            .backspace => try self.deleteBack(prompt),
+                            .delete => try self.deleteForward(prompt),
+                            .left => {
+                                if (self.pos > 0) {
+                                    self.pos -= 1;
+                                    try cursorctl.goLeft(self.out, @as(u16, 1));
+                                    try self.out.flush();
+                                }
+                            },
+                            .right => {
+                                if (self.pos < self.len) {
+                                    self.pos += 1;
+                                    try cursorctl.goRight(self.out, @as(u16, 1));
+                                    try self.out.flush();
+                                }
+                            },
+                            .up => try self.historyPrev(prompt),
+                            .down => try self.historyNext(prompt),
+                            .home => try self.moveToPos(0),
+                            .end => try self.moveToPos(self.len),
+                            else => {},
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn insertChar(self: *LineEditor, ch: u21, prompt: []const u8) !void {
+        if (ch > 0x7F or self.len >= repl_max_line_bytes) return;
+        const byte: u8 = @intCast(ch);
+        if (self.pos < self.len) {
+            std.mem.copyBackwards(u8, self.buf[self.pos + 1 .. self.len + 1], self.buf[self.pos..self.len]);
+        }
+        self.buf[self.pos] = byte;
+        self.len += 1;
+        self.pos += 1;
+        if (self.pos == self.len) {
+            try self.out.writeByte(byte);
+            try self.out.flush();
+        } else {
+            try self.refreshLine(prompt);
+        }
+    }
+
+    fn deleteBack(self: *LineEditor, prompt: []const u8) !void {
+        if (self.pos == 0) return;
+        std.mem.copyForwards(u8, self.buf[self.pos - 1 .. self.len - 1], self.buf[self.pos..self.len]);
+        self.pos -= 1;
+        self.len -= 1;
+        try self.refreshLine(prompt);
+    }
+
+    fn deleteForward(self: *LineEditor, prompt: []const u8) !void {
+        if (self.pos >= self.len) return;
+        std.mem.copyForwards(u8, self.buf[self.pos .. self.len - 1], self.buf[self.pos + 1 .. self.len]);
+        self.len -= 1;
+        try self.refreshLine(prompt);
+    }
+
+    fn moveToPos(self: *LineEditor, new_pos: usize) !void {
+        if (new_pos == self.pos) return;
+        if (new_pos < self.pos) {
+            try cursorctl.goLeft(self.out, self.pos - new_pos);
+        } else {
+            try cursorctl.goRight(self.out, new_pos - self.pos);
+        }
+        self.pos = new_pos;
+        try self.out.flush();
+    }
+
+    fn historyPrev(self: *LineEditor, prompt: []const u8) !void {
+        if (self.history.items.len == 0) return;
+        if (self.history_index == null) {
+            @memcpy(self.saved_buf[0..self.len], self.buf[0..self.len]);
+            self.saved_len = self.len;
+            self.history_index = self.history.items.len - 1;
+        } else if (self.history_index.? > 0) {
+            self.history_index.? -= 1;
+        } else {
+            return;
+        }
+        try self.loadHistoryEntry(self.history.items[self.history_index.?], prompt);
+    }
+
+    fn historyNext(self: *LineEditor, prompt: []const u8) !void {
+        if (self.history_index == null) return;
+        if (self.history_index.? + 1 < self.history.items.len) {
+            self.history_index.? += 1;
+            try self.loadHistoryEntry(self.history.items[self.history_index.?], prompt);
+        } else {
+            self.history_index = null;
+            try self.loadHistoryEntry(self.saved_buf[0..self.saved_len], prompt);
+        }
+    }
+
+    fn loadHistoryEntry(self: *LineEditor, content: []const u8, prompt: []const u8) !void {
+        const copy_len = @min(content.len, repl_max_line_bytes);
+        @memcpy(self.buf[0..copy_len], content[0..copy_len]);
+        self.len = copy_len;
+        self.pos = copy_len;
+        try self.refreshLine(prompt);
+    }
+
+    fn addHistory(self: *LineEditor, line: []const u8) !void {
+        if (self.history.items.len > 0) {
+            if (std.mem.eql(u8, self.history.items[self.history.items.len - 1], line)) return;
+        }
+        const copy = try self.allocator.dupe(u8, line);
+        try self.history.append(self.allocator, copy);
+    }
+
+    fn refreshLine(self: *LineEditor, prompt: []const u8) !void {
+        try self.out.writeAll("\r");
+        try self.out.writeAll(prompt);
+        try self.out.writeAll(self.buf[0..self.len]);
+        try self.out.writeAll("\x1b[K");
+        const tail = self.len - self.pos;
+        if (tail > 0) try cursorctl.goLeft(self.out, tail);
+        try self.out.flush();
+    }
+};
+
 /// Runs the command prompt loop until EOF or a quit command is received.
-fn loop(
+/// When `editor` is non-null, uses interactive line editing via mibu;
+/// otherwise falls back to plain line-oriented reading from `reader`.
+fn runLoop(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
     out: *std.Io.Writer,
     ctx: anytype,
+    editor: ?*LineEditor,
 ) !void {
     var running = true;
     while (running) {
-        try out.writeAll(repl_prompt);
-        try out.flush();
+        const line: ?[]const u8 = if (editor) |ed|
+            try ed.editLine(repl_prompt)
+        else blk: {
+            try out.writeAll(repl_prompt);
+            try out.flush();
+            break :blk readLine(reader) catch |err| switch (err) {
+                error.ReadFailed => return error.ReadFailed,
+                error.StreamTooLong => {
+                    try out.print(err_label ++ " input line exceeds {d} bytes\n", .{repl_max_line_bytes});
+                    continue;
+                },
+            };
+        };
 
-        const line = readLine(reader) catch |err| switch (err) {
-            error.ReadFailed => return error.ReadFailed,
-            error.StreamTooLong => {
-                try out.print(err_label ++ " input line exceeds {d} bytes\n", .{repl_max_line_bytes});
-                continue;
-            },
-        } orelse {
-            try out.writeAll("\n");
+        const input = line orelse {
+            if (editor == null) try out.writeAll("\n");
             break;
         };
 
-        const trimmed = std.mem.trim(u8, line, repl_whitespace);
+        const trimmed = std.mem.trim(u8, input, repl_whitespace);
         if (trimmed.len == 0) continue;
 
         const command = parseCommand(trimmed) catch |err| {
@@ -477,7 +714,7 @@ test "repl loop handles open write query read close and quit" {
     var ctx: MockContext = .init(gpa, &.{ "TEST,MODEL,123\n", "5.000\n" });
     defer ctx.deinit();
 
-    try loop(gpa, &reader, &out.writer, &ctx);
+    try runLoop(gpa, &reader, &out.writer, &ctx, null);
 
     try std.testing.expectEqual(@as(usize, 2), ctx.writes.items.len);
     try std.testing.expectEqualStrings("CONF:VOLT 10", ctx.writes.items[0]);
@@ -506,7 +743,7 @@ test "repl list command shows resources" {
     ctx.mock_resources = &.{ "USB0::0x0957::INSTR", "TCPIP0::192.168.1.1::INSTR" };
     defer ctx.deinit();
 
-    try loop(gpa, &reader, &out.writer, &ctx);
+    try runLoop(gpa, &reader, &out.writer, &ctx, null);
 
     const output = out.written();
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "  USB0::0x0957::INSTR\n"));
@@ -528,7 +765,7 @@ test "repl interactive open scans and prompts" {
     ctx.mock_resources = &.{ "USB0::0x0957::INSTR", "TCPIP0::192.168.1.1::INSTR" };
     defer ctx.deinit();
 
-    try loop(gpa, &reader, &out.writer, &ctx);
+    try runLoop(gpa, &reader, &out.writer, &ctx, null);
 
     const output = out.written();
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "1) USB0::0x0957::INSTR"));
@@ -549,7 +786,7 @@ test "repl interactive open with invalid index" {
     ctx.mock_resources = &.{"USB0::INSTR"};
     defer ctx.deinit();
 
-    try loop(gpa, &reader, &out.writer, &ctx);
+    try runLoop(gpa, &reader, &out.writer, &ctx, null);
 
     const output = out.written();
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "index out of range"));
@@ -573,7 +810,7 @@ test "repl rejects instrument commands when disconnected" {
     var ctx: MockContext = .init(gpa, &.{});
     defer ctx.deinit();
 
-    try loop(gpa, &reader, &out.writer, &ctx);
+    try runLoop(gpa, &reader, &out.writer, &ctx, null);
 
     const output = out.written();
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 3, "not connected"));
