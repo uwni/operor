@@ -15,18 +15,31 @@ const repl_whitespace = " \t\r\n";
 pub const stdin_buffer_bytes: usize = repl_max_line_bytes + 1;
 
 /// REPL connection state.
-const State = enum { disconnected, connected };
+const State = enum { disconnected, connected, selected };
+
+/// Arguments for the `open` command.
+const Open = struct {
+    addr: ?[]const u8,
+    name: ?[]const u8,
+};
+
+/// Write or query command with optional target.
+const TargetedPayload = struct {
+    target: ?[]const u8,
+    payload: []const u8,
+};
 
 /// Parsed REPL command variants.
 const Command = union(enum) {
     help,
     quit,
     list,
-    open: ?[]const u8,
-    close,
-    read,
-    write: []const u8,
-    query: []const u8,
+    open: Open,
+    close: ?[]const u8,
+    select: ?[]const u8,
+    read: ?[]const u8,
+    write: TargetedPayload,
+    query: TargetedPayload,
 };
 
 /// User-facing parse errors for REPL input.
@@ -49,14 +62,14 @@ pub fn run(
     defer rm.deinit();
 
     var ctx = ReplContext{
+        .allocator = allocator,
         .rm = &rm,
-        .vtable = &vtable,
     };
-    defer ctx.close();
+    defer ctx.closeAll();
 
     if (resource_addr) |addr| {
-        try ctx.open(allocator, addr);
-        try out.print(color.print.fg(.green) ++ "Connected to {s}" ++ color.print.reset ++ "\n", .{addr});
+        const name = try ctx.openConnection(addr, null);
+        try out.print(color.print.fg(.green) ++ "Connected to {s} ({s})" ++ color.print.reset ++ "\n", .{ addr, name });
     }
 
     try printHelp(out, ctx.state());
@@ -71,43 +84,119 @@ pub fn run(
     }
 }
 
-/// Production REPL context wrapping a VISA resource manager and optional instrument.
+/// A named connection to a VISA instrument.
+const NamedConnection = struct {
+    name: []u8,
+    addr: []u8,
+    instrument: visa.Instrument,
+};
+
+/// Production REPL context wrapping a VISA resource manager and multiple instruments.
 const ReplContext = struct {
+    allocator: std.mem.Allocator,
     rm: *visa.ResourceManager,
-    vtable: *const visa.loader.Vtable,
-    instrument: ?visa.Instrument = null,
+    connections: std.ArrayList(NamedConnection) = .empty,
+    selected: ?usize = null,
+    next_id: usize = 1,
 
     fn state(self: *const ReplContext) State {
-        return if (self.instrument != null) .connected else .disconnected;
+        if (self.selected != null) return .selected;
+        if (self.connections.items.len > 0) return .connected;
+        return .disconnected;
     }
 
-    fn open(self: *ReplContext, allocator: std.mem.Allocator, addr: []const u8) !void {
-        var inst: visa.Instrument = .init(self.rm.session, self.vtable);
-        try inst.open(allocator, addr, .{});
-        self.instrument = inst;
+    fn selectedName(self: *const ReplContext) ?[]const u8 {
+        if (self.selected) |idx| return self.connections.items[idx].name;
+        return null;
     }
 
-    fn close(self: *ReplContext) void {
-        if (self.instrument) |*i| {
-            i.deinit();
+    fn openConnection(self: *ReplContext, addr: []const u8, name: ?[]const u8) ![]const u8 {
+        var inst: visa.Instrument = .init(self.rm.session, self.rm.vtable);
+        try inst.open(self.allocator, addr, .{});
+        errdefer inst.deinit();
+        const addr_copy = try self.allocator.dupe(u8, addr);
+        errdefer self.allocator.free(addr_copy);
+        const name_copy = if (name) |n|
+            try self.allocator.dupe(u8, n)
+        else blk: {
+            const auto = try std.fmt.allocPrint(self.allocator, "d{d}", .{self.next_id});
+            self.next_id += 1;
+            break :blk auto;
+        };
+        errdefer self.allocator.free(name_copy);
+        try self.connections.append(self.allocator, .{ .name = name_copy, .addr = addr_copy, .instrument = inst });
+        if (self.selected == null) self.selected = self.connections.items.len - 1;
+        return name_copy;
+    }
+
+    fn closeByName(self: *ReplContext, target: []const u8) bool {
+        for (self.connections.items, 0..) |conn, i| {
+            if (std.mem.eql(u8, conn.name, target)) {
+                if (self.selected) |sel| {
+                    if (sel == i) {
+                        self.selected = null;
+                    } else if (sel > i) {
+                        self.selected = sel - 1;
+                    }
+                }
+                var removed = self.connections.orderedRemove(i);
+                removed.instrument.deinit();
+                self.allocator.free(removed.addr);
+                self.allocator.free(removed.name);
+                return true;
+            }
         }
-        self.instrument = null;
+        return false;
+    }
+
+    fn closeAll(self: *ReplContext) void {
+        for (self.connections.items) |*conn| {
+            conn.instrument.deinit();
+            self.allocator.free(conn.addr);
+            self.allocator.free(conn.name);
+        }
+        self.connections.deinit(self.allocator);
+        self.selected = null;
+    }
+
+    fn findByName(self: *const ReplContext, target: []const u8) ?usize {
+        for (self.connections.items, 0..) |conn, i| {
+            if (std.mem.eql(u8, conn.name, target)) return i;
+        }
+        return null;
+    }
+
+    fn findByAddr(self: *const ReplContext, addr: []const u8) ?usize {
+        for (self.connections.items, 0..) |conn, i| {
+            if (std.mem.eql(u8, conn.addr, addr)) return i;
+        }
+        return null;
+    }
+
+    fn selectByName(self: *ReplContext, target: []const u8) bool {
+        for (self.connections.items, 0..) |conn, i| {
+            if (std.mem.eql(u8, conn.name, target)) {
+                self.selected = i;
+                return true;
+            }
+        }
+        return false;
     }
 
     fn listResources(self: *ReplContext, allocator: std.mem.Allocator) !visa.ResourceList {
         return self.rm.listResources(allocator);
     }
 
-    fn write(self: *ReplContext, payload: []const u8) !void {
-        return self.instrument.?.write(payload);
+    fn writeAt(self: *ReplContext, idx: usize, payload: []const u8) !void {
+        return self.connections.items[idx].instrument.write(payload);
     }
 
-    fn readToOwned(self: *ReplContext, allocator: std.mem.Allocator) ![]u8 {
-        return self.instrument.?.readToOwned(allocator);
+    fn readAt(self: *ReplContext, allocator: std.mem.Allocator, idx: usize) ![]u8 {
+        return self.connections.items[idx].instrument.readToOwned(allocator);
     }
 
-    fn queryToOwned(self: *ReplContext, allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
-        return self.instrument.?.queryToOwned(allocator, payload);
+    fn queryAt(self: *ReplContext, allocator: std.mem.Allocator, idx: usize, payload: []const u8) ![]u8 {
+        return self.connections.items[idx].instrument.queryToOwned(allocator, payload);
     }
 };
 
@@ -342,10 +431,13 @@ fn runLoop(
 ) !void {
     var running = true;
     while (running) {
+        var prompt_buf: [128]u8 = undefined;
+        const prompt = buildPrompt(ctx, &prompt_buf);
+
         const line: ?[]const u8 = if (editor) |ed|
-            try ed.editLine(repl_prompt)
+            try ed.editLine(prompt)
         else blk: {
-            try out.writeAll(repl_prompt);
+            try out.writeAll(prompt);
             try out.flush();
             break :blk readLine(reader) catch |err| switch (err) {
                 error.ReadFailed => return error.ReadFailed,
@@ -376,6 +468,15 @@ fn runLoop(
     }
 }
 
+fn buildPrompt(ctx: anytype, buf: []u8) []const u8 {
+    if (ctx.selectedName()) |name| {
+        return std.fmt.bufPrint(buf, "{s}repl[{s}]> {s}", .{
+            color.print.fg(.aqua), name, color.print.reset,
+        }) catch repl_prompt;
+    }
+    return repl_prompt;
+}
+
 /// Executes one parsed command and returns whether the REPL should continue running.
 fn executeCommand(
     allocator: std.mem.Allocator,
@@ -387,12 +488,13 @@ fn executeCommand(
     switch (command) {
         .help => try printHelp(out, ctx.state()),
         .quit => return false,
-        .list => _ = try printResourceList(allocator, ctx, out, false),
-        .open => |addr| try handleOpen(allocator, ctx, addr, reader, out),
-        .close => try handleClose(ctx, out),
-        .write => |payload| try handleWrite(ctx, payload, out),
-        .read => try handleRead(allocator, ctx, out),
-        .query => |payload| try handleQuery(allocator, ctx, payload, out),
+        .list => _ = try printResourceList(allocator, ctx, out),
+        .open => |o| try handleOpen(allocator, ctx, o, reader, out),
+        .close => |name| try handleClose(ctx, name, out),
+        .select => |name| try handleSelect(ctx, name, out),
+        .write => |w| try handleWrite(ctx, w.target, w.payload, out),
+        .read => |target| try handleRead(allocator, ctx, target, out),
+        .query => |q| try handleQuery(allocator, ctx, q.target, q.payload, out),
     }
     return true;
 }
@@ -400,21 +502,31 @@ fn executeCommand(
 fn handleOpen(
     allocator: std.mem.Allocator,
     ctx: anytype,
-    maybe_addr: ?[]const u8,
+    args: Open,
     reader: *std.Io.Reader,
     out: *std.Io.Writer,
 ) !void {
-    if (ctx.state() == .connected) {
-        try out.writeAll(err_label ++ " already connected; use 'close' first\n");
-        return;
+    if (args.name) |n| {
+        if (!isValidName(n)) {
+            try out.print(err_label ++ " invalid name '{s}'; use [a-zA-Z][a-zA-Z0-9_]*, must not be a command name\n", .{n});
+            return;
+        }
+        if (ctx.findByName(n) != null) {
+            try out.print(err_label ++ " name '{s}' is already in use\n", .{n});
+            return;
+        }
     }
-    if (maybe_addr) |addr| {
-        try ctx.open(allocator, addr);
-        try out.print(color.print.fg(.green) ++ "Connected to {s}" ++ color.print.reset ++ "\n", .{addr});
+    if (args.addr) |addr| {
+        if (ctx.findByAddr(addr) != null) {
+            try out.print(err_label ++ " already connected to {s}\n", .{addr});
+            return;
+        }
+        const name = try ctx.openConnection(addr, args.name);
+        try out.print(color.print.fg(.green) ++ "Connected to {s} ({s})" ++ color.print.reset ++ "\n", .{ addr, name });
         return;
     }
     // Interactive mode: scan and prompt for index.
-    const count = try printResourceList(allocator, ctx, out, true);
+    const count = try printResourceList(allocator, ctx, out);
     if (count == 0) return;
     try out.writeAll("Enter index: ");
     try out.flush();
@@ -434,7 +546,6 @@ fn handleOpen(
         try out.writeAll(err_label ++ " index out of range\n");
         return;
     }
-    // Re-fetch to get the address at the selected index.
     var resources = try ctx.listResources(allocator);
     defer resources.deinit();
     if (index > resources.items.len) {
@@ -442,53 +553,86 @@ fn handleOpen(
         return;
     }
     const addr = resources.items[index - 1];
-    try ctx.open(allocator, addr);
-    try out.print(color.print.fg(.green) ++ "Connected to {s}" ++ color.print.reset ++ "\n", .{addr});
-}
-
-fn handleClose(ctx: anytype, out: *std.Io.Writer) !void {
-    if (ctx.state() == .disconnected) {
-        try out.writeAll(err_label ++ " not connected; use 'open <resource>' to connect first\n");
+    if (ctx.findByAddr(addr) != null) {
+        try out.print(err_label ++ " already connected to {s}\n", .{addr});
         return;
     }
-    ctx.close();
-    try out.writeAll("Disconnected.\n");
+    const name = try ctx.openConnection(addr, args.name);
+    try out.print(color.print.fg(.green) ++ "Connected to {s} ({s})" ++ color.print.reset ++ "\n", .{ addr, name });
 }
 
-const not_connected_msg = err_label ++ " not connected; use 'list' to discover instruments, then 'open <resource>' to connect\n";
-
-fn handleWrite(ctx: anytype, payload: []const u8, out: *std.Io.Writer) !void {
-    if (ctx.state() == .disconnected) {
-        try out.writeAll(not_connected_msg);
+fn handleClose(ctx: anytype, target: ?[]const u8, out: *std.Io.Writer) !void {
+    if (target) |name| {
+        if (!ctx.closeByName(name)) {
+            try out.print(err_label ++ " unknown connection '{s}'\n", .{name});
+            return;
+        }
+        try out.print("Disconnected from {s}.\n", .{name});
         return;
     }
-    try ctx.write(payload);
+    // Close selected — save name before freeing.
+    const sel = ctx.selectedName() orelse {
+        try out.writeAll(err_label ++ " no instrument selected; use 'close <name>'\n");
+        return;
+    };
+    var name_buf: [64]u8 = undefined;
+    const len = @min(sel.len, name_buf.len);
+    @memcpy(name_buf[0..len], sel[0..len]);
+    _ = ctx.closeByName(name_buf[0..len]);
+    try out.print("Disconnected from {s}.\n", .{name_buf[0..len]});
+}
+
+fn handleSelect(ctx: anytype, target: ?[]const u8, out: *std.Io.Writer) !void {
+    const name = target orelse {
+        ctx.selected = null;
+        try out.writeAll("Deselected.\n");
+        return;
+    };
+    if (!ctx.selectByName(name)) {
+        try out.print(err_label ++ " unknown connection '{s}'\n", .{name});
+        return;
+    }
+    try out.print("Selected {s}.\n", .{name});
+}
+
+const no_target_msg = err_label ++ " no instrument selected; use 'select <name>' or '<name>.command ...'\n";
+
+fn resolveTarget(ctx: anytype, target: ?[]const u8, out: *std.Io.Writer) !?usize {
+    if (target) |name| {
+        return ctx.findByName(name) orelse {
+            try out.print(err_label ++ " unknown connection '{s}'\n", .{name});
+            return null;
+        };
+    }
+    return ctx.selected orelse {
+        try out.writeAll(no_target_msg);
+        return null;
+    };
+}
+
+fn handleWrite(ctx: anytype, target: ?[]const u8, payload: []const u8, out: *std.Io.Writer) !void {
+    const idx = try resolveTarget(ctx, target, out) orelse return;
+    try ctx.writeAt(idx, payload);
     try out.writeAll("ok\n");
 }
 
-fn handleRead(allocator: std.mem.Allocator, ctx: anytype, out: *std.Io.Writer) !void {
-    if (ctx.state() == .disconnected) {
-        try out.writeAll(not_connected_msg);
-        return;
-    }
-    const response = try ctx.readToOwned(allocator);
+fn handleRead(allocator: std.mem.Allocator, ctx: anytype, target: ?[]const u8, out: *std.Io.Writer) !void {
+    const idx = try resolveTarget(ctx, target, out) orelse return;
+    const response = try ctx.readAt(allocator, idx);
     defer allocator.free(response);
     try printResponse(out, response);
 }
 
-fn handleQuery(allocator: std.mem.Allocator, ctx: anytype, payload: []const u8, out: *std.Io.Writer) !void {
-    if (ctx.state() == .disconnected) {
-        try out.writeAll(not_connected_msg);
-        return;
-    }
-    const response = try ctx.queryToOwned(allocator, payload);
+fn handleQuery(allocator: std.mem.Allocator, ctx: anytype, target: ?[]const u8, payload: []const u8, out: *std.Io.Writer) !void {
+    const idx = try resolveTarget(ctx, target, out) orelse return;
+    const response = try ctx.queryAt(allocator, idx, payload);
     defer allocator.free(response);
     try printResponse(out, response);
 }
 
-/// Scans for VISA resources and prints them. When `numbered` is true,
-/// each entry is prefixed with a 1-based index. Returns the count.
-fn printResourceList(allocator: std.mem.Allocator, ctx: anytype, out: *std.Io.Writer, numbered: bool) !usize {
+/// Scans for VISA resources and prints them numbered. Returns the count.
+/// Connected resources are annotated with their connection name and selection status.
+fn printResourceList(allocator: std.mem.Allocator, ctx: anytype, out: *std.Io.Writer) !usize {
     var resources = try ctx.listResources(allocator);
     defer resources.deinit();
     if (resources.items.len == 0) {
@@ -496,11 +640,17 @@ fn printResourceList(allocator: std.mem.Allocator, ctx: anytype, out: *std.Io.Wr
         return 0;
     }
     for (resources.items, 1..) |resource, i| {
-        if (numbered) {
-            try out.print("  {d}) {s}\n", .{ i, resource });
-        } else {
-            try out.print("  {s}\n", .{resource});
+        try out.print("  {d}) {s}", .{ i, resource });
+        if (ctx.findByAddr(resource)) |ci| {
+            const conn = ctx.connections.items[ci];
+            const is_selected = if (ctx.selected) |sel| sel == ci else false;
+            if (is_selected) {
+                try out.print(" " ++ color.print.fg(.green) ++ "({s}, selected)" ++ color.print.reset, .{conn.name});
+            } else {
+                try out.print(" " ++ color.print.fg(.yellow) ++ "({s})" ++ color.print.reset, .{conn.name});
+            }
         }
+        try out.writeAll("\n");
     }
     return resources.items.len;
 }
@@ -524,29 +674,78 @@ fn parseCommand(line: []const u8) ParseError!Command {
     if (std.mem.eql(u8, line, "help") or std.mem.eql(u8, line, "?")) return .help;
     if (std.mem.eql(u8, line, "quit")) return .quit;
     if (std.mem.eql(u8, line, "list")) return .list;
-    if (std.mem.eql(u8, line, "close")) return .close;
 
     const verb_end = std.mem.indexOfAny(u8, line, repl_whitespace) orelse line.len;
-    const verb = line[0..verb_end];
-    const payload = std.mem.trimLeft(u8, line[verb_end..], repl_whitespace);
+    const first_token = line[0..verb_end];
+    const rest = std.mem.trimLeft(u8, line[verb_end..], repl_whitespace);
 
-    if (std.mem.eql(u8, verb, "read")) {
-        if (payload.len != 0) return error.UnexpectedCommandPayload;
-        return .read;
+    // Check for name.verb pattern.
+    if (std.mem.indexOfScalar(u8, first_token, '.')) |dot| {
+        const name = first_token[0..dot];
+        const verb = first_token[dot + 1 ..];
+        if (name.len == 0 or verb.len == 0) return error.UnknownCommand;
+        if (std.mem.eql(u8, verb, "read")) {
+            if (rest.len != 0) return error.UnexpectedCommandPayload;
+            return .{ .read = name };
+        }
+        if (std.mem.eql(u8, verb, "write")) {
+            if (rest.len == 0) return error.MissingCommandPayload;
+            return .{ .write = .{ .target = name, .payload = rest } };
+        }
+        if (std.mem.eql(u8, verb, "query")) {
+            if (rest.len == 0) return error.MissingCommandPayload;
+            return .{ .query = .{ .target = name, .payload = rest } };
+        }
+        return error.UnknownCommand;
     }
-    if (std.mem.eql(u8, verb, "write")) {
-        if (payload.len == 0) return error.MissingCommandPayload;
-        return .{ .write = payload };
+
+    if (std.mem.eql(u8, first_token, "close")) {
+        return .{ .close = if (rest.len > 0) rest else null };
     }
-    if (std.mem.eql(u8, verb, "query")) {
-        if (payload.len == 0) return error.MissingCommandPayload;
-        return .{ .query = payload };
+    if (std.mem.eql(u8, first_token, "select")) {
+        return .{ .select = if (rest.len > 0) rest else null };
     }
-    if (std.mem.eql(u8, verb, "open")) {
-        if (payload.len == 0) return .{ .open = null };
-        return .{ .open = payload };
+    if (std.mem.eql(u8, first_token, "read")) {
+        if (rest.len != 0) return error.UnexpectedCommandPayload;
+        return .{ .read = null };
+    }
+    if (std.mem.eql(u8, first_token, "write")) {
+        if (rest.len == 0) return error.MissingCommandPayload;
+        return .{ .write = .{ .target = null, .payload = rest } };
+    }
+    if (std.mem.eql(u8, first_token, "query")) {
+        if (rest.len == 0) return error.MissingCommandPayload;
+        return .{ .query = .{ .target = null, .payload = rest } };
+    }
+    if (std.mem.eql(u8, first_token, "open")) {
+        return parseOpenArgs(rest);
     }
     return error.UnknownCommand;
+}
+
+fn parseOpenArgs(args: []const u8) Command {
+    if (args.len == 0) return .{ .open = .{ .addr = null, .name = null } };
+    if (std.mem.indexOf(u8, args, " as ")) |as_pos| {
+        const addr = args[0..as_pos];
+        const name = std.mem.trimLeft(u8, args[as_pos + 4 ..], repl_whitespace);
+        if (name.len == 0) return .{ .open = .{ .addr = if (addr.len > 0) addr else null, .name = null } };
+        return .{ .open = .{ .addr = if (addr.len > 0) addr else null, .name = name } };
+    }
+    return .{ .open = .{ .addr = args, .name = null } };
+}
+
+const reserved_names = [_][]const u8{ "help", "quit", "list", "open", "close", "select", "read", "write", "query" };
+
+fn isValidName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (!std.ascii.isAlphabetic(name[0]) and name[0] != '_') return false;
+    for (name) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
+    }
+    for (reserved_names) |r| {
+        if (std.mem.eql(u8, name, r)) return false;
+    }
+    return true;
 }
 
 /// Prints the list of supported REPL commands based on connection state.
@@ -554,21 +753,40 @@ fn printHelp(out: *std.Io.Writer, current_state: State) !void {
     switch (current_state) {
         .disconnected => try out.writeAll(
             \\Commands:
-            \\  list              List available VISA instruments.
-            \\  open [<resource>]  Connect by address, or scan and pick interactively.
-            \\  help              Show this help text.
-            \\  quit              Leave the REPL.
+            \\  list               List current connections.
+            \\  open [<addr>]      Connect by address, or scan interactively.
+            \\                     Use 'open <addr> as <name>' to assign a name.
+            \\  help               Show this help text.
+            \\  quit               Leave the REPL.
             \\
         ),
         .connected => try out.writeAll(
             \\Commands:
-            \\  write <command>   Send a command to the instrument.
-            \\  read              Read a response from the instrument.
-            \\  query <command>   Send a command and then read the response.
-            \\  list              List available VISA instruments.
-            \\  close             Disconnect from the current instrument.
-            \\  help              Show this help text.
-            \\  quit              Leave the REPL.
+            \\  <name>.write <cmd> Send a command to a named instrument.
+            \\  <name>.read        Read a response from a named instrument.
+            \\  <name>.query <cmd> Send a command and read the response.
+            \\  select <name>      Select an instrument for direct commands.
+            \\  list               List current connections.
+            \\  open [<addr>]      Connect to another instrument.
+            \\  close <name>       Disconnect a named instrument.
+            \\  help               Show this help text.
+            \\  quit               Leave the REPL.
+            \\
+        ),
+        .selected => try out.writeAll(
+            \\Commands:
+            \\  write <command>    Send a command to the selected instrument.
+            \\  read               Read a response from the selected instrument.
+            \\  query <command>    Send a command and read the response.
+            \\  <name>.write <cmd> Send a command to a named instrument.
+            \\  <name>.read        Read a response from a named instrument.
+            \\  <name>.query <cmd> Send a command and read the response.
+            \\  select [<name>]    Switch or deselect the active instrument.
+            \\  list               List current connections.
+            \\  open [<addr>]      Connect to another instrument.
+            \\  close [<name>]     Disconnect (default: selected).
+            \\  help               Show this help text.
+            \\  quit               Leave the REPL.
             \\
         ),
     }
@@ -605,97 +823,236 @@ const MockResourceList = struct {
 
 /// Test double used to exercise the REPL loop without a real VISA session.
 const MockContext = struct {
+    const MockConnection = struct { name: []u8, addr: []u8 };
+    const RecordedWrite = struct { target: []u8, payload: []u8 };
+
     allocator: std.mem.Allocator,
-    writes: std.ArrayList([]u8),
+    writes: std.ArrayList(RecordedWrite) = .empty,
     responses: []const []const u8,
     read_index: usize = 0,
     mock_resources: []const []const u8 = &.{},
-    connected: bool = false,
+    connections: std.ArrayList(MockConnection) = .empty,
+    selected: ?usize = null,
+    next_id: usize = 1,
 
     fn init(allocator: std.mem.Allocator, responses: []const []const u8) MockContext {
         return .{
             .allocator = allocator,
-            .writes = .empty,
             .responses = responses,
         };
     }
 
     fn deinit(self: *MockContext) void {
-        for (self.writes.items) |item| self.allocator.free(item);
+        for (self.writes.items) |item| {
+            self.allocator.free(item.target);
+            self.allocator.free(item.payload);
+        }
         self.writes.deinit(self.allocator);
+        for (self.connections.items) |conn| {
+            self.allocator.free(conn.name);
+            self.allocator.free(conn.addr);
+        }
+        self.connections.deinit(self.allocator);
     }
 
     fn state(self: *const MockContext) State {
-        return if (self.connected) .connected else .disconnected;
+        if (self.selected != null) return .selected;
+        if (self.connections.items.len > 0) return .connected;
+        return .disconnected;
+    }
+
+    fn selectedName(self: *const MockContext) ?[]const u8 {
+        if (self.selected) |idx| return self.connections.items[idx].name;
+        return null;
+    }
+
+    fn openConnection(self: *MockContext, addr: []const u8, name: ?[]const u8) ![]const u8 {
+        const name_copy = if (name) |n|
+            try self.allocator.dupe(u8, n)
+        else blk: {
+            const auto = try std.fmt.allocPrint(self.allocator, "d{d}", .{self.next_id});
+            self.next_id += 1;
+            break :blk auto;
+        };
+        errdefer self.allocator.free(name_copy);
+        const addr_copy = try self.allocator.dupe(u8, addr);
+        errdefer self.allocator.free(addr_copy);
+        try self.connections.append(self.allocator, .{ .name = name_copy, .addr = addr_copy });
+        if (self.selected == null) self.selected = self.connections.items.len - 1;
+        return name_copy;
+    }
+
+    fn closeByName(self: *MockContext, target: []const u8) bool {
+        for (self.connections.items, 0..) |conn, i| {
+            if (std.mem.eql(u8, conn.name, target)) {
+                if (self.selected) |sel| {
+                    if (sel == i) {
+                        self.selected = null;
+                    } else if (sel > i) {
+                        self.selected = sel - 1;
+                    }
+                }
+                const removed = self.connections.orderedRemove(i);
+                self.allocator.free(removed.addr);
+                self.allocator.free(removed.name);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn findByName(self: *const MockContext, target: []const u8) ?usize {
+        for (self.connections.items, 0..) |conn, i| {
+            if (std.mem.eql(u8, conn.name, target)) return i;
+        }
+        return null;
+    }
+
+    fn findByAddr(self: *const MockContext, addr: []const u8) ?usize {
+        for (self.connections.items, 0..) |conn, i| {
+            if (std.mem.eql(u8, conn.addr, addr)) return i;
+        }
+        return null;
+    }
+
+    fn selectByName(self: *MockContext, target: []const u8) bool {
+        for (self.connections.items, 0..) |conn, i| {
+            if (std.mem.eql(u8, conn.name, target)) {
+                self.selected = i;
+                return true;
+            }
+        }
+        return false;
     }
 
     fn listResources(self: *MockContext, _: std.mem.Allocator) !MockResourceList {
         return .{ .items = self.mock_resources };
     }
 
-    fn open(self: *MockContext, _: std.mem.Allocator, _: []const u8) !void {
-        self.connected = true;
+    fn writeAt(self: *MockContext, idx: usize, payload: []const u8) !void {
+        const t = try self.allocator.dupe(u8, self.connections.items[idx].name);
+        errdefer self.allocator.free(t);
+        const p = try self.allocator.dupe(u8, payload);
+        errdefer self.allocator.free(p);
+        try self.writes.append(self.allocator, .{ .target = t, .payload = p });
     }
 
-    fn close(self: *MockContext) void {
-        self.connected = false;
-    }
-
-    fn write(self: *MockContext, payload: []const u8) !void {
-        const copy = try self.allocator.dupe(u8, payload);
-        errdefer self.allocator.free(copy);
-        try self.writes.append(self.allocator, copy);
-    }
-
-    fn readToOwned(self: *MockContext, allocator: std.mem.Allocator) ![]u8 {
+    fn readAt(self: *MockContext, allocator: std.mem.Allocator, _: usize) ![]u8 {
         if (self.read_index >= self.responses.len) return error.EndOfStream;
         const response = self.responses[self.read_index];
         self.read_index += 1;
         return try allocator.dupe(u8, response);
     }
 
-    fn queryToOwned(self: *MockContext, allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
-        try self.write(payload);
-        return self.readToOwned(allocator);
+    fn queryAt(self: *MockContext, allocator: std.mem.Allocator, idx: usize, payload: []const u8) ![]u8 {
+        try self.writeAt(idx, payload);
+        return self.readAt(allocator, idx);
     }
 };
 
 test "parse repl commands" {
-    const write_cmd = try parseCommand("write MEAS:VOLT?");
-    try std.testing.expect(switch (write_cmd) {
-        .write => |payload| std.mem.eql(u8, payload, "MEAS:VOLT?"),
-        else => false,
-    });
-
-    const query_cmd = try parseCommand("query *IDN?");
-    try std.testing.expect(switch (query_cmd) {
-        .query => |payload| std.mem.eql(u8, payload, "*IDN?"),
-        else => false,
-    });
-
-    const open_cmd = try parseCommand("open USB0::0x0957::INSTR");
-    try std.testing.expect(switch (open_cmd) {
-        .open => |addr| if (addr) |a| std.mem.eql(u8, a, "USB0::0x0957::INSTR") else false,
-        else => false,
-    });
-
-    const open_bare = try parseCommand("open");
-    try std.testing.expect(switch (open_bare) {
-        .open => |addr| addr == null,
-        else => false,
-    });
-
-    try std.testing.expectEqual(Command.read, try parseCommand("read"));
+    // Basic commands.
     try std.testing.expectEqual(Command.help, try parseCommand("help"));
     try std.testing.expectEqual(Command.quit, try parseCommand("quit"));
     try std.testing.expectEqual(Command.list, try parseCommand("list"));
-    try std.testing.expectEqual(Command.close, try parseCommand("close"));
+
+    // write (no target).
+    const write_cmd = try parseCommand("write MEAS:VOLT?");
+    try std.testing.expect(switch (write_cmd) {
+        .write => |w| w.target == null and std.mem.eql(u8, w.payload, "MEAS:VOLT?"),
+        else => false,
+    });
+
+    // query (no target).
+    const query_cmd = try parseCommand("query *IDN?");
+    try std.testing.expect(switch (query_cmd) {
+        .query => |q| q.target == null and std.mem.eql(u8, q.payload, "*IDN?"),
+        else => false,
+    });
+
+    // read (no target).
+    try std.testing.expect(switch (try parseCommand("read")) {
+        .read => |t| t == null,
+        else => false,
+    });
+
+    // open with address.
+    const open_cmd = try parseCommand("open USB0::0x0957::INSTR");
+    try std.testing.expect(switch (open_cmd) {
+        .open => |o| if (o.addr) |a| std.mem.eql(u8, a, "USB0::0x0957::INSTR") and o.name == null else false,
+        else => false,
+    });
+
+    // open bare.
+    try std.testing.expect(switch (try parseCommand("open")) {
+        .open => |o| o.addr == null and o.name == null,
+        else => false,
+    });
+
+    // open with name.
+    const open_named = try parseCommand("open USB0::INSTR as dmm");
+    try std.testing.expect(switch (open_named) {
+        .open => |o| blk: {
+            const addr_ok = if (o.addr) |a| std.mem.eql(u8, a, "USB0::INSTR") else false;
+            const name_ok = if (o.name) |n| std.mem.eql(u8, n, "dmm") else false;
+            break :blk addr_ok and name_ok;
+        },
+        else => false,
+    });
+
+    // targeted write (name.write).
+    const tw = try parseCommand("dmm.write VOLT 3.3");
+    try std.testing.expect(switch (tw) {
+        .write => |w| if (w.target) |t| std.mem.eql(u8, t, "dmm") and std.mem.eql(u8, w.payload, "VOLT 3.3") else false,
+        else => false,
+    });
+
+    // targeted read (name.read).
+    try std.testing.expect(switch (try parseCommand("dmm.read")) {
+        .read => |t| if (t) |n| std.mem.eql(u8, n, "dmm") else false,
+        else => false,
+    });
+
+    // targeted query (name.query).
+    const tq = try parseCommand("psu.query *IDN?");
+    try std.testing.expect(switch (tq) {
+        .query => |q| if (q.target) |t| std.mem.eql(u8, t, "psu") and std.mem.eql(u8, q.payload, "*IDN?") else false,
+        else => false,
+    });
+
+    // select with name.
+    try std.testing.expect(switch (try parseCommand("select dmm")) {
+        .select => |s| if (s) |n| std.mem.eql(u8, n, "dmm") else false,
+        else => false,
+    });
+
+    // select bare (deselect).
+    try std.testing.expect(switch (try parseCommand("select")) {
+        .select => |s| s == null,
+        else => false,
+    });
+
+    // close with name.
+    try std.testing.expect(switch (try parseCommand("close dmm")) {
+        .close => |c| if (c) |n| std.mem.eql(u8, n, "dmm") else false,
+        else => false,
+    });
+
+    // close bare.
+    try std.testing.expect(switch (try parseCommand("close")) {
+        .close => |c| c == null,
+        else => false,
+    });
+
+    // Errors.
     try std.testing.expectError(error.MissingCommandPayload, parseCommand("write"));
     try std.testing.expectError(error.UnexpectedCommandPayload, parseCommand("read extra"));
     try std.testing.expectError(error.UnknownCommand, parseCommand("ping"));
+    try std.testing.expectError(error.UnknownCommand, parseCommand("dmm.foo"));
+    try std.testing.expectError(error.MissingCommandPayload, parseCommand("dmm.write"));
 }
 
-test "repl loop handles open write query read close and quit" {
+test "repl auto-selects first connection" {
     const gpa = std.testing.allocator;
     const input =
         \\open USB0::INSTR
@@ -717,19 +1074,83 @@ test "repl loop handles open write query read close and quit" {
     try runLoop(gpa, &reader, &out.writer, &ctx, null);
 
     try std.testing.expectEqual(@as(usize, 2), ctx.writes.items.len);
-    try std.testing.expectEqualStrings("CONF:VOLT 10", ctx.writes.items[0]);
-    try std.testing.expectEqualStrings("*IDN?", ctx.writes.items[1]);
+    try std.testing.expectEqualStrings("d1", ctx.writes.items[0].target);
+    try std.testing.expectEqualStrings("CONF:VOLT 10", ctx.writes.items[0].payload);
+    try std.testing.expectEqualStrings("d1", ctx.writes.items[1].target);
+    try std.testing.expectEqualStrings("*IDN?", ctx.writes.items[1].payload);
     const output = out.written();
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Connected to USB0::INSTR"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Connected to USB0::INSTR (d1)"));
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "ok\n"));
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "TEST,MODEL,123\n"));
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "5.000\n"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Disconnected.\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Disconnected from d1.\n"));
 }
 
-test "repl list command shows resources" {
+test "repl multi-connection with targeted commands" {
     const gpa = std.testing.allocator;
     const input =
+        \\open USB0::INSTR as dmm
+        \\open TCPIP0::1.1::INSTR as psu
+        \\dmm.query *IDN?
+        \\psu.write VOLT 3.3
+        \\close psu
+        \\close dmm
+        \\quit
+        \\
+    ;
+
+    var reader = std.Io.Reader.fixed(input);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    var ctx: MockContext = .init(gpa, &.{"DMM,Model,123\n"});
+    defer ctx.deinit();
+
+    try runLoop(gpa, &reader, &out.writer, &ctx, null);
+
+    try std.testing.expectEqual(@as(usize, 2), ctx.writes.items.len);
+    try std.testing.expectEqualStrings("dmm", ctx.writes.items[0].target);
+    try std.testing.expectEqualStrings("*IDN?", ctx.writes.items[0].payload);
+    try std.testing.expectEqualStrings("psu", ctx.writes.items[1].target);
+    try std.testing.expectEqualStrings("VOLT 3.3", ctx.writes.items[1].payload);
+}
+
+test "repl select and deselect" {
+    const gpa = std.testing.allocator;
+    const input =
+        \\open USB0::INSTR as dmm
+        \\open TCPIP0::INSTR as psu
+        \\select psu
+        \\write VOLT 5.0
+        \\select
+        \\write VOLT 1.0
+        \\quit
+        \\
+    ;
+
+    var reader = std.Io.Reader.fixed(input);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    var ctx: MockContext = .init(gpa, &.{});
+    defer ctx.deinit();
+
+    try runLoop(gpa, &reader, &out.writer, &ctx, null);
+
+    // First write goes to psu (explicitly selected).
+    try std.testing.expectEqual(@as(usize, 1), ctx.writes.items.len);
+    try std.testing.expectEqualStrings("psu", ctx.writes.items[0].target);
+    try std.testing.expectEqualStrings("VOLT 5.0", ctx.writes.items[0].payload);
+    // Second write should fail (deselected, no target).
+    const output = out.written();
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "no instrument selected"));
+}
+
+test "repl list shows resources with connection status" {
+    const gpa = std.testing.allocator;
+    const input =
+        \\open USB0::INSTR as dmm
+        \\open TCPIP0::INSTR as psu
         \\list
         \\quit
         \\
@@ -740,22 +1161,24 @@ test "repl list command shows resources" {
     defer out.deinit();
 
     var ctx: MockContext = .init(gpa, &.{});
-    ctx.mock_resources = &.{ "USB0::0x0957::INSTR", "TCPIP0::192.168.1.1::INSTR" };
+    ctx.mock_resources = &.{ "USB0::INSTR", "TCPIP0::INSTR", "GPIB0::22::INSTR" };
     defer ctx.deinit();
 
     try runLoop(gpa, &reader, &out.writer, &ctx, null);
 
     const output = out.written();
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "  USB0::0x0957::INSTR\n"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "  TCPIP0::192.168.1.1::INSTR\n"));
-    // list should NOT show numbers
-    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "1)"));
+    // All resources listed with numbers.
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "1) USB0::INSTR"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "2) TCPIP0::INSTR"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "3) GPIB0::22::INSTR"));
+    // Connected resources show their names.
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "(dmm, selected)"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "(psu)"));
 }
 
 test "repl interactive open scans and prompts" {
     const gpa = std.testing.allocator;
-    // "open" without args triggers scan, then "2\n" selects the second instrument.
-    const input = "open\n2\nclose\nquit\n";
+    const input = "open\n2\nclose d1\nquit\n";
 
     var reader: std.Io.Reader = .fixed(input);
     var out: std.Io.Writer.Allocating = .init(gpa);
@@ -771,7 +1194,7 @@ test "repl interactive open scans and prompts" {
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "1) USB0::0x0957::INSTR"));
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "2) TCPIP0::192.168.1.1::INSTR"));
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Enter index:"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Connected to TCPIP0::192.168.1.1::INSTR"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "Connected to TCPIP0::192.168.1.1::INSTR (d1)"));
 }
 
 test "repl interactive open with invalid index" {
@@ -792,7 +1215,29 @@ test "repl interactive open with invalid index" {
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "index out of range"));
 }
 
-test "repl rejects instrument commands when disconnected" {
+test "repl rejects duplicate address" {
+    const gpa = std.testing.allocator;
+    const input =
+        \\open USB0::INSTR as dmm
+        \\open USB0::INSTR as dmm2
+        \\quit
+        \\
+    ;
+
+    var reader: std.Io.Reader = .fixed(input);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    var ctx: MockContext = .init(gpa, &.{});
+    defer ctx.deinit();
+
+    try runLoop(gpa, &reader, &out.writer, &ctx, null);
+
+    const output = out.written();
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "already connected to USB0::INSTR"));
+}
+
+test "repl rejects commands when disconnected" {
     const gpa = std.testing.allocator;
     const input =
         \\write CONF:VOLT 10
@@ -813,5 +1258,18 @@ test "repl rejects instrument commands when disconnected" {
     try runLoop(gpa, &reader, &out.writer, &ctx, null);
 
     const output = out.written();
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 3, "not connected"));
+    // write, read, query → "no instrument selected"; close → "no instrument selected"
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 4, "no instrument selected"));
+}
+
+test "repl name validation" {
+    try std.testing.expect(isValidName("dmm"));
+    try std.testing.expect(isValidName("psu_1"));
+    try std.testing.expect(isValidName("_hidden"));
+    try std.testing.expect(!isValidName(""));
+    try std.testing.expect(!isValidName("1abc"));
+    try std.testing.expect(!isValidName("a b"));
+    try std.testing.expect(!isValidName("open"));
+    try std.testing.expect(!isValidName("close"));
+    try std.testing.expect(!isValidName("select"));
 }
