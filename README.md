@@ -1,14 +1,15 @@
 # Ordo
 
-An automated experimental workflow engine for VISA-controlled instruments.
+Ordo [ˈoːr.doː] is an automated experimental workflow engine for VISA-controlled instruments.
 
 Ordo loads instrument adapters from TOML, recipes from YAML, precompiles command templates and expressions, and executes scheduled tasks with optional preview, dry-run, CSV output, and TCP streaming.
 
 ## Requirements
 
-- A VISA implementation to talk to instruments at runtime, such as NI-VISA or Keysight IO Libraries
+- Instruments with VISA interface
+- A VISA implementation to talk to instruments at runtime, such as NI-VISA or Keysight IO Libraries[^1]
 
-`--preview` does not open VISA sessions, so it can be used without a VISA library installed.
+[^1]: `--preview` does not open VISA sessions, so it can be used without a VISA library installed.
 
 
 ## Installation
@@ -20,8 +21,8 @@ Ordo loads instrument adapters from TOML, recipes from YAML, precompiles command
   wget -qO- https://raw.githubusercontent.com/uwni/ordo/main/install.sh | sh
   ```
 
-  > [!NOTE]
-  > **macOS** users may get a Gatekeeper warning because the binary is not signed/notarized. If that happens, allow it manually in **System Settings -> Privacy & Security**.
+> [!NOTE]
+> **macOS** users may get a Gatekeeper warning because the binary is not signed/notarized. If that happens, allow it manually in **System Settings -> Privacy & Security**.
   
 - For **Microsoft Windows** users, Run
   ```ps
@@ -30,7 +31,7 @@ Ordo loads instrument adapters from TOML, recipes from YAML, precompiles command
 
 ## Requirements
 
-To run an existing Ordo binary, only the VISA runtime is required. You can download it from [National Instrument](https://www.ni.com/en/support/downloads/adapters/download.ni-visa.html).
+To run an existing Ordo binary, only the VISA runtime is required. You can download it from [National Instrument](https://www.ni.com/en/support/downloads/drivers/download.ni-visa.html).
 
 If your VISA library is not installed in a standard location, pass it explicitly with `--visa-lib <path>`.
 
