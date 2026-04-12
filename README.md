@@ -126,7 +126,7 @@ Notes:
 Recipe documents are YAML files with these top-level sections:
 
 - `instruments`: named instrument instances with a adapter file and VISA resource string
-- `vars`: initial variable values used by expressions and `save_as` slots
+- `vars`: initial variable values used by expressions and `assign` slots
 - `tasks`: periodic work definitions
 - `pipeline`: optional CSV and TCP sink configuration
 - `stop_when`: optional stop condition expression
@@ -160,9 +160,9 @@ tasks:
               channels: [1, 2]
         - call: measure_voltage
           instrument: psu
-          save_as: measured_voltage
+          assign: measured_voltage
         - compute: "${measured_voltage} - ${target_voltage}"
-          save_as: delta
+          assign: delta
           if: "$ITER > 0"
 
 stop_when: "$ELAPSED_MS >= 2000 || $ITER >= 20"
@@ -175,8 +175,8 @@ Recipe notes:
 - Use `sleep_ms: 100` as a step to pause between iterations.
 - Step arguments can be scalars or lists.
 - A string argument written exactly as `${name}` is treated as a runtime variable reference.
-- `save_as` stores a response or compute result into a declared variable slot.
-- Variables referenced by `${name}` or `save_as` must be declared in `vars`.
+- `assign` stores a response or compute result into a declared variable slot.
+- Variables referenced by `${name}` or `assign` must be declared in `vars`.
 
 ## Iterations
 
@@ -184,7 +184,7 @@ An **iteration** is one complete execution of a task's step list. Every time a t
 
 Iterations drive two key behaviors:
 
-1. **Pipeline output** — at the end of each iteration, all `save_as` values recorded during that run are collected into a single frame and pushed to the pipeline (CSV file, TCP stream). One iteration = one row in the output.
+1. **Pipeline output** — at the end of each iteration, all `assign` values recorded during that run are collected into a single frame and pushed to the pipeline (CSV file, TCP stream). One iteration = one row in the output.
 2. **Stop conditions** — `stop_when` is evaluated between iterations. `$ITER` reflects the number of completed iterations so far.
 
 For a **sequential** task (no `while` or `if`), the steps run exactly once — that is one iteration. For a **loop** task (`while: true`), each pass through the step list is one iteration. For a **conditional** task (`if: ...`), the steps run at most once, producing zero or one iteration depending on the guard.
@@ -287,9 +287,9 @@ Notes:
 - `mode` currently selects default behavior such as conservative versus throughput-oriented buffer sizing.
 - `buffer_size` is normalized internally to a power of two.
 - `warn_usage_percent` must be between 1 and 100.
-- `file_path` writes CSV rows using recorded `save_as` values.
+- `file_path` writes CSV rows using recorded `assign` values.
 - `network_host` and `network_port` stream the same task-level frames as JSON over TCP.
-- `record` can be `all` or an explicit list of `save_as` variable names.
+- `record` can be `all` or an explicit list of `assign` variable names.
 - Relative sink paths are resolved from the recipe file directory.
 
 ## REPL

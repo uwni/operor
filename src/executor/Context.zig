@@ -6,7 +6,7 @@ const recipe_types = @import("../recipe/types.zig");
 pub const Value = recipe_types.Value;
 pub const RenderValue = recipe_types.RenderValue;
 
-/// Execution-time value store used for `${name}` substitutions and `save_as` outputs.
+/// Execution-time value store used for `${name}` substitutions and `assign` outputs.
 allocator: std.mem.Allocator,
 start_ns: i128 = 0,
 iteration: u64 = 0,

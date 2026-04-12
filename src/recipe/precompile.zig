@@ -79,12 +79,12 @@ fn precompileInternal(
     var precompiled_instruments = try precompileInstruments(alloc, recipe, &loaded_adapters);
 
     // 3-5. Normalize tasks and steps, resolving commands and validating arguments.
-    var save_as_set: std.StringArrayHashMap(void) = .init(alloc);
-    const tasks = try precompileTasks(alloc, recipe, &vars, &loaded_adapters, &precompiled_instruments, &save_as_set, &diag_ctx);
+    var assign_set: std.StringArrayHashMap(void) = .init(alloc);
+    const tasks = try precompileTasks(alloc, recipe, &vars, &loaded_adapters, &precompiled_instruments, &assign_set, &diag_ctx);
 
     // 6. Validate and resolve pipeline record configuration.
     diag_ctx = .{};
-    const pipeline = try resolvePipelineConfig(alloc, recipe, &vars, &save_as_set);
+    const pipeline = try resolvePipelineConfig(alloc, recipe, &vars, &assign_set);
 
     // 7. Assign save_column indices to steps that contribute to recorded frames.
     assignSaveColumns(tasks, &vars, pipeline.record.?.explicit);
@@ -168,12 +168,12 @@ fn precompileTasks(
     vars: *const VarsMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMap(types.PrecompiledInstrument),
-    save_as_set: *std.StringArrayHashMap(void),
+    assign_set: *std.StringArrayHashMap(void),
     diag_ctx: *diagnostic.DiagnosticContext,
 ) ![]types.Task {
     const tasks = try arena_alloc.alloc(types.Task, recipe.tasks.len);
     for (recipe.tasks, 0..) |*task_cfg, task_idx| {
-        const steps = try precompileSteps(arena_alloc, task_cfg.steps, vars, loaded_adapters, precompiled_instruments, save_as_set, task_idx, diag_ctx);
+        const steps = try precompileSteps(arena_alloc, task_cfg.steps, vars, loaded_adapters, precompiled_instruments, assign_set, task_idx, diag_ctx);
 
         if (task_cfg.@"while") |while_src| {
             // Loop task
@@ -207,7 +207,7 @@ fn precompileSteps(
     vars: *const VarsMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMap(types.PrecompiledInstrument),
-    save_as_set: *std.StringArrayHashMap(void),
+    assign_set: *std.StringArrayHashMap(void),
     task_idx: usize,
     diag_ctx: *diagnostic.DiagnosticContext,
 ) ![]types.Step {
@@ -217,7 +217,7 @@ fn precompileSteps(
             .compute => |*cfg| try precompileComputeStep(
                 arena_alloc,
                 vars,
-                save_as_set,
+                assign_set,
                 cfg,
                 task_idx,
                 step_idx,
@@ -228,7 +228,7 @@ fn precompileSteps(
                 vars,
                 loaded_adapters,
                 precompiled_instruments,
-                save_as_set,
+                assign_set,
                 cfg,
                 task_idx,
                 step_idx,
@@ -243,7 +243,7 @@ fn precompileSteps(
 fn precompileComputeStep(
     arena_alloc: std.mem.Allocator,
     vars: *const VarsMap,
-    save_as_set: *std.StringArrayHashMap(void),
+    assign_set: *std.StringArrayHashMap(void),
     cfg: *const config.ComputeStepConfig,
     task_idx: usize,
     step_idx: usize,
@@ -256,10 +256,10 @@ fn precompileComputeStep(
 
     const if_expr = try precompileIf(arena_alloc, vars, cfg.@"if");
 
-    const save_as = cfg.save_as;
-    const save_slot = vars.getIndex(save_as) orelse return error.UndeclaredVariable;
-    const save_as_copy = try arena_alloc.dupe(u8, save_as);
-    try save_as_set.put(save_as_copy, {});
+    const assign = cfg.assign;
+    const save_slot = vars.getIndex(assign) orelse return error.UndeclaredVariable;
+    const assign_copy = try arena_alloc.dupe(u8, assign);
+    try assign_set.put(assign_copy, {});
 
     var compute_expr = try expr.parse(arena_alloc, cfg.compute);
     try compute_expr.bindVariables(vars);
@@ -278,7 +278,7 @@ fn precompileCallStep(
     vars: *const VarsMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMap(types.PrecompiledInstrument),
-    save_as_set: *std.StringArrayHashMap(void),
+    assign_set: *std.StringArrayHashMap(void),
     cfg: *const config.CallStepConfig,
     task_idx: usize,
     step_idx: usize,
@@ -309,10 +309,10 @@ fn precompileCallStep(
     const compiled_args = try compileStepArgs(arena_alloc, command, cfg.args, vars, diag_ctx);
 
     var save_slot: ?usize = null;
-    if (cfg.save_as) |label| {
+    if (cfg.assign) |label| {
         save_slot = vars.getIndex(label) orelse return error.UndeclaredVariable;
         const duped = try arena_alloc.dupe(u8, label);
-        try save_as_set.put(duped, {});
+        try assign_set.put(duped, {});
     }
 
     return .{
@@ -357,21 +357,21 @@ fn resolvePipelineConfig(
     arena_alloc: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
     vars: *const VarsMap,
-    save_as_set: *const std.StringArrayHashMap(void),
+    assign_set: *const std.StringArrayHashMap(void),
 ) !types.PipelineConfig {
     const pipeline_cfg = recipe.pipeline orelse return error.MissingPipeline;
     if (pipeline_cfg.record == null) return error.MissingRecordConfig;
     var pipeline = try clonePipelineConfig(arena_alloc, pipeline_cfg);
     switch (pipeline.record.?) {
         .all => {
-            pipeline.record = .{ .explicit = try arena_alloc.dupe([]const u8, save_as_set.keys()) };
+            pipeline.record = .{ .explicit = try arena_alloc.dupe([]const u8, assign_set.keys()) };
         },
         .explicit => |columns| {
             for (columns) |name| {
                 if (bindingForName(vars, name) == null) {
                     return error.UndeclaredVariable;
                 }
-                if (!save_as_set.contains(name)) {
+                if (!assign_set.contains(name)) {
                     return error.RecordVariableNotFound;
                 }
             }
@@ -1229,9 +1229,9 @@ test "precompile compute step" {
         \\        args:
         \\          voltage: "5"
         \\          channels: "1"
-        \\        save_as: v
+        \\        assign: v
         \\      - compute: "${v} * 2"
-        \\        save_as: doubled
+        \\        assign: doubled
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
@@ -1262,7 +1262,7 @@ test "precompile compute step" {
     }
 }
 
-test "precompile compute step rejects missing save_as" {
+test "precompile compute step rejects missing assign" {
     const gpa = std.testing.allocator;
 
     var workspace: testing.TestWorkspace = .init(gpa);
@@ -1289,7 +1289,7 @@ test "precompile compute step rejects missing save_as" {
     var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
     defer dir.close();
 
-    // With the union-based StepConfig, missing required fields (save_as) results in a parse error.
+    // With the union-based StepConfig, missing required fields (assign) results in a parse error.
     try std.testing.expectError(error.WrongType, precompilePath(gpa, recipe_path, dir, null));
 }
 
@@ -1348,7 +1348,7 @@ test "precompile rejects invalid step (neither call nor compute)" {
         \\  record: all
         \\tasks:
         \\  - steps:
-        \\      - save_as: orphan
+        \\      - assign: orphan
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
@@ -1363,7 +1363,7 @@ test "precompile rejects invalid step (neither call nor compute)" {
     try std.testing.expectError(error.WrongType, precompilePath(gpa, recipe_path, dir, null));
 }
 
-test "precompile rejects record with unknown save_as variable" {
+test "precompile rejects record with unknown assign variable" {
     const gpa = std.testing.allocator;
 
     var workspace: testing.TestWorkspace = .init(gpa);
@@ -1390,7 +1390,7 @@ test "precompile rejects record with unknown save_as variable" {
         \\          channels:
         \\            - 1
         \\            - 2
-        \\        save_as: voltage
+        \\        assign: voltage
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
@@ -1430,9 +1430,9 @@ test "precompile accepts valid record subset" {
         \\          channels:
         \\            - 1
         \\            - 2
-        \\        save_as: voltage
+        \\        assign: voltage
         \\      - compute: "${voltage} * 2"
-        \\        save_as: doubled
+        \\        assign: doubled
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
@@ -1548,7 +1548,7 @@ test "precompile diagnostic for missing record" {
     return error.TestUnexpectedResult;
 }
 
-test "precompile expands record all into explicit save_as list" {
+test "precompile expands record all into explicit assign list" {
     const gpa = std.testing.allocator;
 
     var workspace: testing.TestWorkspace = .init(gpa);
@@ -1572,9 +1572,9 @@ test "precompile expands record all into explicit save_as list" {
         \\          voltage: 5
         \\          channels:
         \\            - 1
-        \\        save_as: voltage
+        \\        assign: voltage
         \\      - compute: "${voltage} * 2"
-        \\        save_as: doubled
+        \\        assign: doubled
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
@@ -1625,7 +1625,7 @@ test "precompile rejects undeclared variable use" {
         \\      - call: d1.set
         \\        args:
         \\          voltage: "5"
-        \\        save_as: undeclared_var
+        \\        assign: undeclared_var
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
@@ -1655,7 +1655,7 @@ test "precompile rejects undeclared variable in expression" {
         \\tasks:
         \\  - steps:
         \\      - compute: "${v} + ${x}"
-        \\        save_as: v
+        \\        assign: v
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
@@ -1685,7 +1685,7 @@ test "precompile rejects variable shadowing builtin" {
         \\tasks:
         \\  - steps:
         \\      - compute: "1 + 1"
-        \\        save_as: $ITER
+        \\        assign: $ITER
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
@@ -1849,7 +1849,7 @@ test "precompile sleep step" {
         \\tasks:
         \\  - steps:
         \\      - compute: "1 + 2"
-        \\        save_as: v
+        \\        assign: v
         \\      - sleep_ms: 100
     );
 

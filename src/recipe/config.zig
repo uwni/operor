@@ -77,7 +77,7 @@ pub const CallStepConfig = struct {
     /// Arguments forwarded to the adapter command template.
     args: ?std.StringHashMap(ArgValueDoc) = null,
     /// Context key that receives the step result (response or computed value).
-    save_as: ?[]const u8 = null,
+    assign: ?[]const u8 = null,
     /// Guard expression; step is skipped when the result is falsy (0.0).
     @"if": ?BooleanExpr = null,
 };
@@ -86,7 +86,7 @@ pub const ComputeStepConfig = struct {
     /// Expression to evaluate locally.
     compute: []const u8,
     /// Context key that receives the step result.
-    save_as: []const u8,
+    assign: []const u8,
     /// Guard expression; step is skipped when the result is falsy (0.0).
     @"if": ?BooleanExpr = null,
 };

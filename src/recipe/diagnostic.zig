@@ -96,7 +96,7 @@ pub const PrecompileDiagnostic = struct {
             error.MissingRecordConfig => try writer.writeAll("pipeline is missing required 'record' field"),
             error.InvalidPipelineConfig => try writer.writeAll("invalid pipeline configuration"),
             error.InvalidRecordConfig => try writer.writeAll("pipeline record must be \"all\" or an array of variable names"),
-            error.RecordVariableNotFound => try writer.writeAll("pipeline record references unknown save_as variable"),
+            error.RecordVariableNotFound => try writer.writeAll("pipeline record references unknown assign variable"),
             error.UndeclaredVariable => try writer.writeAll("variable used but not declared in recipe 'vars' section"),
             else => try writer.print("{s}", .{@errorName(err)}),
         }

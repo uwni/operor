@@ -9,4 +9,4 @@ tasks:
       - call: d1.set
         args:
           voltage: "5"
-        save_as: v
+        assign: v

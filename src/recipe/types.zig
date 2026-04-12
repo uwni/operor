@@ -267,14 +267,14 @@ pub const PipelineConfig = struct {
     network_host: ?[]const u8 = null,
     /// Optional TCP sink port written by the consumer thread.
     network_port: ?u16 = null,
-    /// Declares which `save_as` variables to record as frame columns.
-    /// Use `"all"` to record every `save_as` variable, or list names explicitly.
+    /// Declares which `assign` variables to record as frame columns.
+    /// Use `"all"` to record every `assign` variable, or list names explicitly.
     record: ?RecordConfig = null,
 };
 
-/// Controls which `save_as` variables are persisted by pipeline sinks.
+/// Controls which `assign` variables are persisted by pipeline sinks.
 pub const RecordConfig = union(enum) {
-    /// Record every `save_as` variable.
+    /// Record every `assign` variable.
     all: []const u8,
     /// Record only the listed variable names.
     explicit: []const []const u8,
