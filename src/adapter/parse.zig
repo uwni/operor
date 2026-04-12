@@ -18,6 +18,7 @@ const AdapterDoc = struct {
 const CommandDoc = struct {
     write: []const u8,
     read: ?[]const u8 = null,
+    description: ?[]const u8 = null,
 };
 
 /// Parses a adapter document from an already-open directory.
@@ -32,7 +33,7 @@ pub fn parseAdapterInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_nam
     var it = parsed.commands.iterator();
     while (it.next()) |entry| {
         const cmd_doc = entry.value_ptr.*;
-        const cmd = try types.Command.parse(alloc, cmd_doc.write, cmd_doc.read);
+        const cmd = try types.Command.parse(alloc, cmd_doc.write, cmd_doc.read, cmd_doc.description);
         try commands.put(entry.key_ptr.*, cmd);
     }
 

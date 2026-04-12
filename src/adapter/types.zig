@@ -60,6 +60,8 @@ pub const Encoding = enum {
 
 /// Parsed command entry from a adapter document.
 pub const Command = struct {
+    /// Optional human-readable description of the command.
+    description: ?[]const u8 = null,
     /// Expected response encoding when the command reads back data.
     response: ?Encoding,
     /// Pre-parsed write template ready for precompilation.
@@ -70,11 +72,13 @@ pub const Command = struct {
         allocator: std.mem.Allocator,
         write_template: []const u8,
         read_value: ?[]const u8,
+        description_value: ?[]const u8,
     ) !Command {
         const parsed_template = try template.parseTemplate(allocator, write_template);
         defer allocator.free(parsed_template);
 
         return .{
+            .description = if (description_value) |d| try allocator.dupe(u8, d) else null,
             .response = try Encoding.resolveFromReadSpec(read_value),
             .template = try cloneTemplateSegments(allocator, parsed_template),
         };
@@ -83,6 +87,7 @@ pub const Command = struct {
     /// Duplicates the parsed template into allocator-owned memory.
     pub fn clone(self: Command, allocator: std.mem.Allocator) !Command {
         return .{
+            .description = if (self.description) |d| try allocator.dupe(u8, d) else null,
             .response = self.response,
             .template = try cloneTemplateSegments(allocator, self.template),
         };
@@ -90,6 +95,7 @@ pub const Command = struct {
 
     /// Releases a command template previously allocated by `parse` or `clone`.
     pub fn deinit(self: Command, allocator: std.mem.Allocator) void {
+        if (self.description) |d| allocator.free(d);
         template.freeSegments(allocator, self.template);
     }
 
@@ -150,7 +156,7 @@ pub const Command = struct {
 test "adapter command clones and reports placeholders" {
     const gpa = std.testing.allocator;
 
-    const parsed = try Command.parse(gpa, "VOLT {voltage},(@{channels})", null);
+    const parsed = try Command.parse(gpa, "VOLT {voltage},(@{channels})", null, null);
     defer parsed.deinit(gpa);
 
     const cloned = try parsed.clone(gpa);

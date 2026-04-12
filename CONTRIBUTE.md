@@ -23,14 +23,14 @@ zig build test
 ```
 
 ## TODO
-- [x] Fantasy command line output
-- [] User mannual or documentation
-- [] Official website
+- [x] Fancy command line output
+- [ ] User mannual or documentation
+- [ ] Official website
 - [x] `repl list` shows the connecting status.
 - [x] Allow `repl` to connect multiple devices simultiniously
-- [] Allow `repl` to mount adapters, so that users can call `psu.set_voltage(1.0)`
-- [] Add a `description` field to adapter command schema
-- [] Change `recipe.step` schema from 
+- [ ] Allow `repl` to mount adapters, so that users can call `psu.set_voltage(1.0)` 
+- [x] Add a `description` field to adapter command schema
+- [ ] Change `recipe.step` schema from 
   ```yaml
   call: set
           instrument: d1
@@ -39,4 +39,4 @@ zig build test
   ```yaml
   call: d1.set
   ```
-- [] Allow `repl` to set instrument environment config (termination, etc.)
+- [ ] Allow `repl` to set instrument environment config (termination, etc.)

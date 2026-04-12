@@ -1101,7 +1101,7 @@ test "precompile validates command arguments" {
 test "precompiled command renders via helper" {
     const gpa = std.testing.allocator;
 
-    const source = try Adapter.Command.parse(gpa, "VOLT {voltage}", null);
+    const source = try Adapter.Command.parse(gpa, "VOLT {voltage}", null, null);
     defer source.deinit(gpa);
 
     var instrument = types.PrecompiledInstrument{
@@ -1135,7 +1135,7 @@ test "precompiled command renders via helper" {
 test "precompiled command render falls back to heap when suffix leaves too little stack space" {
     const gpa = std.testing.allocator;
 
-    const source = try Adapter.Command.parse(gpa, "VOLT {voltage}", null);
+    const source = try Adapter.Command.parse(gpa, "VOLT {voltage}", null, null);
     defer source.deinit(gpa);
 
     var instrument = types.PrecompiledInstrument{
