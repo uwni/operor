@@ -7,8 +7,7 @@ pipeline:
 tasks:
   - while: true
     steps:
-      - call: set
-        instrument: d1
+      - call: d1.set
         args:
           voltage: "5"
 stop_when: "$ELAPSED_MS >= 2000 || $ITER >= 3"

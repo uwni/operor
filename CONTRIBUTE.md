@@ -30,7 +30,7 @@ zig build test
 - [x] Allow `repl` to connect multiple devices simultiniously
 - [ ] Allow `repl` to mount adapters, so that users can call `psu.set_voltage(1.0)` 
 - [x] Add a `description` field to adapter command schema
-- [ ] Change `recipe.step` schema from 
+- [x] Change `recipe.step` schema from 
   ```yaml
   call: set
           instrument: d1

@@ -156,8 +156,7 @@ test "preview output" {
         \\  record: all
         \\tasks:
         \\  - steps:
-        \\      - call: set_voltage
-        \\        instrument: d1
+        \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: 5
         \\          channels:

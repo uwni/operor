@@ -172,8 +172,7 @@ test "executor execute dry run" {
         \\  record: all
         \\tasks:
         \\  - steps:
-        \\      - call: set_voltage
-        \\        instrument: d1
+        \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: 5
         \\          channels:
@@ -222,8 +221,7 @@ test "executor pipeline creates csv frame sink during dry run" {
         \\  record: all
         \\tasks:
         \\  - steps:
-        \\      - call: set_voltage
-        \\        instrument: d1
+        \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: 5
         \\          channels:

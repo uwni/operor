@@ -284,12 +284,16 @@ fn precompileCallStep(
     step_idx: usize,
     diag_ctx: *diagnostic.DiagnosticContext,
 ) !types.Step {
-    const instrument_name = cfg.instrument;
+    const dot_pos = std.mem.indexOfScalar(u8, cfg.call, '.') orelse return error.InvalidCallFormat;
+    const instrument_name = cfg.call[0..dot_pos];
+    const command_name = cfg.call[dot_pos + 1 ..];
+    if (instrument_name.len == 0 or command_name.len == 0) return error.InvalidCallFormat;
+
     diag_ctx.* = .{
         .task_idx = task_idx,
         .step_idx = step_idx,
         .instrument_name = instrument_name,
-        .command_name = cfg.call,
+        .command_name = command_name,
     };
 
     const if_expr = try precompileIf(arena_alloc, vars, cfg.@"if");
@@ -298,9 +302,9 @@ fn precompileCallStep(
 
     diag_ctx.adapter_name = precompiled_instrument.adapter_name;
     const loaded_adapter = loaded_adapters.getPtr(precompiled_instrument.adapter_name).?;
-    const command = try getOrCompileCommand(arena_alloc, precompiled_instrument, loaded_adapter, cfg.call);
+    const command = try getOrCompileCommand(arena_alloc, precompiled_instrument, loaded_adapter, command_name);
 
-    const call_copy = try arena_alloc.dupe(u8, cfg.call);
+    const call_copy = try arena_alloc.dupe(u8, command_name);
     const instrument_copy = try arena_alloc.dupe(u8, instrument_name);
     const compiled_args = try compileStepArgs(arena_alloc, command, cfg.args, vars, diag_ctx);
 
@@ -639,8 +643,7 @@ test "load recipe and adapters" {
         \\  voltage: 0
         \\tasks:
         \\  - steps:
-        \\      - call: set
-        \\        instrument: d1
+        \\      - call: d1.set
         \\        args:
         \\          voltage: "5"
     );
@@ -708,8 +711,7 @@ test "parse durations and stop conditions" {
         \\  record: all
         \\tasks:
         \\  - steps:
-        \\      - call: set
-        \\        instrument: d1
+        \\      - call: d1.set
         \\        args:
         \\          voltage: "5"
         \\stop_when: "$ELAPSED_MS >= 2000 || $ITER >= 3"
@@ -813,12 +815,10 @@ test "precompile estimates iterations for run-once recipes" {
         \\vars: {}
         \\tasks:
         \\  - steps:
-        \\      - call: set
-        \\        instrument: d1
+        \\      - call: d1.set
         \\        args: {}
         \\  - steps:
-        \\      - call: set
-        \\        instrument: d1
+        \\      - call: d1.set
         \\        args: {}
     );
 
@@ -860,8 +860,7 @@ test "precompile preserves typed literal step arguments" {
         \\  target: mir
         \\tasks:
         \\  - steps:
-        \\      - call: configure
-        \\        instrument: d1
+        \\      - call: d1.configure
         \\        args:
         \\          count: 5
         \\          voltage: 1.25
@@ -990,8 +989,7 @@ test "precompile stores only referenced commands" {
         \\vars: {}
         \\tasks:
         \\  - steps:
-        \\      - call: set_voltage
-        \\        instrument: d1
+        \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: "1.0"
     );
@@ -1030,8 +1028,7 @@ test "precompile rejects missing instrument references" {
         \\vars: {}
         \\tasks:
         \\  - steps:
-        \\      - call: set_voltage
-        \\        instrument: missing
+        \\      - call: missing.set_voltage
         \\        args:
         \\          voltage: "1.0"
     );
@@ -1063,8 +1060,7 @@ test "precompile validates command arguments" {
         \\  record: all
         \\tasks:
         \\  - steps:
-        \\      - call: set_voltage
-        \\        instrument: d1
+        \\      - call: d1.set_voltage
     );
     try workspace.writeFile("recipes/unexpected_argument.yaml",
         \\instruments:
@@ -1075,8 +1071,7 @@ test "precompile validates command arguments" {
         \\  record: all
         \\tasks:
         \\  - steps:
-        \\      - call: set_voltage
-        \\        instrument: d1
+        \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: "1.0"
         \\          channels:
@@ -1178,8 +1173,7 @@ test "precompile diagnostic includes step context" {
         \\  record: all
         \\tasks:
         \\  - steps:
-        \\      - call: missing
-        \\        instrument: d1
+        \\      - call: d1.missing
         \\        args:
         \\          voltage: "1.0"
     );
@@ -1231,8 +1225,7 @@ test "precompile compute step" {
         \\  doubled: 0
         \\tasks:
         \\  - steps:
-        \\      - call: set_voltage
-        \\        instrument: d1
+        \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: "5"
         \\          channels: "1"
@@ -1318,8 +1311,7 @@ test "precompile step with if guard" {
         \\  power: 0
         \\tasks:
         \\  - steps:
-        \\      - call: set_voltage
-        \\        instrument: d1
+        \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: "5"
         \\          channels: "1"
@@ -1392,8 +1384,7 @@ test "precompile rejects record with unknown save_as variable" {
         \\  nonexistent: 0
         \\tasks:
         \\  - steps:
-        \\      - call: set_voltage
-        \\        instrument: d1
+        \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: "1.0"
         \\          channels:
@@ -1433,8 +1424,7 @@ test "precompile accepts valid record subset" {
         \\  doubled: 0
         \\tasks:
         \\  - steps:
-        \\      - call: set_voltage
-        \\        instrument: d1
+        \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: "1.0"
         \\          channels:
@@ -1479,8 +1469,7 @@ test "precompile diagnostic for missing pipeline" {
         \\    resource: USB0::1::INSTR
         \\tasks:
         \\  - steps:
-        \\      - call: set_voltage
-        \\        instrument: d1
+        \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: 1.0
         \\          channels:
@@ -1527,8 +1516,7 @@ test "precompile diagnostic for missing record" {
         \\pipeline: {}
         \\tasks:
         \\  - steps:
-        \\      - call: set_voltage
-        \\        instrument: d1
+        \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: 1.0
         \\          channels:
@@ -1579,8 +1567,7 @@ test "precompile expands record all into explicit save_as list" {
         \\  doubled: 0
         \\tasks:
         \\  - steps:
-        \\      - call: set_voltage
-        \\        instrument: d1
+        \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: 5
         \\          channels:
@@ -1635,8 +1622,7 @@ test "precompile rejects undeclared variable use" {
         \\  voltage: 1
         \\tasks:
         \\  - steps:
-        \\      - call: set
-        \\        instrument: d1
+        \\      - call: d1.set
         \\        args:
         \\          voltage: "5"
         \\        save_as: undeclared_var
@@ -1736,8 +1722,7 @@ test "precompile sequential task" {
         \\  voltage: 0
         \\tasks:
         \\  - steps:
-        \\      - call: set
-        \\        instrument: d1
+        \\      - call: d1.set
         \\        args:
         \\          voltage: "5"
     );
@@ -1782,8 +1767,7 @@ test "precompile loop task with while" {
         \\tasks:
         \\  - while: "$ITER < 10"
         \\    steps:
-        \\      - call: set
-        \\        instrument: d1
+        \\      - call: d1.set
         \\        args:
         \\          voltage: "5"
     );
@@ -1828,8 +1812,7 @@ test "precompile conditional task with if" {
         \\tasks:
         \\  - if: "${voltage} > 0"
         \\    steps:
-        \\      - call: set
-        \\        instrument: d1
+        \\      - call: d1.set
         \\        args:
         \\          voltage: "5"
     );

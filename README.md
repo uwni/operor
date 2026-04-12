@@ -153,18 +153,17 @@ pipeline:
 
 tasks:
     - while: true
-        steps:
-            - call: set_voltage
-                instrument: psu
-                args:
-                    voltage: "${target_voltage}"
-                    channels: [1, 2]
-            - call: measure_voltage
-                instrument: psu
-                save_as: measured_voltage
-            - compute: "${measured_voltage} - ${target_voltage}"
-                save_as: delta
-                if: "$ITER > 0"
+      steps:
+        - call: psu.set_voltage
+          args:
+              voltage: "${target_voltage}"
+              channels: [1, 2]
+        - call: measure_voltage
+          instrument: psu
+          save_as: measured_voltage
+        - compute: "${measured_voltage} - ${target_voltage}"
+          save_as: delta
+          if: "$ITER > 0"
 
 stop_when: "$ELAPSED_MS >= 2000 || $ITER >= 20"
 ```

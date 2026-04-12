@@ -72,10 +72,8 @@ pub const StepConfig = union(enum) {
 };
 
 pub const CallStepConfig = struct {
-    /// Instrument command name.
+    /// Qualified command reference in `instrument.command` format.
     call: []const u8,
-    /// Target instrument name.
-    instrument: []const u8,
     /// Arguments forwarded to the adapter command template.
     args: ?std.StringHashMap(ArgValueDoc) = null,
     /// Context key that receives the step result (response or computed value).
