@@ -32,12 +32,38 @@ pub const Error = error{
     ResourceNotFound,
 };
 
+/// Fixed-size termination character buffer (up to 4 bytes, e.g. "\r\n").
+pub const Termination = struct {
+    pub const max_len = 4;
+
+    buf: [max_len]u8 = undefined,
+    len: usize = 0,
+
+    pub fn constSlice(self: *const Termination) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    pub fn fromSlice(s: []const u8) Termination {
+        var t: Termination = .{};
+        const n = @min(s.len, max_len);
+        @memcpy(t.buf[0..n], s[0..n]);
+        t.len = n;
+        return t;
+    }
+
+    pub fn append(self: *Termination, byte: u8) error{Overflow}!void {
+        if (self.len >= max_len) return error.Overflow;
+        self.buf[self.len] = byte;
+        self.len += 1;
+    }
+};
+
 /// High-level session configuration applied when opening an instrument.
 pub const InstrumentOptions = struct {
     /// Per-operation timeout in milliseconds. Null leaves the backend default unchanged.
     timeout_ms: ?u32 = null,
     /// Response suffix removed from owned reads when present.
-    read_termination: []const u8 = "",
+    read_termination: Termination = .{},
     /// Delay inserted between a write and the following read in query flows.
     query_delay_ms: u32 = 0,
     /// Size of the temporary chunk buffer used when reading owned responses.

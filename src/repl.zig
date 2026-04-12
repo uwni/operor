@@ -41,6 +41,39 @@ const Command = union(enum) {
     read: ?[]const u8,
     write: TargetedPayload,
     query: TargetedPayload,
+    set: TargetedPayload,
+};
+
+/// Configurable instrument settings exposed by the `set` command.
+const Setting = enum {
+    timeout_ms,
+    read_termination,
+    write_termination,
+    query_delay_ms,
+    chunk_size,
+
+    const map = std.StaticStringMap(Setting).initComptime(.{
+        .{ "timeout_ms", .timeout_ms },
+        .{ "read_termination", .read_termination },
+        .{ "write_termination", .write_termination },
+        .{ "query_delay_ms", .query_delay_ms },
+        .{ "chunk_size", .chunk_size },
+    });
+
+    fn parse(key: []const u8) ?Setting {
+        return map.get(key);
+    }
+};
+
+const Termination = visa.Termination;
+
+/// Tagged value for a parsed `set` command, ready for application.
+const SettingValue = union(Setting) {
+    timeout_ms: u32,
+    read_termination: Termination,
+    write_termination: Termination,
+    query_delay_ms: u32,
+    chunk_size: usize,
 };
 
 /// User-facing parse errors for REPL input.
@@ -90,6 +123,8 @@ const NamedConnection = struct {
     name: []u8,
     addr: []u8,
     instrument: visa.Instrument,
+    /// Write termination override. Null means no termination.
+    write_termination: ?Termination = null,
 };
 
 /// Production REPL context wrapping a VISA resource manager and multiple instruments.
@@ -189,7 +224,16 @@ const ReplContext = struct {
     }
 
     fn writeAt(self: *ReplContext, idx: usize, payload: []const u8) !void {
-        return self.connections.items[idx].instrument.write(payload);
+        var conn = &self.connections.items[idx];
+        if (conn.write_termination) |wt| {
+            const suffix = wt.constSlice();
+            const full = try self.allocator.alloc(u8, payload.len + suffix.len);
+            defer self.allocator.free(full);
+            @memcpy(full[0..payload.len], payload);
+            @memcpy(full[payload.len..][0..suffix.len], suffix);
+            return conn.instrument.write(full);
+        }
+        return conn.instrument.write(payload);
     }
 
     fn readAt(self: *ReplContext, allocator: std.mem.Allocator, idx: usize) ![]u8 {
@@ -197,7 +241,26 @@ const ReplContext = struct {
     }
 
     fn queryAt(self: *ReplContext, allocator: std.mem.Allocator, idx: usize, payload: []const u8) ![]u8 {
-        return self.connections.items[idx].instrument.queryToOwned(allocator, payload);
+        try self.writeAt(idx, payload);
+        self.connections.items[idx].instrument.waitQueryDelay();
+        return self.readAt(allocator, idx);
+    }
+
+    fn applyOption(self: *ReplContext, _: std.mem.Allocator, idx: usize, sv: SettingValue) !void {
+        var conn = &self.connections.items[idx];
+        switch (sv) {
+            .timeout_ms => |v| {
+                conn.instrument.options.timeout_ms = v;
+                try conn.instrument.applyOptions();
+            },
+            .read_termination => |v| {
+                conn.instrument.options.read_termination = v;
+                try conn.instrument.applyOptions();
+            },
+            .write_termination => |v| conn.write_termination = v,
+            .query_delay_ms => |v| conn.instrument.options.query_delay_ms = v,
+            .chunk_size => |v| conn.instrument.options.chunk_size = v,
+        }
     }
 };
 
@@ -496,6 +559,7 @@ fn executeCommand(
         .write => |w| try handleWrite(ctx, w.target, w.payload, out),
         .read => |target| try handleRead(allocator, ctx, target, out),
         .query => |q| try handleQuery(allocator, ctx, q.target, q.payload, out),
+        .set => |s| try handleSet(allocator, ctx, s.target, s.payload, out),
     }
     return true;
 }
@@ -637,6 +701,75 @@ fn handleQuery(allocator: std.mem.Allocator, ctx: anytype, target: ?[]const u8, 
     try printResponse(out, response);
 }
 
+fn handleSet(allocator: std.mem.Allocator, ctx: anytype, target: ?[]const u8, payload: []const u8, out: *std.Io.Writer) !void {
+    const idx = try resolveTarget(ctx, target, out) orelse return;
+    const space = std.mem.indexOfAny(u8, payload, repl_whitespace) orelse {
+        try out.writeAll(err_label ++ " usage: set <key> <value>\n");
+        return;
+    };
+    const key = payload[0..space];
+    const raw_value = std.mem.trimLeft(u8, payload[space..], repl_whitespace);
+    if (raw_value.len == 0) {
+        try out.writeAll(err_label ++ " usage: set <key> <value>\n");
+        return;
+    }
+    const setting = Setting.parse(key) orelse {
+        try out.print(err_label ++ " unknown setting '{s}'\n", .{key});
+        return;
+    };
+    const sv: SettingValue = switch (setting) {
+        .timeout_ms => .{ .timeout_ms = std.fmt.parseInt(u32, raw_value, 10) catch {
+            try out.print(err_label ++ " invalid integer '{s}'\n", .{raw_value});
+            return;
+        } },
+        .query_delay_ms => .{ .query_delay_ms = std.fmt.parseInt(u32, raw_value, 10) catch {
+            try out.print(err_label ++ " invalid integer '{s}'\n", .{raw_value});
+            return;
+        } },
+        .chunk_size => .{ .chunk_size = std.fmt.parseInt(usize, raw_value, 10) catch {
+            try out.print(err_label ++ " invalid integer '{s}'\n", .{raw_value});
+            return;
+        } },
+        .read_termination, .write_termination => blk: {
+            const t = unescape(raw_value) catch |err| {
+                const msg = switch (err) {
+                    error.InvalidEscape => "invalid escape sequence",
+                    error.Overflow => "termination too long (max 4 bytes)",
+                };
+                try out.print(err_label ++ " {s}: '{s}'\n", .{ msg, raw_value });
+                return;
+            };
+            break :blk if (setting == .read_termination)
+                .{ .read_termination = t }
+            else
+                .{ .write_termination = t };
+        },
+    };
+    try ctx.applyOption(allocator, idx, sv);
+    try out.writeAll("ok\n");
+}
+
+fn unescape(input: []const u8) error{ InvalidEscape, Overflow }!Termination {
+    var out: Termination = .{};
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] == '\\' and i + 1 < input.len) {
+            out.append(switch (input[i + 1]) {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '\\' => '\\',
+                else => return error.InvalidEscape,
+            }) catch return error.Overflow;
+            i += 2;
+        } else {
+            out.append(input[i]) catch return error.Overflow;
+            i += 1;
+        }
+    }
+    return out;
+}
+
 /// Handles the `list` command: shows all resources without numbering.
 /// Connected resources display their name; selected one is highlighted.
 fn handleList(allocator: std.mem.Allocator, ctx: anytype, out: *std.Io.Writer) !void {
@@ -723,6 +856,10 @@ fn parseCommand(line: []const u8) ParseError!Command {
             if (rest.len == 0) return error.MissingCommandPayload;
             return .{ .query = .{ .target = name, .payload = rest } };
         }
+        if (std.mem.eql(u8, verb, "set")) {
+            if (rest.len == 0) return error.MissingCommandPayload;
+            return .{ .set = .{ .target = name, .payload = rest } };
+        }
         return error.UnknownCommand;
     }
 
@@ -744,6 +881,10 @@ fn parseCommand(line: []const u8) ParseError!Command {
         if (rest.len == 0) return error.MissingCommandPayload;
         return .{ .query = .{ .target = null, .payload = rest } };
     }
+    if (std.mem.eql(u8, first_token, "set")) {
+        if (rest.len == 0) return error.MissingCommandPayload;
+        return .{ .set = .{ .target = null, .payload = rest } };
+    }
     if (std.mem.eql(u8, first_token, "open")) {
         return parseOpenArgs(rest);
     }
@@ -761,7 +902,7 @@ fn parseOpenArgs(args: []const u8) Command {
     return .{ .open = .{ .addr = args, .name = null } };
 }
 
-const reserved_names = [_][]const u8{ "help", "quit", "list", "open", "close", "select", "read", "write", "query" };
+const reserved_names = [_][]const u8{ "help", "quit", "list", "open", "close", "select", "read", "write", "query", "set" };
 
 fn isValidName(name: []const u8) bool {
     if (name.len == 0) return false;
@@ -792,6 +933,7 @@ fn printHelp(out: *std.Io.Writer, current_state: State) !void {
             \\  <name>.write <cmd> Send a command to a named instrument.
             \\  <name>.read        Read a response from a named instrument.
             \\  <name>.query <cmd> Send a command and read the response.
+            \\  <name>.set <k> <v> Set an instrument option (e.g. write_termination \n).
             \\  select <name>      Select an instrument for direct commands.
             \\  list               List current connections.
             \\  open [<addr>]      Connect to another instrument.
@@ -805,9 +947,11 @@ fn printHelp(out: *std.Io.Writer, current_state: State) !void {
             \\  write <command>    Send a command to the selected instrument.
             \\  read               Read a response from the selected instrument.
             \\  query <command>    Send a command and read the response.
+            \\  set <key> <value>  Set an instrument option (e.g. write_termination \n).
             \\  <name>.write <cmd> Send a command to a named instrument.
             \\  <name>.read        Read a response from a named instrument.
             \\  <name>.query <cmd> Send a command and read the response.
+            \\  <name>.set <k> <v> Set an instrument option on a named instrument.
             \\  select [<name>]    Switch or deselect the active instrument.
             \\  list               List current connections.
             \\  open [<addr>]      Connect to another instrument.
@@ -855,6 +999,7 @@ const MockContext = struct {
 
     allocator: std.mem.Allocator,
     writes: std.ArrayList(RecordedWrite) = .empty,
+    applied_settings: std.ArrayList(SettingValue) = .empty,
     responses: []const []const u8,
     read_index: usize = 0,
     mock_resources: []const []const u8 = &.{},
@@ -875,6 +1020,7 @@ const MockContext = struct {
             self.allocator.free(item.payload);
         }
         self.writes.deinit(self.allocator);
+        self.applied_settings.deinit(self.allocator);
         for (self.connections.items) |conn| {
             self.allocator.free(conn.name);
             self.allocator.free(conn.addr);
@@ -974,6 +1120,10 @@ const MockContext = struct {
     fn queryAt(self: *MockContext, allocator: std.mem.Allocator, idx: usize, payload: []const u8) ![]u8 {
         try self.writeAt(idx, payload);
         return self.readAt(allocator, idx);
+    }
+
+    fn applyOption(self: *MockContext, _: std.mem.Allocator, _: usize, sv: SettingValue) !void {
+        try self.applied_settings.append(self.allocator, sv);
     }
 };
 
@@ -1298,4 +1448,145 @@ test "repl name validation" {
     try std.testing.expect(!isValidName("open"));
     try std.testing.expect(!isValidName("close"));
     try std.testing.expect(!isValidName("select"));
+    try std.testing.expect(!isValidName("set"));
+}
+
+test "parse set commands" {
+    // set (no target).
+    const set_cmd = try parseCommand("set timeout_ms 5000");
+    try std.testing.expect(switch (set_cmd) {
+        .set => |s| s.target == null and std.mem.eql(u8, s.payload, "timeout_ms 5000"),
+        else => false,
+    });
+
+    // targeted set (name.set).
+    const ts = try parseCommand("dmm.set write_termination \\n");
+    try std.testing.expect(switch (ts) {
+        .set => |s| if (s.target) |t| std.mem.eql(u8, t, "dmm") and std.mem.eql(u8, s.payload, "write_termination \\n") else false,
+        else => false,
+    });
+
+    // set requires payload.
+    try std.testing.expectError(error.MissingCommandPayload, parseCommand("set"));
+    try std.testing.expectError(error.MissingCommandPayload, parseCommand("dmm.set"));
+}
+
+test "repl set applies options" {
+    const gpa = std.testing.allocator;
+    const input =
+        \\open USB0::INSTR as dmm
+        \\set timeout_ms 5000
+        \\set query_delay_ms 100
+        \\set chunk_size 2048
+        \\set write_termination \n
+        \\set read_termination \r\n
+        \\quit
+        \\
+    ;
+
+    var reader = std.Io.Reader.fixed(input);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    var ctx: MockContext = .init(gpa, &.{});
+    defer ctx.deinit();
+
+    try runLoop(gpa, &reader, &out.writer, &ctx, null);
+
+    const output = out.written();
+    // All five set commands should succeed.
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 5, "ok\n"));
+    // Verify applied settings.
+    try std.testing.expectEqual(@as(usize, 5), ctx.applied_settings.items.len);
+    try std.testing.expectEqual(@as(u32, 5000), ctx.applied_settings.items[0].timeout_ms);
+    try std.testing.expectEqual(@as(u32, 100), ctx.applied_settings.items[1].query_delay_ms);
+    try std.testing.expectEqual(@as(usize, 2048), ctx.applied_settings.items[2].chunk_size);
+    try std.testing.expectEqualStrings("\n", ctx.applied_settings.items[3].write_termination.constSlice());
+    try std.testing.expectEqualStrings("\r\n", ctx.applied_settings.items[4].read_termination.constSlice());
+}
+
+test "repl targeted set with name.set" {
+    const gpa = std.testing.allocator;
+    const input =
+        \\open USB0::INSTR as dmm
+        \\open TCPIP0::INSTR as psu
+        \\select psu
+        \\dmm.set timeout_ms 3000
+        \\quit
+        \\
+    ;
+
+    var reader = std.Io.Reader.fixed(input);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    var ctx: MockContext = .init(gpa, &.{});
+    defer ctx.deinit();
+
+    try runLoop(gpa, &reader, &out.writer, &ctx, null);
+
+    const output = out.written();
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "ok\n"));
+    try std.testing.expectEqual(@as(usize, 1), ctx.applied_settings.items.len);
+    try std.testing.expectEqual(@as(u32, 3000), ctx.applied_settings.items[0].timeout_ms);
+}
+
+test "repl set rejects unknown key" {
+    const gpa = std.testing.allocator;
+    const input =
+        \\open USB0::INSTR as dmm
+        \\set baud_rate 9600
+        \\quit
+        \\
+    ;
+
+    var reader = std.Io.Reader.fixed(input);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    var ctx: MockContext = .init(gpa, &.{});
+    defer ctx.deinit();
+
+    try runLoop(gpa, &reader, &out.writer, &ctx, null);
+
+    const output = out.written();
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "unknown setting"));
+    try std.testing.expectEqual(@as(usize, 0), ctx.applied_settings.items.len);
+}
+
+test "repl set rejects invalid integer" {
+    const gpa = std.testing.allocator;
+    const input =
+        \\open USB0::INSTR as dmm
+        \\set timeout_ms abc
+        \\quit
+        \\
+    ;
+
+    var reader = std.Io.Reader.fixed(input);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    var ctx: MockContext = .init(gpa, &.{});
+    defer ctx.deinit();
+
+    try runLoop(gpa, &reader, &out.writer, &ctx, null);
+
+    const output = out.written();
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "invalid integer"));
+    try std.testing.expectEqual(@as(usize, 0), ctx.applied_settings.items.len);
+}
+
+test "unescape termination literals" {
+    const newline = try unescape("\\n");
+    try std.testing.expectEqualStrings("\n", newline.constSlice());
+
+    const crlf = try unescape("\\r\\n");
+    try std.testing.expectEqualStrings("\r\n", crlf.constSlice());
+
+    const backslash = try unescape("\\\\");
+    try std.testing.expectEqualStrings("\\", backslash.constSlice());
+
+    try std.testing.expectError(error.InvalidEscape, unescape("\\x"));
+    try std.testing.expectError(error.Overflow, unescape("abcde"));
 }

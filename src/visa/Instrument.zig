@@ -136,7 +136,7 @@ fn readToOwnedWithChunk(self: *Instrument, allocator: std.mem.Allocator, chunk_b
         }
     }
 
-    trimReadTermination(&out, self.options.read_termination);
+    trimReadTermination(&out, self.options.read_termination.constSlice());
     return out.toOwnedSlice(allocator);
 }
 
@@ -160,7 +160,7 @@ pub fn queryRaw(self: *Instrument, command: []const u8, buffer: []u8) common.Err
     return self.read(buffer);
 }
 
-fn applyOptions(self: *Instrument) common.Error!void {
+pub fn applyOptions(self: *Instrument) common.Error!void {
     if (self.options.timeout_ms) |timeout_ms| {
         try self.setAttribute(c.VI_ATTR_TMO_VALUE, @as(ViAttrState, @intCast(timeout_ms)));
     }
@@ -168,7 +168,7 @@ fn applyOptions(self: *Instrument) common.Error!void {
 }
 
 fn applyReadTermination(self: *Instrument) common.Error!void {
-    const read_termination = self.options.read_termination;
+    const read_termination = self.options.read_termination.constSlice();
     if (read_termination.len == 0) {
         return self.setAttribute(c.VI_ATTR_TERMCHAR_EN, 0);
     }

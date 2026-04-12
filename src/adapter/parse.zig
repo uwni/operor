@@ -49,7 +49,7 @@ pub fn parseAdapterInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_nam
         .write_termination = write_termination,
         .options = .{
             .timeout_ms = inst.timeout_ms,
-            .read_termination = inst.read_termination orelse "",
+            .read_termination = visa.Termination.fromSlice(inst.read_termination orelse ""),
             .query_delay_ms = inst.query_delay_ms orelse 0,
             .chunk_size = inst.chunk_size orelse visa.default_chunk_size,
         },
@@ -209,7 +209,7 @@ test "parse adapter instrument options" {
     defer adapter.deinit();
 
     try std.testing.expectEqual(@as(?u32, 2500), adapter.options.timeout_ms);
-    try std.testing.expectEqualStrings("\n", adapter.options.read_termination);
+    try std.testing.expectEqualStrings("\n", adapter.options.read_termination.constSlice());
     try std.testing.expectEqualStrings("\r\n", adapter.write_termination);
     try std.testing.expectEqual(@as(u32, 25), adapter.options.query_delay_ms);
     try std.testing.expectEqual(@as(usize, 4096), adapter.options.chunk_size);

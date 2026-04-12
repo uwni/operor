@@ -12,6 +12,8 @@ pub const c = common.c;
 pub const Error = common.Error;
 /// Re-exported instrument session option set.
 pub const InstrumentOptions = common.InstrumentOptions;
+/// Re-exported fixed-size termination buffer type.
+pub const Termination = common.Termination;
 /// Re-exported VISA session handle type.
 pub const ViSession = common.ViSession;
 /// Re-exported VISA status code type.

@@ -153,7 +153,7 @@ fn precompileInstruments(
             .write_termination = write_termination,
             .options = .{
                 .timeout_ms = adapter.options.timeout_ms,
-                .read_termination = try cloneOptionalBytes(alloc, adapter.options.read_termination),
+                .read_termination = adapter.options.read_termination,
                 .query_delay_ms = adapter.options.query_delay_ms,
                 .chunk_size = adapter.options.chunk_size,
             },
