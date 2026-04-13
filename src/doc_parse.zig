@@ -34,6 +34,7 @@ pub fn parseFilePath(comptime T: type, allocator: std.mem.Allocator, path: []con
     const format = detectFormat(path) orelse return error.UnsupportedFormat;
 
     const content = try std.fs.cwd().readFileAlloc(allocator, path, max_bytes);
+    defer allocator.free(content);
 
     return parseByFormat(T, format, allocator, content);
 }
@@ -44,6 +45,7 @@ pub fn parseFileInDir(comptime T: type, allocator: std.mem.Allocator, dir: std.f
     const format = detectFormat(file_name) orelse return error.UnsupportedFormat;
 
     const content = try dir.readFileAlloc(allocator, file_name, max_bytes);
+    defer allocator.free(content);
 
     return parseByFormat(T, format, allocator, content);
 }

@@ -59,6 +59,7 @@ fn checkInstrumentStatus(self: *const Instrument) common.Error!void {
 }
 
 /// Returns the raw VISA status reported by the most recent instrument call.
+/// TODO: give a semantic meaning enum instead of raw status?
 pub fn lastStatus(self: *const Instrument) ViStatus {
     return self.status;
 }
