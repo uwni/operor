@@ -11,7 +11,7 @@ const visa = @import("../visa/root.zig");
 
 const max_recipe_size: usize = 512 * 1024;
 
-const VarsMap = std.StringArrayHashMap(config.ArgValueDoc);
+const SlotTable = std.StringArrayHashMap(void);
 
 pub fn precompilePath(
     allocator: std.mem.Allocator,
@@ -62,11 +62,7 @@ fn precompileInternal(
     var diag_ctx: diagnostic.DiagnosticContext = .{};
     errdefer if (precompile_diagnostic) |d| d.capture(diag_ctx) catch {};
 
-    const vars: VarsMap = recipe.vars orelse VarsMap.init(alloc);
-    for (vars.keys()) |name| {
-        if (expr.resolveBuiltin(name) != null) return error.BuiltinVariableConflict;
-    }
-    const initial_values = try buildInitialValues(alloc, &vars);
+    var slot_map = try buildSlotMap(alloc, recipe);
 
     // 2. Eagerly load every referenced adapter.
     var loaded_adapters = try loadAdapters(adapter_arena.allocator(), recipe, adapter_dir, &diag_ctx);
@@ -80,21 +76,20 @@ fn precompileInternal(
 
     // 3-5. Normalize tasks and steps, resolving commands and validating arguments.
     var assign_set: std.StringArrayHashMap(void) = .init(alloc);
-    const tasks = try precompileTasks(alloc, recipe, &vars, &loaded_adapters, &precompiled_instruments, &assign_set, &diag_ctx);
+    const tasks = try precompileTasks(alloc, recipe, &slot_map, &loaded_adapters, &precompiled_instruments, &assign_set, &diag_ctx);
 
     // 6. Validate and resolve pipeline record configuration.
     diag_ctx = .{};
-    const pipeline = try resolvePipelineConfig(alloc, recipe, &vars, &assign_set);
+    const pipeline = try resolvePipelineConfig(alloc, recipe, &slot_map, &assign_set);
 
     // 7. Assign save_column indices to steps that contribute to recorded frames.
-    assignSaveColumns(tasks, &vars, pipeline.record.?.explicit);
+    assignSaveColumns(tasks, &slot_map, pipeline.record.?.explicit);
 
     // 8. Parse optional stop_when expression.
-    const stop_when: ?expr.Expression = if (recipe.stop_when) |src| blk: {
-        var e = try expr.parse(alloc, src.source());
-        try e.bindVariables(&vars);
-        break :blk e;
-    } else null;
+    const stop_when: ?expr.Expression = if (recipe.stop_when) |src|
+        try slot_map.compileExpr(src.source())
+    else
+        null;
 
     return .{
         .arena = arena,
@@ -103,7 +98,198 @@ fn precompileInternal(
         .pipeline = pipeline,
         .stop_when = stop_when,
         .expected_iterations = recipe.expected_iterations,
+        .initial_values = slot_map.varInitialValues(),
+    };
+}
+
+const SlotMap = struct {
+    slots: SlotTable,
+    initial_values: []const types.Value,
+    const_count: usize,
+    alloc: std.mem.Allocator,
+
+    /// Compile an expression source string: parse, bind variables, attempt
+    /// full const evaluation, and fall back to inline + remap.
+    fn compileExpr(self: *const SlotMap, source: []const u8) !expr.Expression {
+        var e = try expr.parse(self.alloc, source);
+        try e.bindVariables(&self.slots);
+        if (self.tryConstFold(&e)) |result_op| {
+            const ops = try self.alloc.alloc(expr.Op, 1);
+            ops[0] = result_op;
+            e.ops = ops;
+        } else {
+            self.inlineAndRemap(e.ops);
+        }
+        return e;
+    }
+
+    /// Try to evaluate a bound expression fully at compile time.
+    /// Returns a single push Op when all variable references are consts.
+    fn tryConstFold(self: *const SlotMap, e: *const expr.Expression) ?expr.Op {
+        for (e.ops) |op| {
+            switch (op) {
+                .load_var, .load_list_len, .load_list_elem, .call_join => |ref| {
+                    const slot = ref.slotIndex() orelse return null;
+                    if (slot >= self.const_count) return null;
+                },
+                else => {},
+            }
+        }
+        const result = e.eval(self.constResolver(), self.alloc) catch return null;
+        defer result.deinit();
+        return switch (result.value) {
+            .int => |i| .{ .push_int = i },
+            .float => |f| .{ .push_float = f },
+            .bool => |b| .{ .push_bool = b },
+            .string => |s| .{ .push_string = self.alloc.dupe(u8, s) catch return null },
+        };
+    }
+
+    /// Inline const scalar values into ops and remap var slots.
+    fn inlineAndRemap(self: *const SlotMap, ops: []expr.Op) void {
+        for (ops) |*op| {
+            switch (op.*) {
+                .load_var => |ref| if (ref.slotIndex()) |slot| {
+                    if (slot < self.const_count) {
+                        // when try to load a const var, inline its value directly into the op and avoid any runtime lookup;
+                        op.* = switch (self.initial_values[slot]) {
+                            .int => |i| .{ .push_int = i },
+                            .float => |f| .{ .push_float = f },
+                            .bool => |b| .{ .push_bool = b },
+                            .string => |s| .{ .push_string = s },
+                            .list => .{ .push_int = 0 }, // list cannot inline to scalar; eval will error
+                        };
+                    } else {
+                        op.* = .{ .load_var = .{ .binding = .{ .slot = slot - self.const_count } } };
+                    }
+                },
+                .load_list_len => |ref| if (ref.slotIndex()) |slot| {
+                    if (slot < self.const_count) {
+                        switch (self.initial_values[slot]) {
+                            .list => |items| op.* = .{ .push_int = @intCast(items.len) },
+                            else => {}, // type error caught at eval time
+                        }
+                    } else {
+                        op.* = .{ .load_list_len = .{ .binding = .{ .slot = slot - self.const_count } } };
+                    }
+                },
+                .load_list_elem => |ref| if (ref.slotIndex()) |slot| {
+                    if (slot >= self.const_count) {
+                        op.* = .{ .load_list_elem = .{ .binding = .{ .slot = slot - self.const_count } } };
+                    }
+                    // const list: keep original slot for constResolver during full eval
+                },
+                .call_join => |ref| if (ref.slotIndex()) |slot| {
+                    if (slot >= self.const_count) {
+                        op.* = .{ .call_join = .{ .binding = .{ .slot = slot - self.const_count } } };
+                    }
+                    // const list: keep original slot for constResolver during full eval
+                },
+                else => {},
+            }
+        }
+    }
+
+    /// Look up a name and return the runtime binding (var slot remapped)
+    /// or the const value if the name refers to a const.
+    const ResolvedName = union(enum) {
+        binding: expr.VariableBinding,
+        const_value: types.Value,
+    };
+
+    fn resolveName(self: *const SlotMap, name: []const u8) ?ResolvedName {
+        if (expr.resolveBuiltin(name)) |b| return .{ .binding = b };
+        const slot = self.slots.getIndex(name) orelse return null;
+        if (slot < self.const_count) return .{ .const_value = self.initial_values[slot] };
+        return .{ .binding = .{ .slot = slot - self.const_count } };
+    }
+
+    /// Returns only the var portion of initial_values (excluding consts).
+    fn varInitialValues(self: *const SlotMap) []const types.Value {
+        return self.initial_values[self.const_count..];
+    }
+
+    /// Validate that `name` refers to a mutable var and return its remapped slot index.
+    fn varSlotIndex(self: *const SlotMap, name: []const u8) !usize {
+        const slot = self.slots.getIndex(name) orelse return error.UndeclaredVariable;
+        if (slot < self.const_count) return error.AssignToConst;
+        return slot - self.const_count;
+    }
+
+    /// Returns a compile-time resolver for const slots (using original indices).
+    /// Used by tryConstFold for full expression evaluation.
+    fn resolve(ctx_ptr: *const anyopaque, binding: expr.VariableBinding) ?expr.ResolvedValue {
+        const self: *const SlotMap = @ptrCast(@alignCast(ctx_ptr));
+        return switch (binding) {
+            .slot => |slot| {
+                // After inlineAndRemap, load_list_elem/call_join still use original slot indices
+                if (slot >= self.const_count) return null;
+                return resolveConstValue(self.initial_values[slot]);
+            },
+            .builtin => null,
+        };
+    }
+
+    fn constResolver(self: *const SlotMap) expr.VarResolver {
+        return .{ .ctx = @ptrCast(self), .resolve_fn = resolve };
+    }
+
+    fn resolveConstValue(value: types.Value) expr.ResolvedValue {
+        return switch (value) {
+            .float => |f| .{ .float = f },
+            .int => |i| .{ .int = i },
+            .bool => |b| .{ .bool = b },
+            .string => |s| .{ .string = s },
+            .list => |items| .{ .list = .{
+                .len = items.len,
+                .ctx = @ptrCast(items.ptr),
+                .at_fn = constListAt,
+            } },
+        };
+    }
+
+    fn constListAt(ctx: *const anyopaque, index: usize) ?expr.ResolvedValue {
+        const items: [*]const types.Value = @ptrCast(@alignCast(ctx));
+        return resolveConstValue(items[index]);
+    }
+};
+
+/// Validate consts/vars, build the merged slot map (consts first, then vars),
+/// compile initial values, and create the compile-time const resolver.
+fn buildSlotMap(alloc: std.mem.Allocator, recipe: *const config.RecipeConfig) !SlotMap {
+    const const_keys = if (recipe.consts) |c| c.keys() else &.{};
+    const const_vals = if (recipe.consts) |c| c.values() else &.{};
+    const var_keys = if (recipe.vars) |v| v.keys() else &.{};
+    const var_vals = if (recipe.vars) |v| v.values() else &.{};
+
+    // Validate: no name conflicts between consts, vars, and builtins.
+    for (const_keys) |name| {
+        if (expr.resolveBuiltin(name) != null) return error.BuiltinVariableConflict;
+    }
+    for (var_keys) |name| {
+        if (expr.resolveBuiltin(name) != null) return error.BuiltinVariableConflict;
+        if (recipe.consts != null and recipe.consts.?.contains(name)) return error.DuplicateVariable;
+    }
+
+    // Build initial values array: consts first, then vars.
+    const initial_values = try alloc.alloc(types.Value, const_keys.len + var_keys.len);
+    for (const_vals, 0..) |value, idx| {
+        initial_values[idx] = try compileInitialValue(alloc, value);
+    }
+    for (var_vals, 0..) |value, idx| {
+        initial_values[const_keys.len + idx] = try compileInitialValue(alloc, value);
+    }
+
+    // Build the key-only slot map: consts first, then vars.
+    var all_slots: SlotTable = .init(alloc);
+    for (const_keys) |name| try all_slots.put(name, {});
+    for (var_keys) |name| try all_slots.put(name, {});
+
+    return .{
+        .slots = all_slots,
         .initial_values = initial_values,
+        .const_count = const_keys.len,
+        .alloc = alloc,
     };
 }
 
@@ -165,7 +351,7 @@ fn precompileInstruments(
 fn precompileTasks(
     arena_alloc: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
-    vars: *const VarsMap,
+    slot_map: *const SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMap(types.PrecompiledInstrument),
     assign_set: *std.StringArrayHashMap(void),
@@ -173,22 +359,18 @@ fn precompileTasks(
 ) ![]types.Task {
     const tasks = try arena_alloc.alloc(types.Task, recipe.tasks.len);
     for (recipe.tasks, 0..) |*task_cfg, task_idx| {
-        const steps = try precompileSteps(arena_alloc, task_cfg.steps, vars, loaded_adapters, precompiled_instruments, assign_set, task_idx, diag_ctx);
+        const steps = try precompileSteps(arena_alloc, task_cfg.steps, slot_map, loaded_adapters, precompiled_instruments, assign_set, task_idx, diag_ctx);
 
         if (task_cfg.@"while") |while_src| {
             // Loop task
-            var cond_expr = try expr.parse(arena_alloc, while_src.source());
-            try cond_expr.bindVariables(vars);
             tasks[task_idx] = .{ .loop = .{
-                .condition = cond_expr,
+                .condition = try slot_map.compileExpr(while_src.source()),
                 .steps = steps,
             } };
         } else if (task_cfg.@"if") |guard_src| {
             // Conditional task
-            var guard_expr = try expr.parse(arena_alloc, guard_src.source());
-            try guard_expr.bindVariables(vars);
             tasks[task_idx] = .{ .conditional = .{
-                .@"if" = guard_expr,
+                .@"if" = try slot_map.compileExpr(guard_src.source()),
                 .steps = steps,
             } };
         } else {
@@ -204,7 +386,7 @@ fn precompileTasks(
 fn precompileSteps(
     arena_alloc: std.mem.Allocator,
     step_cfgs: []config.StepConfig,
-    vars: *const VarsMap,
+    slot_map: *const SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMap(types.PrecompiledInstrument),
     assign_set: *std.StringArrayHashMap(void),
@@ -216,7 +398,7 @@ fn precompileSteps(
         steps[step_idx] = switch (step_cfg.*) {
             .compute => |*cfg| try precompileComputeStep(
                 arena_alloc,
-                vars,
+                slot_map,
                 assign_set,
                 cfg,
                 task_idx,
@@ -225,7 +407,7 @@ fn precompileSteps(
             ),
             .call => |*cfg| try precompileCallStep(
                 arena_alloc,
-                vars,
+                slot_map,
                 loaded_adapters,
                 precompiled_instruments,
                 assign_set,
@@ -234,7 +416,7 @@ fn precompileSteps(
                 step_idx,
                 diag_ctx,
             ),
-            .sleep_ms => |*cfg| try precompileSleepStep(arena_alloc, vars, cfg),
+            .sleep_ms => |*cfg| try precompileSleepStep(slot_map, cfg),
         };
     }
     return steps;
@@ -242,7 +424,7 @@ fn precompileSteps(
 
 fn precompileComputeStep(
     arena_alloc: std.mem.Allocator,
-    vars: *const VarsMap,
+    slot_map: *const SlotMap,
     assign_set: *std.StringArrayHashMap(void),
     cfg: *const config.ComputeStepConfig,
     task_idx: usize,
@@ -254,19 +436,15 @@ fn precompileComputeStep(
         .step_idx = step_idx,
     };
 
-    const if_expr = try precompileIf(arena_alloc, vars, cfg.@"if");
+    const if_expr = try precompileIf(slot_map, cfg.@"if");
 
-    const assign = cfg.assign;
-    const save_slot = vars.getIndex(assign) orelse return error.UndeclaredVariable;
-    const assign_copy = try arena_alloc.dupe(u8, assign);
+    const save_slot = try slot_map.varSlotIndex(cfg.assign);
+    const assign_copy = try arena_alloc.dupe(u8, cfg.assign);
     try assign_set.put(assign_copy, {});
-
-    var compute_expr = try expr.parse(arena_alloc, cfg.compute);
-    try compute_expr.bindVariables(vars);
 
     return .{
         .action = .{ .compute = .{
-            .expression = compute_expr,
+            .expression = try slot_map.compileExpr(cfg.compute),
             .save_slot = save_slot,
         } },
         .@"if" = if_expr,
@@ -275,7 +453,7 @@ fn precompileComputeStep(
 
 fn precompileCallStep(
     arena_alloc: std.mem.Allocator,
-    vars: *const VarsMap,
+    slot_map: *const SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMap(types.PrecompiledInstrument),
     assign_set: *std.StringArrayHashMap(void),
@@ -296,7 +474,7 @@ fn precompileCallStep(
         .command_name = command_name,
     };
 
-    const if_expr = try precompileIf(arena_alloc, vars, cfg.@"if");
+    const if_expr = try precompileIf(slot_map, cfg.@"if");
 
     const precompiled_instrument = precompiled_instruments.getPtr(instrument_name) orelse return error.InstrumentNotFound;
 
@@ -306,11 +484,11 @@ fn precompileCallStep(
 
     const call_copy = try arena_alloc.dupe(u8, command_name);
     const instrument_copy = try arena_alloc.dupe(u8, instrument_name);
-    const compiled_args = try compileStepArgs(arena_alloc, command, cfg.args, vars, diag_ctx);
+    const compiled_args = try compileStepArgs(arena_alloc, command, cfg.args, slot_map, diag_ctx);
 
     var save_slot: ?usize = null;
     if (cfg.assign) |label| {
-        save_slot = vars.getIndex(label) orelse return error.UndeclaredVariable;
+        save_slot = try slot_map.varSlotIndex(label);
         const duped = try arena_alloc.dupe(u8, label);
         try assign_set.put(duped, {});
     }
@@ -329,34 +507,29 @@ fn precompileCallStep(
 }
 
 fn precompileIf(
-    arena_alloc: std.mem.Allocator,
-    vars: *const VarsMap,
+    slot_map: *const SlotMap,
     if_src_opt: ?config.BooleanExpr,
 ) !?expr.Expression {
     if (if_src_opt) |if_src| {
-        const e = try expr.parse(arena_alloc, if_src.source());
-        var bound = e;
-        try bound.bindVariables(vars);
-        return bound;
+        return try slot_map.compileExpr(if_src.source());
     }
     return null;
 }
 
 fn precompileSleepStep(
-    arena_alloc: std.mem.Allocator,
-    vars: *const VarsMap,
+    slot_map: *const SlotMap,
     cfg: *const config.SleepStepConfig,
 ) !types.Step {
     return .{
         .action = .{ .sleep = .{ .duration_ms = cfg.sleep_ms } },
-        .@"if" = try precompileIf(arena_alloc, vars, cfg.@"if"),
+        .@"if" = try precompileIf(slot_map, cfg.@"if"),
     };
 }
 
 fn resolvePipelineConfig(
     arena_alloc: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
-    vars: *const VarsMap,
+    slot_map: *const SlotMap,
     assign_set: *const std.StringArrayHashMap(void),
 ) !types.PipelineConfig {
     const pipeline_cfg = recipe.pipeline orelse return error.MissingPipeline;
@@ -368,7 +541,7 @@ fn resolvePipelineConfig(
         },
         .explicit => |columns| {
             for (columns) |name| {
-                if (bindingForName(vars, name) == null) {
+                if (slot_map.resolveName(name) == null) {
                     return error.UndeclaredVariable;
                 }
                 if (!assign_set.contains(name)) {
@@ -380,15 +553,16 @@ fn resolvePipelineConfig(
     return pipeline;
 }
 
-fn assignSaveColumns(tasks: []types.Task, vars: *const VarsMap, columns: []const []const u8) void {
+fn assignSaveColumns(tasks: []types.Task, slot_map: *const SlotMap, columns: []const []const u8) void {
+    const var_keys = slot_map.slots.keys()[slot_map.const_count..];
     for (tasks) |*task| {
         for (task.steps()) |*step| {
             switch (step.action) {
                 .instrument_call => |*ic| {
-                    ic.save_column = if (ic.save_slot) |slot| slotToColumn(vars, slot, columns) else null;
+                    ic.save_column = if (ic.save_slot) |slot| slotToColumn(var_keys, slot, columns) else null;
                 },
                 .compute => |*comp| {
-                    comp.save_column = slotToColumn(vars, comp.save_slot, columns);
+                    comp.save_column = slotToColumn(var_keys, comp.save_slot, columns);
                 },
                 .sleep => {},
             }
@@ -396,8 +570,8 @@ fn assignSaveColumns(tasks: []types.Task, vars: *const VarsMap, columns: []const
     }
 }
 
-fn slotToColumn(vars: *const VarsMap, save_slot: usize, columns: []const []const u8) ?usize {
-    const name = vars.keys()[save_slot];
+fn slotToColumn(var_keys: []const []const u8, save_slot: usize, columns: []const []const u8) ?usize {
+    const name = var_keys[save_slot];
     for (columns, 0..) |col_name, col_idx| {
         if (std.mem.eql(u8, col_name, name)) return col_idx;
     }
@@ -445,17 +619,6 @@ fn getOrCompileCommand(
     return compiled;
 }
 
-fn buildInitialValues(
-    arena_alloc: std.mem.Allocator,
-    vars: *const VarsMap,
-) ![]const types.Value {
-    const initial_values = try arena_alloc.alloc(types.Value, vars.count());
-    for (vars.values(), 0..) |value, idx| {
-        initial_values[idx] = try compileInitialValue(arena_alloc, value);
-    }
-    return initial_values;
-}
-
 fn compileCommand(
     allocator: std.mem.Allocator,
     source: Adapter.Command,
@@ -488,7 +651,7 @@ fn compileStepArgs(
     allocator: std.mem.Allocator,
     command: *const types.PrecompiledCommand,
     doc_args: ?std.StringHashMap(config.ArgValueDoc),
-    vars: *const VarsMap,
+    slot_map: *const SlotMap,
     diag_ctx: *diagnostic.DiagnosticContext,
 ) ![]types.StepArg {
     const args = try allocator.alloc(types.StepArg, command.arg_names.len);
@@ -503,7 +666,7 @@ fn compileStepArgs(
             diag_ctx.argument_name = arg_name;
             return error.MissingCommandArgument;
         };
-        args[idx] = try compileArg(allocator, doc_arg, vars);
+        args[idx] = try compileArg(allocator, doc_arg, slot_map);
     }
 
     if (doc_args) |map| {
@@ -577,23 +740,17 @@ fn clonePipelineConfig(allocator: std.mem.Allocator, cfg: config.PipelineConfig)
     };
 }
 
-fn bindingForName(vars: *const VarsMap, name: []const u8) ?expr.VariableBinding {
-    if (expr.resolveBuiltin(name)) |b| return b;
-    const slot = vars.getIndex(name) orelse return null;
-    return .{ .slot = slot };
-}
-
 fn compileArg(
     allocator: std.mem.Allocator,
     doc_arg: config.ArgValueDoc,
-    vars: *const VarsMap,
+    slot_map: *const SlotMap,
 ) !types.StepArg {
     return switch (doc_arg) {
-        .scalar => |scalar| .{ .scalar = try compileArgScalar(allocator, scalar, vars) },
+        .scalar => |scalar| .{ .scalar = try compileArgScalar(allocator, scalar, slot_map) },
         .list => |items| blk: {
-            const out = try allocator.alloc(types.CompiledArgValue, items.len);
+            const out = try allocator.alloc(expr.Expression, items.len);
             for (items, 0..) |item, idx| {
-                out[idx] = try compileArgScalar(allocator, item, vars);
+                out[idx] = try compileArgScalar(allocator, item, slot_map);
             }
             break :blk .{ .list = out };
         },
@@ -603,32 +760,30 @@ fn compileArg(
 fn compileArgScalar(
     allocator: std.mem.Allocator,
     value: config.ArgScalarDoc,
-    vars: *const VarsMap,
-) !types.CompiledArgValue {
+    slot_map: *const SlotMap,
+) !expr.Expression {
     return switch (value) {
-        .string => |text| blk: {
-            if (referenceName(text)) |name| {
-                const binding = bindingForName(vars, name) orelse return error.UndeclaredVariable;
-                break :blk .{ .binding = binding };
+        .string => |text| {
+            if (std.mem.indexOf(u8, text, "${") != null) {
+                return slot_map.compileExpr(text);
             }
-            break :blk .{ .const_value = .{ .string = try allocator.dupe(u8, text) } };
+            return makeLiteralExpr(allocator, .{ .push_string = try allocator.dupe(u8, text) });
         },
-        .int => |number| .{ .const_value = .{ .int = number } },
-        .float => |number| .{ .const_value = .{ .float = number } },
-        .bool => |flag| .{ .const_value = .{ .bool = flag } },
+        .int => |n| makeLiteralExpr(allocator, .{ .push_int = n }),
+        .float => |n| makeLiteralExpr(allocator, .{ .push_float = n }),
+        .bool => |b| makeLiteralExpr(allocator, .{ .push_bool = b }),
     };
+}
+
+fn makeLiteralExpr(allocator: std.mem.Allocator, op: expr.Op) !expr.Expression {
+    const ops = try allocator.alloc(expr.Op, 1);
+    ops[0] = op;
+    return .{ .ops = ops };
 }
 
 fn findArgIndex(arg_names: []const []const u8, name: []const u8) ?usize {
     for (arg_names, 0..) |arg_name, idx| {
         if (std.mem.eql(u8, arg_name, name)) return idx;
-    }
-    return null;
-}
-
-fn referenceName(text: []const u8) ?[]const u8 {
-    if (text.len >= 4 and std.mem.startsWith(u8, text, "${") and std.mem.endsWith(u8, text, "}")) {
-        return text[2 .. text.len - 1];
     }
     return null;
 }
@@ -692,12 +847,12 @@ test "load recipe and adapters" {
 
     const voltage = step0.args[command.argIndex("voltage").?];
     switch (voltage) {
-        .scalar => |value| switch (value) {
-            .const_value => |text| switch (text) {
-                .string => |s| try std.testing.expectEqualStrings("5", s),
+        .scalar => |e| {
+            try std.testing.expectEqual(@as(usize, 1), e.ops.len);
+            switch (e.ops[0]) {
+                .push_string => |s| try std.testing.expectEqualStrings("5", s),
                 else => return error.TestUnexpectedResult,
-            },
-            else => return error.TestUnexpectedResult,
+            }
         },
         .list => return error.TestUnexpectedResult,
     }
@@ -744,12 +899,12 @@ test "parse durations and stop conditions" {
     const step_args = compiled.tasks[0].steps()[0].action.instrument_call;
     const voltage = step_args.args[step_args.command.argIndex("voltage").?];
     switch (voltage) {
-        .scalar => |value| switch (value) {
-            .const_value => |text| switch (text) {
-                .string => |s| try std.testing.expectEqualStrings("5", s),
+        .scalar => |e| {
+            try std.testing.expectEqual(@as(usize, 1), e.ops.len);
+            switch (e.ops[0]) {
+                .push_string => |s| try std.testing.expectEqualStrings("5", s),
                 else => return error.TestUnexpectedResult,
-            },
-            else => return error.TestUnexpectedResult,
+            }
         },
         .list => return error.TestUnexpectedResult,
     }
@@ -900,36 +1055,36 @@ test "precompile preserves typed literal step arguments" {
 
     const count = args[command.argIndex("count").?];
     switch (count) {
-        .scalar => |value| switch (value) {
-            .const_value => |number| switch (number) {
-                .int => |n| try std.testing.expectEqual(@as(i64, 5), n),
+        .scalar => |e| {
+            try std.testing.expectEqual(@as(usize, 1), e.ops.len);
+            switch (e.ops[0]) {
+                .push_int => |n| try std.testing.expectEqual(@as(i64, 5), n),
                 else => return error.TestUnexpectedResult,
-            },
-            else => return error.TestUnexpectedResult,
+            }
         },
         .list => return error.TestUnexpectedResult,
     }
 
     const voltage = args[command.argIndex("voltage").?];
     switch (voltage) {
-        .scalar => |value| switch (value) {
-            .const_value => |number| switch (number) {
-                .float => |n| try std.testing.expectApproxEqAbs(@as(f64, 1.25), n, 1e-9),
+        .scalar => |e| {
+            try std.testing.expectEqual(@as(usize, 1), e.ops.len);
+            switch (e.ops[0]) {
+                .push_float => |n| try std.testing.expectApproxEqAbs(@as(f64, 1.25), n, 1e-9),
                 else => return error.TestUnexpectedResult,
-            },
-            else => return error.TestUnexpectedResult,
+            }
         },
         .list => return error.TestUnexpectedResult,
     }
 
     const enabled = args[command.argIndex("enabled").?];
     switch (enabled) {
-        .scalar => |value| switch (value) {
-            .const_value => |flag| switch (flag) {
-                .bool => |b| try std.testing.expect(b),
+        .scalar => |e| {
+            try std.testing.expectEqual(@as(usize, 1), e.ops.len);
+            switch (e.ops[0]) {
+                .push_bool => |b| try std.testing.expect(b),
                 else => return error.TestUnexpectedResult,
-            },
-            else => return error.TestUnexpectedResult,
+            }
         },
         .list => return error.TestUnexpectedResult,
     }
@@ -939,18 +1094,14 @@ test "precompile preserves typed literal step arguments" {
         .scalar => return error.TestUnexpectedResult,
         .list => |items| {
             try std.testing.expectEqual(@as(usize, 2), items.len);
-            switch (items[0]) {
-                .const_value => |number| switch (number) {
-                    .int => |n| try std.testing.expectEqual(@as(i64, 1), n),
-                    else => return error.TestUnexpectedResult,
-                },
+            try std.testing.expectEqual(@as(usize, 1), items[0].ops.len);
+            switch (items[0].ops[0]) {
+                .push_int => |n| try std.testing.expectEqual(@as(i64, 1), n),
                 else => return error.TestUnexpectedResult,
             }
-            switch (items[1]) {
-                .const_value => |number| switch (number) {
-                    .int => |n| try std.testing.expectEqual(@as(i64, 2), n),
-                    else => return error.TestUnexpectedResult,
-                },
+            try std.testing.expectEqual(@as(usize, 1), items[1].ops.len);
+            switch (items[1].ops[0]) {
+                .push_int => |n| try std.testing.expectEqual(@as(i64, 2), n),
                 else => return error.TestUnexpectedResult,
             }
         },
@@ -958,12 +1109,18 @@ test "precompile preserves typed literal step arguments" {
 
     const mirror = args[command.argIndex("mirror").?];
     switch (mirror) {
-        .scalar => |value| switch (value) {
-            .binding => |binding| switch (binding) {
-                .slot => |slot| try std.testing.expect(slot < compiled.initial_values.len),
-                .builtin => return error.TestUnexpectedResult,
-            },
-            else => return error.TestUnexpectedResult,
+        .scalar => |e| {
+            try std.testing.expectEqual(@as(usize, 1), e.ops.len);
+            switch (e.ops[0]) {
+                .load_var => |ref| switch (ref) {
+                    .binding => |b| switch (b) {
+                        .slot => |slot| try std.testing.expect(slot < compiled.initial_values.len),
+                        .builtin => return error.TestUnexpectedResult,
+                    },
+                    .name => return error.TestUnexpectedResult,
+                },
+                else => return error.TestUnexpectedResult,
+            }
         },
         .list => return error.TestUnexpectedResult,
     }
@@ -1958,5 +2115,239 @@ test "precompile recipe with list variable" {
             }
         },
         else => return error.TestUnexpectedResult,
+    }
+}
+
+test "precompile const-folds join() in step args" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/psu.toml",
+        \\[metadata]
+        \\
+        \\[commands.set_voltage]
+        \\write = "VOLT {voltage},(@{channels})"
+    );
+    try workspace.writeFile("recipes/const_join.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.toml
+        \\    resource: USB0::1::INSTR
+        \\pipeline:
+        \\  record: all
+        \\consts:
+        \\  channels:
+        \\    - 1
+        \\    - 2
+        \\    - 3
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
+        \\        args:
+        \\          voltage: "5.0"
+        \\          channels: "join(${channels}, \",\")"
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/const_join.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
+    defer dir.close();
+
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
+    defer compiled.deinit();
+
+    const step = compiled.tasks[0].steps()[0].action.instrument_call;
+    const channels_arg = step.args[step.command.argIndex("channels").?];
+    // The join expression should be const-folded to a literal string "1,2,3".
+    switch (channels_arg) {
+        .scalar => |e| {
+            try std.testing.expectEqual(@as(usize, 1), e.ops.len);
+            switch (e.ops[0]) {
+                .push_string => |s| try std.testing.expectEqualStrings("1,2,3", s),
+                else => return error.TestUnexpectedResult,
+            }
+        },
+        .list => return error.TestUnexpectedResult,
+    }
+}
+
+test "precompile const scalar expression folding" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/psu.toml",
+        \\[metadata]
+        \\
+        \\[commands.set]
+        \\write = "V {voltage}"
+    );
+    try workspace.writeFile("recipes/const_arith.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.toml
+        \\    resource: USB0::1::INSTR
+        \\pipeline:
+        \\  record: all
+        \\consts:
+        \\  base_v: 3.0
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args:
+        \\          voltage: "${base_v} * 2"
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/const_arith.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
+    defer dir.close();
+
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
+    defer compiled.deinit();
+
+    const step = compiled.tasks[0].steps()[0].action.instrument_call;
+    const voltage_arg = step.args[step.command.argIndex("voltage").?];
+    switch (voltage_arg) {
+        .scalar => |e| {
+            try std.testing.expectEqual(@as(usize, 1), e.ops.len);
+            switch (e.ops[0]) {
+                .push_float => |f| try std.testing.expectApproxEqAbs(@as(f64, 6.0), f, 1e-9),
+                else => return error.TestUnexpectedResult,
+            }
+        },
+        .list => return error.TestUnexpectedResult,
+    }
+}
+
+test "precompile rejects assign to const" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/psu.toml",
+        \\[metadata]
+        \\
+        \\[commands.set]
+        \\write = "V {voltage}"
+        \\response = "float"
+    );
+    try workspace.writeFile("recipes/assign_const.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.toml
+        \\    resource: USB0::1::INSTR
+        \\pipeline:
+        \\  record: all
+        \\consts:
+        \\  fixed: 5.0
+        \\vars:
+        \\  result: 0
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args:
+        \\          voltage: "1.0"
+        \\        assign: fixed
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/assign_const.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
+    defer dir.close();
+
+    try std.testing.expectError(error.AssignToConst, precompilePath(gpa, recipe_path, dir, null));
+}
+
+test "precompile rejects duplicate const and var names" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.makePath("adapters");
+    try workspace.writeFile("recipes/dup.yaml",
+        \\instruments: {}
+        \\pipeline:
+        \\  record: all
+        \\consts:
+        \\  x: 1
+        \\vars:
+        \\  x: 0
+        \\tasks: []
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/dup.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
+    defer dir.close();
+
+    try std.testing.expectError(error.DuplicateVariable, precompilePath(gpa, recipe_path, dir, null));
+}
+
+test "precompile does not fold expressions referencing runtime vars" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/psu.toml",
+        \\[metadata]
+        \\
+        \\[commands.set]
+        \\write = "V {voltage}"
+    );
+    try workspace.writeFile("recipes/no_fold.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.toml
+        \\    resource: USB0::1::INSTR
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  v: 1.0
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args:
+        \\          voltage: "${v} * 2"
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/no_fold.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
+    defer dir.close();
+
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
+    defer compiled.deinit();
+
+    const step = compiled.tasks[0].steps()[0].action.instrument_call;
+    const voltage_arg = step.args[step.command.argIndex("voltage").?];
+    // Expression references a runtime var, so it should NOT be const-folded;
+    // it is compiled as a proper expression with load_var + arithmetic ops.
+    switch (voltage_arg) {
+        .scalar => |e| {
+            try std.testing.expect(e.ops.len > 1);
+        },
+        .list => return error.TestUnexpectedResult,
     }
 }

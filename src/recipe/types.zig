@@ -16,7 +16,7 @@ pub const Value = union(enum) {
         return switch (self) {
             .float => |f| .{ .float = f },
             .int => |i| .{ .int = i },
-            .bool => |b| .{ .int = if (b) 1 else 0 },
+            .bool => |b| .{ .bool = b },
             .string => |s| .{ .string = s },
             .list => unreachable, // lists are resolved by Context directly
         };
@@ -74,14 +74,9 @@ pub const CompiledSegment = union(enum) {
     arg: usize,
 };
 
-pub const CompiledArgValue = union(enum) {
-    const_value: Value,
-    binding: expr.VariableBinding,
-};
-
 pub const StepArg = union(enum) {
-    scalar: CompiledArgValue,
-    list: []const CompiledArgValue,
+    scalar: expr.Expression,
+    list: []const expr.Expression,
 };
 
 /// Executable command prepared during recipe precompilation.

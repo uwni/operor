@@ -112,6 +112,7 @@ fn executeCompute(
     try ctx.setSlot(comp.save_slot, switch (result) {
         .int => |i| .{ .int = i },
         .float => |f| .{ .float = f },
+        .bool => |b| .{ .bool = b },
         .string => |s| .{ .string = s },
     });
 
@@ -121,6 +122,7 @@ fn executeCompute(
     const value_owned = switch (result) {
         .int => |i| try std.fmt.allocPrint(allocator, "{d}", .{i}),
         .float => |f| try std.fmt.allocPrint(allocator, "{d}", .{f}),
+        .bool => |b| try allocator.dupe(u8, if (b) "true" else "false"),
         .string => |s| try allocator.dupe(u8, s),
     };
 
@@ -223,13 +225,18 @@ pub fn parseResponse(encoding: Adapter.Encoding, resp: []const u8) !ParsedValue 
     };
 }
 
-fn resolveStepScalar(
+fn evalToValue(
+    e: *const expr.Expression,
     ctx: *const common.Context,
-    value: recipe_mod.CompiledArgValue,
-) common.Value {
-    return switch (value) {
-        .const_value => |const_value| const_value,
-        .binding => |binding| ctx.resolveBinding(binding),
+    allocator: std.mem.Allocator,
+) !common.Value {
+    const result = try e.eval(ctx.varResolver(), allocator);
+    // Owned strings (if any) live in `allocator` — caller manages lifetime.
+    return switch (result.value) {
+        .int => |i| .{ .int = i },
+        .float => |f| .{ .float = f },
+        .bool => |b| .{ .bool = b },
+        .string => |s| .{ .string = s },
     };
 }
 
@@ -239,11 +246,11 @@ fn resolveStepArg(
     allocator: std.mem.Allocator,
 ) !common.RenderValue {
     return switch (value) {
-        .scalar => |scalar| .{ .scalar = resolveStepScalar(ctx, scalar) },
+        .scalar => |e| .{ .scalar = try evalToValue(&e, ctx, allocator) },
         .list => |items| blk: {
             const resolved = try allocator.alloc(common.Value, items.len);
-            for (items, 0..) |item, idx| {
-                resolved[idx] = resolveStepScalar(ctx, item);
+            for (items, 0..) |*item, idx| {
+                resolved[idx] = try evalToValue(item, ctx, allocator);
             }
             break :blk .{ .list = resolved };
         },

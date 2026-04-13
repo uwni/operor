@@ -9,8 +9,6 @@ pub const PrecompiledCommand = types.PrecompiledCommand;
 pub const RenderedCommand = types.RenderedCommand;
 /// Parsed and validated recipe step ready for execution.
 pub const Step = types.Step;
-/// Compiled representation of one step argument item.
-pub const CompiledArgValue = types.CompiledArgValue;
 /// Parsed representation of a step argument value.
 pub const StepArg = types.StepArg;
 /// Task variant describing when and how steps are executed.

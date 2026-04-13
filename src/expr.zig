@@ -25,6 +25,7 @@ const std = @import("std");
 pub const Value = union(enum) {
     int: i64,
     float: f64,
+    bool: bool,
     string: []const u8,
 
     /// Promote to `f64`. Integer values are widened losslessly.
@@ -33,6 +34,7 @@ pub const Value = union(enum) {
         return switch (self) {
             .int => |i| @floatFromInt(i),
             .float => |f| f,
+            .bool => |b| if (b) 1.0 else 0.0,
             .string => unreachable,
         };
     }
@@ -42,6 +44,7 @@ pub const Value = union(enum) {
         return switch (self) {
             .int => |i| i != 0,
             .float => |f| f != 0.0,
+            .bool => |b| b,
             .string => |s| s.len != 0,
         };
     }
@@ -72,6 +75,16 @@ pub const VariableBinding = union(enum) {
 pub const VariableRef = union(enum) {
     name: []const u8,
     binding: VariableBinding,
+
+    pub fn slotIndex(self: VariableRef) ?usize {
+        return switch (self) {
+            .binding => |b| switch (b) {
+                .slot => |s| s,
+                .builtin => null,
+            },
+            .name => null,
+        };
+    }
 };
 
 // ── Bytecode ────────────────────────────────────────────────────────────
@@ -82,10 +95,11 @@ pub const VariableRef = union(enum) {
 
 const CmpOp = enum { gt, lt, ge, le, eq, ne };
 
-const Op = union(enum) {
+pub const Op = union(enum) {
     push_int: i64,
     push_float: f64,
     push_string: []const u8,
+    push_bool: bool,
     /// Push the scalar value of a bound variable.
     load_var: VariableRef,
     /// Push the length (as int) of a list variable.
@@ -136,6 +150,15 @@ pub const Expression = struct {
     };
 
     pub fn eval(self: *const Expression, resolver: VarResolver, allocator: std.mem.Allocator) EvalError!EvalResult {
+        // Fast path: single push op needs no stack machinery.
+        if (self.ops.len == 1) switch (self.ops[0]) {
+            .push_int => |i| return .{ .value = .{ .int = i }, .allocator = undefined },
+            .push_float => |f| return .{ .value = .{ .float = f }, .allocator = undefined },
+            .push_bool => |b| return .{ .value = .{ .bool = b }, .allocator = undefined },
+            .push_string => |s| return .{ .value = .{ .string = s }, .allocator = undefined },
+            else => {},
+        };
+
         var stack: [max_stack]Value = [1]Value{.{ .int = 0 }} ** max_stack;
         var sp: usize = 0;
         var ip: usize = 0;
@@ -159,6 +182,10 @@ pub const Expression = struct {
                     stack[sp] = .{ .string = s };
                     sp += 1;
                 },
+                .push_bool => |b| {
+                    stack[sp] = .{ .bool = b };
+                    sp += 1;
+                },
                 .load_var => |ref| {
                     const resolved = resolver.resolve(ref.binding) orelse return error.VariableNotFound;
                     stack[sp] = try resolveScalar(resolved);
@@ -177,7 +204,7 @@ pub const Expression = struct {
                     const idx_val = stack[sp];
                     const iv = switch (idx_val) {
                         .int => |v| v,
-                        .float, .string => return error.InvalidExpression,
+                        .float, .string, .bool => return error.InvalidExpression,
                     };
                     if (iv < 0) return error.InvalidExpression;
                     const i: usize = @intCast(iv);
@@ -218,7 +245,7 @@ pub const Expression = struct {
                 .div => {
                     const b = stack[sp - 1];
                     const a = stack[sp - 2];
-                    if (b == .string or a == .string) return error.InvalidExpression;
+                    if (a == .string or a == .bool or b == .string or b == .bool) return error.InvalidExpression;
                     sp -= 1;
                     const rf = b.toFloat();
                     if (rf == 0.0) return error.DivisionByZero;
@@ -228,19 +255,19 @@ pub const Expression = struct {
                     const b = stack[sp - 1];
                     const a = stack[sp - 2];
                     sp -= 1;
-                    stack[sp - 1] = .{ .int = if (try cmpValues(a, b, op)) 1 else 0 };
+                    stack[sp - 1] = .{ .bool = try cmpValues(a, b, op) };
                 },
                 .negate => {
                     const v = stack[sp - 1];
                     stack[sp - 1] = switch (v) {
                         .int => |i| .{ .int = -i },
                         .float => |f| .{ .float = -f },
-                        .string => return error.InvalidExpression,
+                        .string, .bool => return error.InvalidExpression,
                     };
                 },
                 .not => {
                     const v = stack[sp - 1];
-                    stack[sp - 1] = .{ .int = if (v.isTruthy()) 0 else 1 };
+                    stack[sp - 1] = .{ .bool = !v.isTruthy() };
                 },
                 .call_min => {
                     const b = stack[sp - 1];
@@ -257,7 +284,7 @@ pub const Expression = struct {
                 .and_sc => |skip| {
                     const v = stack[sp - 1];
                     if (!v.isTruthy()) {
-                        stack[sp - 1] = .{ .int = 0 };
+                        stack[sp - 1] = .{ .bool = false };
                         ip += skip;
                     } else {
                         sp -= 1;
@@ -266,7 +293,7 @@ pub const Expression = struct {
                 .or_sc => |skip| {
                     const v = stack[sp - 1];
                     if (v.isTruthy()) {
-                        stack[sp - 1] = .{ .int = 1 };
+                        stack[sp - 1] = .{ .bool = true };
                         ip += skip;
                     } else {
                         sp -= 1;
@@ -274,7 +301,7 @@ pub const Expression = struct {
                 },
                 .to_bool => {
                     const v = stack[sp - 1];
-                    stack[sp - 1] = .{ .int = if (v.isTruthy()) 1 else 0 };
+                    stack[sp - 1] = .{ .bool = v.isTruthy() };
                 },
                 .call_join => |ref| {
                     sp -= 1;
@@ -336,7 +363,7 @@ pub const Expression = struct {
                             .slot = slots.getIndex(name) orelse return error.UndeclaredVariable,
                         } } };
                     },
-                    .binding => {},
+                    .binding => return error.AlreadyBound,
                 },
                 .load_list_len => |ref| switch (ref) {
                     .name => |name| {
@@ -344,7 +371,7 @@ pub const Expression = struct {
                             .slot = slots.getIndex(name) orelse return error.UndeclaredVariable,
                         } } };
                     },
-                    .binding => {},
+                    .binding => return error.AlreadyBound,
                 },
                 .load_list_elem => |ref| switch (ref) {
                     .name => |name| {
@@ -352,7 +379,7 @@ pub const Expression = struct {
                             .slot = slots.getIndex(name) orelse return error.UndeclaredVariable,
                         } } };
                     },
-                    .binding => {},
+                    .binding => return error.AlreadyBound,
                 },
                 .call_join => |ref| switch (ref) {
                     .name => |name| {
@@ -360,7 +387,7 @@ pub const Expression = struct {
                             .slot = slots.getIndex(name) orelse return error.UndeclaredVariable,
                         } } };
                     },
-                    .binding => {},
+                    .binding => return error.AlreadyBound,
                 },
                 else => {},
             }
@@ -397,6 +424,7 @@ pub const VariableIterator = struct {
 pub const ResolvedValue = union(enum) {
     int: i64,
     float: f64,
+    bool: bool,
     string: []const u8,
     /// Opaque list: length and a callback to resolve individual elements.
     list: ResolvedList,
@@ -455,15 +483,14 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) EvalError!Express
     };
 }
 
-
 // ── Eval helpers ────────────────────────────────────────────────────────
 
 /// Arithmetic with integer promotion: int ⊗ int → int; otherwise float.
 fn promoteArith(a: Value, b: Value, comptime op: enum { add, sub, mul }) EvalError!Value {
     return switch (a) {
-        .string => error.InvalidExpression,
+        .string, .bool => error.InvalidExpression,
         .int => |ai| switch (b) {
-            .string => error.InvalidExpression,
+            .string, .bool => error.InvalidExpression,
             .int => |bi| .{ .int = switch (op) {
                 .add => ai + bi,
                 .sub => ai - bi,
@@ -479,8 +506,8 @@ fn promoteArith(a: Value, b: Value, comptime op: enum { add, sub, mul }) EvalErr
             },
         },
         .float => |af| switch (b) {
-            .string => error.InvalidExpression,
-            else => blk: {
+            .string, .bool => error.InvalidExpression,
+            .int, .float => blk: {
                 const bf = b.toFloat();
                 break :blk .{ .float = switch (op) {
                     .add => af + bf,
@@ -531,9 +558,9 @@ fn cmpValues(a: Value, b: Value, op: CmpOp) EvalError!bool {
 /// min/max with integer promotion: int ⊗ int → int; otherwise float.
 fn promoteMinMax(a: Value, b: Value, comptime pick_min: bool) EvalError!Value {
     return switch (a) {
-        .string => error.InvalidExpression,
+        .string, .bool => error.InvalidExpression,
         .int => |ai| switch (b) {
-            .string => error.InvalidExpression,
+            .string, .bool => error.InvalidExpression,
             .int => |bi| .{ .int = if (pick_min) @min(ai, bi) else @max(ai, bi) },
             .float => |bf| blk: {
                 const af: f64 = @floatFromInt(ai);
@@ -541,8 +568,8 @@ fn promoteMinMax(a: Value, b: Value, comptime pick_min: bool) EvalError!Value {
             },
         },
         .float => |af| switch (b) {
-            .string => error.InvalidExpression,
-            else => blk: {
+            .string, .bool => error.InvalidExpression,
+            .int, .float => blk: {
                 const bf = b.toFloat();
                 break :blk .{ .float = if (pick_min) @min(af, bf) else @max(af, bf) };
             },
@@ -555,6 +582,7 @@ fn resolveScalar(val: ResolvedValue) EvalError!Value {
     return switch (val) {
         .int => |i| .{ .int = i },
         .float => |f| .{ .float = f },
+        .bool => |b| .{ .bool = b },
         .string => |s| .{ .string = s },
         .list => error.InvalidExpression,
     };
@@ -571,6 +599,7 @@ fn joinList(allocator: std.mem.Allocator, list: ResolvedList, delimiter: []const
         switch (elem) {
             .int => |v| out.writer(allocator).print("{d}", .{v}) catch return error.OutOfMemory,
             .float => |v| out.writer(allocator).print("{d}", .{v}) catch return error.OutOfMemory,
+            .bool => |b| out.appendSlice(allocator, if (b) "true" else "false") catch return error.OutOfMemory,
             .string => |s| out.appendSlice(allocator, s) catch return error.OutOfMemory,
             .list => return error.InvalidExpression,
         }
@@ -930,7 +959,6 @@ const Parser = struct {
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
-
 /// Test helper: parse + eval in one shot (no variable binding).
 fn testEval(allocator: std.mem.Allocator, source: []const u8, resolver: VarResolver) EvalError!Value {
     var expr_obj = try parse(allocator, source);
@@ -997,21 +1025,28 @@ fn testBoundEval(source: []const u8, vars: *const std.StringHashMap([]const u8))
 fn expectInt(expected: i64, actual: Value) !void {
     switch (actual) {
         .int => |i| try std.testing.expectEqual(expected, i),
-        .float, .string => return error.TestUnexpectedResult,
+        .float, .bool, .string => return error.TestUnexpectedResult,
     }
 }
 
 fn expectFloat(expected: f64, actual: Value) !void {
     switch (actual) {
         .float => |f| try std.testing.expectApproxEqAbs(expected, f, 1e-9),
-        .int, .string => return error.TestUnexpectedResult,
+        .int, .bool, .string => return error.TestUnexpectedResult,
     }
 }
 
 fn expectString(expected: []const u8, actual: Value) !void {
     switch (actual) {
         .string => |s| try std.testing.expectEqualStrings(expected, s),
-        .int, .float => return error.TestUnexpectedResult,
+        .int, .float, .bool => return error.TestUnexpectedResult,
+    }
+}
+
+fn expectBool(expected: bool, actual: Value) !void {
+    switch (actual) {
+        .bool => |b| try std.testing.expectEqual(expected, b),
+        .int, .float, .string => return error.TestUnexpectedResult,
     }
 }
 
@@ -1031,21 +1066,21 @@ test "expr arithmetic" {
 test "expr comparison" {
     const r = VarResolver.none();
 
-    try expectInt(1, try testEval(std.testing.allocator, "5 > 3", r));
-    try expectInt(0, try testEval(std.testing.allocator, "2 > 3", r));
-    try expectInt(1, try testEval(std.testing.allocator, "3 >= 3", r));
-    try expectInt(1, try testEval(std.testing.allocator, "3 == 3", r));
-    try expectInt(1, try testEval(std.testing.allocator, "3 != 4", r));
+    try expectBool(true, try testEval(std.testing.allocator, "5 > 3", r));
+    try expectBool(false, try testEval(std.testing.allocator, "2 > 3", r));
+    try expectBool(true, try testEval(std.testing.allocator, "3 >= 3", r));
+    try expectBool(true, try testEval(std.testing.allocator, "3 == 3", r));
+    try expectBool(true, try testEval(std.testing.allocator, "3 != 4", r));
 }
 
 test "expr logical" {
     const r = VarResolver.none();
 
-    try expectInt(1, try testEval(std.testing.allocator, "1 && 1", r));
-    try expectInt(0, try testEval(std.testing.allocator, "1 && 0", r));
-    try expectInt(1, try testEval(std.testing.allocator, "0 || 1", r));
-    try expectInt(1, try testEval(std.testing.allocator, "!0", r));
-    try expectInt(0, try testEval(std.testing.allocator, "!1", r));
+    try expectBool(true, try testEval(std.testing.allocator, "1 && 1", r));
+    try expectBool(false, try testEval(std.testing.allocator, "1 && 0", r));
+    try expectBool(true, try testEval(std.testing.allocator, "0 || 1", r));
+    try expectBool(true, try testEval(std.testing.allocator, "!0", r));
+    try expectBool(false, try testEval(std.testing.allocator, "!1", r));
 }
 
 test "expr variables" {
@@ -1055,7 +1090,7 @@ test "expr variables" {
     try vars.put("current", "2.0");
 
     try expectFloat(9.0, try testBoundEval("${voltage} * ${current}", &vars));
-    try expectInt(1, try testBoundEval("${voltage} > 3", &vars));
+    try expectBool(true, try testBoundEval("${voltage} > 3", &vars));
 }
 
 test "expr built-in variables" {
@@ -1104,7 +1139,7 @@ test "expr complex power check" {
     try vars.put("current", "9.0");
 
     // power = 108.0 (float * float), check > 100 (int) → promoted comparison
-    try expectInt(1, try testBoundEval("${voltage} * ${current} > 100", &vars));
+    try expectBool(true, try testBoundEval("${voltage} * ${current} > 100", &vars));
 }
 
 test "expr division by zero" {
@@ -1363,12 +1398,12 @@ test "expr string literal" {
 test "expr string comparison" {
     const r = VarResolver.none();
 
-    try expectInt(1, try testEval(std.testing.allocator, "\"abc\" == \"abc\"", r));
-    try expectInt(0, try testEval(std.testing.allocator, "\"abc\" == \"def\"", r));
-    try expectInt(1, try testEval(std.testing.allocator, "\"abc\" != \"def\"", r));
-    try expectInt(1, try testEval(std.testing.allocator, "\"abc\" < \"def\"", r));
-    try expectInt(0, try testEval(std.testing.allocator, "\"def\" < \"abc\"", r));
-    try expectInt(1, try testEval(std.testing.allocator, "\"z\" >= \"a\"", r));
+    try expectBool(true, try testEval(std.testing.allocator, "\"abc\" == \"abc\"", r));
+    try expectBool(false, try testEval(std.testing.allocator, "\"abc\" == \"def\"", r));
+    try expectBool(true, try testEval(std.testing.allocator, "\"abc\" != \"def\"", r));
+    try expectBool(true, try testEval(std.testing.allocator, "\"abc\" < \"def\"", r));
+    try expectBool(false, try testEval(std.testing.allocator, "\"def\" < \"abc\"", r));
+    try expectBool(true, try testEval(std.testing.allocator, "\"z\" >= \"a\"", r));
 }
 
 test "expr string variable comparison" {
@@ -1376,20 +1411,20 @@ test "expr string variable comparison" {
     defer vars.deinit();
     try vars.put("status", "ready");
 
-    try expectInt(1, try testBoundEval("${status} == \"ready\"", &vars));
-    try expectInt(0, try testBoundEval("${status} == \"stopped\"", &vars));
-    try expectInt(1, try testBoundEval("${status} != \"stopped\"", &vars));
+    try expectBool(true, try testBoundEval("${status} == \"ready\"", &vars));
+    try expectBool(false, try testBoundEval("${status} == \"stopped\"", &vars));
+    try expectBool(true, try testBoundEval("${status} != \"stopped\"", &vars));
 }
 
 test "expr string truthiness" {
     const r = VarResolver.none();
 
     // Non-empty string is truthy
-    try expectInt(1, try testEval(std.testing.allocator, "\"hello\" && 1", r));
+    try expectBool(true, try testEval(std.testing.allocator, "\"hello\" && 1", r));
     // Empty string is falsy
-    try expectInt(0, try testEval(std.testing.allocator, "\"\" && 1", r));
-    try expectInt(0, try testEval(std.testing.allocator, "!\"hello\"", r));
-    try expectInt(1, try testEval(std.testing.allocator, "!\"\"", r));
+    try expectBool(false, try testEval(std.testing.allocator, "\"\" && 1", r));
+    try expectBool(false, try testEval(std.testing.allocator, "!\"hello\"", r));
+    try expectBool(true, try testEval(std.testing.allocator, "!\"\"", r));
 }
 
 test "expr string arithmetic is error" {
