@@ -232,8 +232,8 @@ test "Context exposes built-ins alongside stored values" {
     var empty_slots: std.StringArrayHashMap(void) = .init(testing.allocator);
     defer empty_slots.deinit();
     try expr_obj.bindVariables(&empty_slots);
-    const eval_result = try expr_obj.eval(ctx.varResolver());
-    try testing.expectEqual(@as(i64, 9), eval_result.int);
+    const eval_result = try expr_obj.eval(ctx.varResolver(), testing.allocator);
+    try testing.expectEqual(@as(i64, 9), eval_result.value.int);
 }
 
 test "Context stores run start state separately from iteration state" {
@@ -278,8 +278,8 @@ test "Context list round-trip through setSlot and varResolver" {
     var e = try expr_mod.parse(testing.allocator, "${arr}[${idx}]");
     defer e.deinit(testing.allocator);
     try e.bindVariables(&slots);
-    const eval_result = try e.eval(ctx.varResolver());
-    try testing.expectApproxEqAbs(@as(f64, 10.0), eval_result.float, 1e-9);
+    const eval_result = try e.eval(ctx.varResolver(), testing.allocator);
+    try testing.expectApproxEqAbs(@as(f64, 10.0), eval_result.value.float, 1e-9);
 
     // Overwrite list slot to verify freeStored works.
     const items2 = [_]Value{.{ .int = 99 }};

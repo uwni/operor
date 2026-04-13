@@ -60,7 +60,7 @@ pub fn executeStep(
 ) !?SavedValue {
     // Evaluate optional `if` guard.
     if (step.@"if") |*if_expr| {
-        const is_true = if_expr.isTruthy(ctx.varResolver()) catch |err| switch (err) {
+        const is_true = if_expr.isTruthy(ctx.varResolver(), allocator) catch |err| switch (err) {
             error.VariableNotFound => {
                 logWarning(log_sink, "if guard: variable not found, skipping step");
                 return null;
@@ -91,7 +91,7 @@ fn executeCompute(
     ctx: *common.Context,
     log_sink: common.LogSink,
 ) !?SavedValue {
-    const result = comp.expression.eval(ctx.varResolver()) catch |err| switch (err) {
+    const eval_res = comp.expression.eval(ctx.varResolver(), allocator) catch |err| switch (err) {
         error.VariableNotFound => {
             logWarning(log_sink, "compute: variable not found");
             return null;
@@ -106,6 +106,8 @@ fn executeCompute(
         },
         else => return err,
     };
+    defer eval_res.deinit();
+    const result = eval_res.value;
 
     try ctx.setSlot(comp.save_slot, switch (result) {
         .int => |i| .{ .int = i },

@@ -101,6 +101,8 @@ const Op = union(enum) {
     not,
     call_min,
     call_max,
+    /// Pop delimiter string, resolve list variable, join elements, push result string.
+    call_join: VariableRef,
     /// Short-circuit AND: if top is falsy, replace with int(0) and skip
     /// `skip` ops (jumping past the RHS and its trailing `to_bool`).
     and_sc: u16,
@@ -119,11 +121,29 @@ pub const Expression = struct {
     }
 
     pub const max_stack = 64;
+    const max_owned = 4;
 
-    pub fn eval(self: *const Expression, resolver: VarResolver) EvalError!Value {
+    /// Result of expression evaluation, bundling the value with ownership info.
+    pub const EvalResult = struct {
+        value: Value,
+        /// Allocator-owned string produced by join(); null when no allocation was made.
+        owned: ?[]u8 = null,
+        allocator: std.mem.Allocator,
+
+        pub fn deinit(self: EvalResult) void {
+            if (self.owned) |buf| self.allocator.free(buf);
+        }
+    };
+
+    pub fn eval(self: *const Expression, resolver: VarResolver, allocator: std.mem.Allocator) EvalError!EvalResult {
         var stack: [max_stack]Value = [1]Value{.{ .int = 0 }} ** max_stack;
         var sp: usize = 0;
         var ip: usize = 0;
+        var owned_strings: [max_owned]?[]u8 = .{null} ** max_owned;
+        var owned_count: usize = 0;
+        errdefer for (owned_strings[0..owned_count]) |maybe_str| {
+            if (maybe_str) |s| allocator.free(s);
+        };
 
         while (ip < self.ops.len) : (ip += 1) {
             switch (self.ops[ip]) {
@@ -256,15 +276,49 @@ pub const Expression = struct {
                     const v = stack[sp - 1];
                     stack[sp - 1] = .{ .int = if (v.isTruthy()) 1 else 0 };
                 },
+                .call_join => |ref| {
+                    sp -= 1;
+                    const delim = switch (stack[sp]) {
+                        .string => |s| s,
+                        else => return error.InvalidExpression,
+                    };
+                    const resolved = resolver.resolve(ref.binding) orelse return error.VariableNotFound;
+                    const list = switch (resolved) {
+                        .list => |l| l,
+                        else => return error.InvalidExpression,
+                    };
+                    const joined = try joinList(allocator, list, delim);
+                    if (owned_count >= max_owned) {
+                        allocator.free(joined);
+                        return error.OutOfMemory;
+                    }
+                    owned_strings[owned_count] = joined;
+                    owned_count += 1;
+                    stack[sp] = .{ .string = joined };
+                    sp += 1;
+                },
             }
         }
 
-        return stack[0];
+        const result = stack[0];
+        var result_owned: ?[]u8 = null;
+        for (owned_strings[0..owned_count]) |maybe_str| {
+            if (maybe_str) |s| {
+                if (result == .string and result.string.ptr == s.ptr) {
+                    result_owned = s;
+                } else {
+                    allocator.free(s);
+                }
+            }
+        }
+        return .{ .value = result, .owned = result_owned, .allocator = allocator };
     }
 
     /// Evaluates and returns true when the result is non-zero.
-    pub fn isTruthy(self: *const Expression, resolver: VarResolver) EvalError!bool {
-        return (try self.eval(resolver)).isTruthy();
+    pub fn isTruthy(self: *const Expression, resolver: VarResolver, allocator: std.mem.Allocator) EvalError!bool {
+        const result = try self.eval(resolver, allocator);
+        defer result.deinit();
+        return result.value.isTruthy();
     }
 
     /// Iterates through all variable names referenced in the expression.
@@ -300,6 +354,14 @@ pub const Expression = struct {
                     },
                     .binding => {},
                 },
+                .call_join => |ref| switch (ref) {
+                    .name => |name| {
+                        op.* = .{ .call_join = .{ .binding = resolveBuiltin(name) orelse .{
+                            .slot = slots.getIndex(name) orelse return error.UndeclaredVariable,
+                        } } };
+                    },
+                    .binding => {},
+                },
                 else => {},
             }
         }
@@ -317,6 +379,7 @@ pub const VariableIterator = struct {
                 .load_var => |r| r,
                 .load_list_len => |r| r,
                 .load_list_elem => |r| r,
+                .call_join => |r| r,
                 else => continue,
             };
             switch (ref) {
@@ -392,12 +455,6 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) EvalError!Express
     };
 }
 
-/// Evaluate a variable-free expression string directly.
-pub fn eval(allocator: std.mem.Allocator, source: []const u8, resolver: VarResolver) EvalError!Value {
-    var expr_obj = try parse(allocator, source);
-    defer expr_obj.deinit(allocator);
-    return expr_obj.eval(resolver);
-}
 
 // ── Eval helpers ────────────────────────────────────────────────────────
 
@@ -501,6 +558,25 @@ fn resolveScalar(val: ResolvedValue) EvalError!Value {
         .string => |s| .{ .string = s },
         .list => error.InvalidExpression,
     };
+}
+
+/// Join list elements into a single string with the given delimiter.
+fn joinList(allocator: std.mem.Allocator, list: ResolvedList, delimiter: []const u8) EvalError![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    for (0..list.len) |i| {
+        if (i > 0) out.appendSlice(allocator, delimiter) catch return error.OutOfMemory;
+        const elem = list.at(i) orelse return error.VariableNotFound;
+        switch (elem) {
+            .int => |v| out.writer(allocator).print("{d}", .{v}) catch return error.OutOfMemory,
+            .float => |v| out.writer(allocator).print("{d}", .{v}) catch return error.OutOfMemory,
+            .string => |s| out.appendSlice(allocator, s) catch return error.OutOfMemory,
+            .list => return error.InvalidExpression,
+        }
+    }
+
+    return out.toOwnedSlice(allocator) catch error.OutOfMemory;
 }
 
 pub fn resolveBuiltin(name: []const u8) ?VariableBinding {
@@ -762,6 +838,14 @@ const Parser = struct {
                     if (!self.matchChar(')')) return error.UnexpectedToken;
                     try self.emit(if (std.mem.eql(u8, name, "min")) .call_min else .call_max);
                     self.pop(1); // binary: 2 in, 1 out
+                } else if (std.mem.eql(u8, name, "join")) {
+                    // join(${list_var}, "delimiter")
+                    const var_ref = try self.parseVarArg();
+                    if (!self.matchChar(',')) return error.UnexpectedToken;
+                    try self.parseOr(); // delimiter expression (usually a string literal)
+                    if (!self.matchChar(')')) return error.UnexpectedToken;
+                    try self.emit(.{ .call_join = var_ref });
+                    // delimiter pushed by parseOr (+1), call_join pops it and pushes result: net 0
                 } else {
                     return error.InvalidExpression;
                 }
@@ -846,6 +930,16 @@ const Parser = struct {
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
+
+/// Test helper: parse + eval in one shot (no variable binding).
+fn testEval(allocator: std.mem.Allocator, source: []const u8, resolver: VarResolver) EvalError!Value {
+    var expr_obj = try parse(allocator, source);
+    defer expr_obj.deinit(allocator);
+    const result = try expr_obj.eval(resolver, allocator);
+    std.debug.assert(result.owned == null);
+    return result.value;
+}
+
 /// Test helper: resolves slots back to string values via a name-indexed HashMap.
 const TestContext = struct {
     vars: *const std.StringHashMap([]const u8),
@@ -895,7 +989,9 @@ fn testBoundEval(source: []const u8, vars: *const std.StringHashMap([]const u8))
         }
     }
     try expr_obj.bindVariables(&slots);
-    return expr_obj.eval(tc.resolver());
+    const result = try expr_obj.eval(tc.resolver(), std.testing.allocator);
+    defer result.deinit();
+    return result.value;
 }
 
 fn expectInt(expected: i64, actual: Value) !void {
@@ -922,34 +1018,34 @@ fn expectString(expected: []const u8, actual: Value) !void {
 test "expr arithmetic" {
     const r = VarResolver.none();
 
-    try expectInt(7, try eval(std.testing.allocator, "3 + 4", r));
-    try expectInt(6, try eval(std.testing.allocator, "2 * 3", r));
-    try expectFloat(2.5, try eval(std.testing.allocator, "5 / 2", r)); // division always float
-    try expectFloat(0.0, try eval(std.testing.allocator, "0 + 0.0", r));
-    try expectInt(0, try eval(std.testing.allocator, "0 + 0", r));
+    try expectInt(7, try testEval(std.testing.allocator, "3 + 4", r));
+    try expectInt(6, try testEval(std.testing.allocator, "2 * 3", r));
+    try expectFloat(2.5, try testEval(std.testing.allocator, "5 / 2", r)); // division always float
+    try expectFloat(0.0, try testEval(std.testing.allocator, "0 + 0.0", r));
+    try expectInt(0, try testEval(std.testing.allocator, "0 + 0", r));
 
-    try expectInt(14, try eval(std.testing.allocator, "2 + 3 * 4", r));
-    try expectInt(20, try eval(std.testing.allocator, "(2 + 3) * 4", r));
+    try expectInt(14, try testEval(std.testing.allocator, "2 + 3 * 4", r));
+    try expectInt(20, try testEval(std.testing.allocator, "(2 + 3) * 4", r));
 }
 
 test "expr comparison" {
     const r = VarResolver.none();
 
-    try expectInt(1, try eval(std.testing.allocator, "5 > 3", r));
-    try expectInt(0, try eval(std.testing.allocator, "2 > 3", r));
-    try expectInt(1, try eval(std.testing.allocator, "3 >= 3", r));
-    try expectInt(1, try eval(std.testing.allocator, "3 == 3", r));
-    try expectInt(1, try eval(std.testing.allocator, "3 != 4", r));
+    try expectInt(1, try testEval(std.testing.allocator, "5 > 3", r));
+    try expectInt(0, try testEval(std.testing.allocator, "2 > 3", r));
+    try expectInt(1, try testEval(std.testing.allocator, "3 >= 3", r));
+    try expectInt(1, try testEval(std.testing.allocator, "3 == 3", r));
+    try expectInt(1, try testEval(std.testing.allocator, "3 != 4", r));
 }
 
 test "expr logical" {
     const r = VarResolver.none();
 
-    try expectInt(1, try eval(std.testing.allocator, "1 && 1", r));
-    try expectInt(0, try eval(std.testing.allocator, "1 && 0", r));
-    try expectInt(1, try eval(std.testing.allocator, "0 || 1", r));
-    try expectInt(1, try eval(std.testing.allocator, "!0", r));
-    try expectInt(0, try eval(std.testing.allocator, "!1", r));
+    try expectInt(1, try testEval(std.testing.allocator, "1 && 1", r));
+    try expectInt(0, try testEval(std.testing.allocator, "1 && 0", r));
+    try expectInt(1, try testEval(std.testing.allocator, "0 || 1", r));
+    try expectInt(1, try testEval(std.testing.allocator, "!0", r));
+    try expectInt(0, try testEval(std.testing.allocator, "!1", r));
 }
 
 test "expr variables" {
@@ -985,20 +1081,20 @@ test "expr built-in variables" {
     var e1 = try parse(std.testing.allocator, "$ITER");
     defer e1.deinit(std.testing.allocator);
     try e1.bindVariables(&empty_slots);
-    try expectInt(42, try e1.eval(resolver_v));
+    try expectInt(42, (try e1.eval(resolver_v, std.testing.allocator)).value);
 
     var e2 = try parse(std.testing.allocator, "$ITER + 1");
     defer e2.deinit(std.testing.allocator);
     try e2.bindVariables(&empty_slots);
-    try expectInt(43, try e2.eval(resolver_v));
+    try expectInt(43, (try e2.eval(resolver_v, std.testing.allocator)).value);
 }
 
 test "expr functions" {
     const r = VarResolver.none();
 
-    try expectInt(3, try eval(std.testing.allocator, "min(3, 5)", r));
-    try expectInt(5, try eval(std.testing.allocator, "max(3, 5)", r));
-    try expectInt(7, try eval(std.testing.allocator, "max(min(10, 2), 7)", r));
+    try expectInt(3, try testEval(std.testing.allocator, "min(3, 5)", r));
+    try expectInt(5, try testEval(std.testing.allocator, "max(3, 5)", r));
+    try expectInt(7, try testEval(std.testing.allocator, "max(min(10, 2), 7)", r));
 }
 
 test "expr complex power check" {
@@ -1012,7 +1108,7 @@ test "expr complex power check" {
 }
 
 test "expr division by zero" {
-    try std.testing.expectError(error.DivisionByZero, eval(std.testing.allocator, "1 / 0", VarResolver.none()));
+    try std.testing.expectError(error.DivisionByZero, testEval(std.testing.allocator, "1 / 0", VarResolver.none()));
 }
 
 test "expr missing variable" {
@@ -1023,14 +1119,14 @@ test "expr missing variable" {
 }
 
 test "expr unmatched paren" {
-    try std.testing.expectError(error.UnmatchedParen, eval(std.testing.allocator, "(1 + 2", VarResolver.none()));
+    try std.testing.expectError(error.UnmatchedParen, testEval(std.testing.allocator, "(1 + 2", VarResolver.none()));
 }
 
 test "expr negative literal" {
     const r = VarResolver.none();
 
-    try expectInt(-3, try eval(std.testing.allocator, "-3", r));
-    try expectInt(-1, try eval(std.testing.allocator, "2 + -3", r));
+    try expectInt(-3, try testEval(std.testing.allocator, "-3", r));
+    try expectInt(-1, try testEval(std.testing.allocator, "2 + -3", r));
 }
 
 test "expr unary negation of variable" {
@@ -1061,10 +1157,10 @@ test "expr parse reuse" {
     try expr_obj.bindVariables(&slots);
 
     try vars.put("x", "3");
-    try expectInt(7, try expr_obj.eval(tc.resolver()));
+    try expectInt(7, (try expr_obj.eval(tc.resolver(), std.testing.allocator)).value);
 
     try vars.put("x", "10");
-    try expectInt(21, try expr_obj.eval(tc.resolver()));
+    try expectInt(21, (try expr_obj.eval(tc.resolver(), std.testing.allocator)).value);
 }
 
 test "resolveBuiltin recognizes $ELAPSED_MS" {
@@ -1152,7 +1248,7 @@ test "expr len() on list variable" {
     defer e.deinit(std.testing.allocator);
     try e.bindVariables(&slot_map);
 
-    try expectInt(3, try e.eval(tc.resolver()));
+    try expectInt(3, (try e.eval(tc.resolver(), std.testing.allocator)).value);
 }
 
 test "expr list indexing" {
@@ -1167,7 +1263,7 @@ test "expr list indexing" {
     defer e.deinit(std.testing.allocator);
     try e.bindVariables(&slot_map);
 
-    try expectFloat(20.0, try e.eval(tc.resolver()));
+    try expectFloat(20.0, (try e.eval(tc.resolver(), std.testing.allocator)).value);
 }
 
 test "expr list index with literal" {
@@ -1181,7 +1277,7 @@ test "expr list index with literal" {
     defer e.deinit(std.testing.allocator);
     try e.bindVariables(&slot_map);
 
-    try expectFloat(30.0, try e.eval(tc.resolver()));
+    try expectFloat(30.0, (try e.eval(tc.resolver(), std.testing.allocator)).value);
 }
 
 test "expr list index out of bounds" {
@@ -1195,7 +1291,7 @@ test "expr list index out of bounds" {
     defer e.deinit(std.testing.allocator);
     try e.bindVariables(&slot_map);
 
-    try std.testing.expectError(error.InvalidExpression, e.eval(tc.resolver()));
+    try std.testing.expectError(error.InvalidExpression, e.eval(tc.resolver(), std.testing.allocator));
 }
 
 test "expr list in arithmetic" {
@@ -1209,7 +1305,7 @@ test "expr list in arithmetic" {
     defer e.deinit(std.testing.allocator);
     try e.bindVariables(&slot_map);
 
-    try expectFloat(40.0, try e.eval(tc.resolver()));
+    try expectFloat(40.0, (try e.eval(tc.resolver(), std.testing.allocator)).value);
 }
 
 test "expr bare list variable is error" {
@@ -1223,7 +1319,7 @@ test "expr bare list variable is error" {
     defer e.deinit(std.testing.allocator);
     try e.bindVariables(&slot_map);
 
-    try std.testing.expectError(error.InvalidExpression, e.eval(tc.resolver()));
+    try std.testing.expectError(error.InvalidExpression, e.eval(tc.resolver(), std.testing.allocator));
 }
 
 test "expr len() in arithmetic" {
@@ -1237,7 +1333,7 @@ test "expr len() in arithmetic" {
     defer e.deinit(std.testing.allocator);
     try e.bindVariables(&slot_map);
 
-    try expectInt(3, try e.eval(tc.resolver()));
+    try expectInt(3, (try e.eval(tc.resolver(), std.testing.allocator)).value);
 }
 
 test "expr stack overflow rejected at parse time" {
@@ -1260,19 +1356,19 @@ test "expr stack overflow rejected at parse time" {
 
 test "expr string literal" {
     const r = VarResolver.none();
-    try expectString("hello", try eval(std.testing.allocator, "\"hello\"", r));
-    try expectString("", try eval(std.testing.allocator, "\"\"", r));
+    try expectString("hello", try testEval(std.testing.allocator, "\"hello\"", r));
+    try expectString("", try testEval(std.testing.allocator, "\"\"", r));
 }
 
 test "expr string comparison" {
     const r = VarResolver.none();
 
-    try expectInt(1, try eval(std.testing.allocator, "\"abc\" == \"abc\"", r));
-    try expectInt(0, try eval(std.testing.allocator, "\"abc\" == \"def\"", r));
-    try expectInt(1, try eval(std.testing.allocator, "\"abc\" != \"def\"", r));
-    try expectInt(1, try eval(std.testing.allocator, "\"abc\" < \"def\"", r));
-    try expectInt(0, try eval(std.testing.allocator, "\"def\" < \"abc\"", r));
-    try expectInt(1, try eval(std.testing.allocator, "\"z\" >= \"a\"", r));
+    try expectInt(1, try testEval(std.testing.allocator, "\"abc\" == \"abc\"", r));
+    try expectInt(0, try testEval(std.testing.allocator, "\"abc\" == \"def\"", r));
+    try expectInt(1, try testEval(std.testing.allocator, "\"abc\" != \"def\"", r));
+    try expectInt(1, try testEval(std.testing.allocator, "\"abc\" < \"def\"", r));
+    try expectInt(0, try testEval(std.testing.allocator, "\"def\" < \"abc\"", r));
+    try expectInt(1, try testEval(std.testing.allocator, "\"z\" >= \"a\"", r));
 }
 
 test "expr string variable comparison" {
@@ -1289,25 +1385,87 @@ test "expr string truthiness" {
     const r = VarResolver.none();
 
     // Non-empty string is truthy
-    try expectInt(1, try eval(std.testing.allocator, "\"hello\" && 1", r));
+    try expectInt(1, try testEval(std.testing.allocator, "\"hello\" && 1", r));
     // Empty string is falsy
-    try expectInt(0, try eval(std.testing.allocator, "\"\" && 1", r));
-    try expectInt(0, try eval(std.testing.allocator, "!\"hello\"", r));
-    try expectInt(1, try eval(std.testing.allocator, "!\"\"", r));
+    try expectInt(0, try testEval(std.testing.allocator, "\"\" && 1", r));
+    try expectInt(0, try testEval(std.testing.allocator, "!\"hello\"", r));
+    try expectInt(1, try testEval(std.testing.allocator, "!\"\"", r));
 }
 
 test "expr string arithmetic is error" {
     const r = VarResolver.none();
 
-    try std.testing.expectError(error.InvalidExpression, eval(std.testing.allocator, "\"a\" + 1", r));
-    try std.testing.expectError(error.InvalidExpression, eval(std.testing.allocator, "\"a\" * 2", r));
-    try std.testing.expectError(error.InvalidExpression, eval(std.testing.allocator, "\"a\" / 1", r));
-    try std.testing.expectError(error.InvalidExpression, eval(std.testing.allocator, "-\"a\"", r));
+    try std.testing.expectError(error.InvalidExpression, testEval(std.testing.allocator, "\"a\" + 1", r));
+    try std.testing.expectError(error.InvalidExpression, testEval(std.testing.allocator, "\"a\" * 2", r));
+    try std.testing.expectError(error.InvalidExpression, testEval(std.testing.allocator, "\"a\" / 1", r));
+    try std.testing.expectError(error.InvalidExpression, testEval(std.testing.allocator, "-\"a\"", r));
 }
 
 test "expr mixed string-number comparison is error" {
     const r = VarResolver.none();
 
-    try std.testing.expectError(error.InvalidExpression, eval(std.testing.allocator, "\"a\" > 1", r));
-    try std.testing.expectError(error.InvalidExpression, eval(std.testing.allocator, "1 == \"a\"", r));
+    try std.testing.expectError(error.InvalidExpression, testEval(std.testing.allocator, "\"a\" > 1", r));
+    try std.testing.expectError(error.InvalidExpression, testEval(std.testing.allocator, "1 == \"a\"", r));
+}
+
+test "expr join() on list variable" {
+    var tc: ListTestContext = .{};
+    tc.addList("channels", &.{ 1.0, 2.0, 3.0 });
+
+    var slot_map = tc.slots();
+    defer slot_map.deinit();
+
+    var e = try parse(std.testing.allocator, "join(${channels}, \",\")");
+    defer e.deinit(std.testing.allocator);
+    try e.bindVariables(&slot_map);
+
+    const result = try e.eval(tc.resolver(), std.testing.allocator);
+    defer result.deinit();
+    try expectString("1,2,3", result.value);
+}
+
+test "expr join() with custom delimiter" {
+    var tc: ListTestContext = .{};
+    tc.addList("items", &.{ 10.0, 20.0 });
+
+    var slot_map = tc.slots();
+    defer slot_map.deinit();
+
+    var e = try parse(std.testing.allocator, "join(${items}, \" | \")");
+    defer e.deinit(std.testing.allocator);
+    try e.bindVariables(&slot_map);
+
+    const result = try e.eval(tc.resolver(), std.testing.allocator);
+    defer result.deinit();
+    try expectString("10 | 20", result.value);
+}
+
+test "expr join() on empty list" {
+    var tc: ListTestContext = .{};
+    tc.addList("empty", &.{});
+
+    var slot_map = tc.slots();
+    defer slot_map.deinit();
+
+    var e = try parse(std.testing.allocator, "join(${empty}, \",\")");
+    defer e.deinit(std.testing.allocator);
+    try e.bindVariables(&slot_map);
+
+    const result = try e.eval(tc.resolver(), std.testing.allocator);
+    defer result.deinit();
+    try expectString("", result.value);
+}
+
+test "expr join() on non-list is error" {
+    var tc: ListTestContext = .{};
+    tc.addScalar("x", "42");
+
+    var slot_map = tc.slots();
+    defer slot_map.deinit();
+
+    var e = try parse(std.testing.allocator, "join(${x}, \",\")");
+    defer e.deinit(std.testing.allocator);
+    try e.bindVariables(&slot_map);
+
+    try std.testing.expectError(error.InvalidExpression, e.eval(tc.resolver(), std.testing.allocator));
 }
