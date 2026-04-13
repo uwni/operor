@@ -31,3 +31,13 @@ pub const InstrumentRuntime = struct {
 
 pub const Value = Context.Value;
 pub const RenderValue = Context.RenderValue;
+
+/// Type-erased fire-and-forget log sink for executor diagnostics.
+pub const LogSink = struct {
+    context: *anyopaque,
+    writeFn: *const fn (*anyopaque, []const u8) void,
+
+    pub fn writeAll(self: LogSink, bytes: []const u8) void {
+        self.writeFn(self.context, bytes);
+    }
+};

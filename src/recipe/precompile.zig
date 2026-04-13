@@ -11,7 +11,7 @@ const visa = @import("../visa/root.zig");
 
 const max_recipe_size: usize = 512 * 1024;
 
-const VarsMap = std.StringArrayHashMap(config.ArgScalarDoc);
+const VarsMap = std.StringArrayHashMap(config.ArgValueDoc);
 
 pub fn precompilePath(
     allocator: std.mem.Allocator,
@@ -448,8 +448,8 @@ fn getOrCompileCommand(
 fn buildInitialValues(
     arena_alloc: std.mem.Allocator,
     vars: *const VarsMap,
-) ![]const ?types.Value {
-    const initial_values = try arena_alloc.alloc(?types.Value, vars.count());
+) ![]const types.Value {
+    const initial_values = try arena_alloc.alloc(types.Value, vars.count());
     for (vars.values(), 0..) |value, idx| {
         initial_values[idx] = try compileInitialValue(arena_alloc, value);
     }
@@ -467,9 +467,9 @@ fn compileCommand(
     for (source.template, 0..) |segment, idx| {
         segments[idx] = switch (segment) {
             .literal => |literal| .{ .literal = try allocator.dupe(u8, literal) },
-            .placeholder => |placeholder| .{ .arg = blk: {
-                if (findArgIndex(arg_names.items, placeholder.name)) |arg_idx| break :blk arg_idx;
-                const name_copy = try allocator.dupe(u8, placeholder.name);
+            .placeholder => |name| .{ .arg = blk: {
+                if (findArgIndex(arg_names.items, name)) |arg_idx| break :blk arg_idx;
+                const name_copy = try allocator.dupe(u8, name);
                 try arg_names.append(allocator, name_copy);
                 break :blk arg_names.items.len - 1;
             } },
@@ -519,7 +519,20 @@ fn compileStepArgs(
     return args;
 }
 
-fn compileInitialValue(allocator: std.mem.Allocator, value: config.ArgScalarDoc) !types.Value {
+fn compileInitialValue(allocator: std.mem.Allocator, value: config.ArgValueDoc) !types.Value {
+    return switch (value) {
+        .scalar => |scalar| compileScalarValue(allocator, scalar),
+        .list => |items| blk: {
+            const compiled = try allocator.alloc(types.Value, items.len);
+            for (items, 0..) |item, idx| {
+                compiled[idx] = try compileScalarValue(allocator, item);
+            }
+            break :blk .{ .list = compiled };
+        },
+    };
+}
+
+fn compileScalarValue(allocator: std.mem.Allocator, value: config.ArgScalarDoc) !types.Value {
     return switch (value) {
         .string => |text| .{ .string = try allocator.dupe(u8, text) },
         .int => |number| .{ .int = number },
@@ -775,8 +788,7 @@ test "precompile preserves initial variables" {
     try std.testing.expectEqual(@as(usize, 2), compiled.initial_values.len);
     var found_float = false;
     var found_string = false;
-    for (compiled.initial_values) |val_opt| {
-        const val = val_opt orelse continue;
+    for (compiled.initial_values) |val| {
         switch (val) {
             .float => |number| {
                 try std.testing.expectEqual(@as(f64, 1.0), number);
@@ -1095,14 +1107,16 @@ test "precompile validates command arguments" {
 
 test "precompiled command renders via helper" {
     const gpa = std.testing.allocator;
+    var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
+    defer cmd_arena.deinit();
+    const alloc = cmd_arena.allocator();
 
-    const source = try Adapter.Command.parse(gpa, "VOLT {voltage}", null, null);
-    defer source.deinit(gpa);
+    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null);
 
     var instrument = types.PrecompiledInstrument{
         .adapter_name = "psu",
         .resource = "USB0::1::INSTR",
-        .commands = std.StringHashMap(*const types.PrecompiledCommand).init(gpa),
+        .commands = std.StringHashMap(*const types.PrecompiledCommand).init(alloc),
         .write_termination = "\n",
         .options = .{},
     };
@@ -1129,14 +1143,16 @@ test "precompiled command renders via helper" {
 
 test "precompiled command render falls back to heap when suffix leaves too little stack space" {
     const gpa = std.testing.allocator;
+    var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
+    defer cmd_arena.deinit();
+    const alloc = cmd_arena.allocator();
 
-    const source = try Adapter.Command.parse(gpa, "VOLT {voltage}", null, null);
-    defer source.deinit(gpa);
+    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null);
 
     var instrument = types.PrecompiledInstrument{
         .adapter_name = "psu",
         .resource = "USB0::1::INSTR",
-        .commands = std.StringHashMap(*const types.PrecompiledCommand).init(gpa),
+        .commands = std.StringHashMap(*const types.PrecompiledCommand).init(alloc),
         .write_termination = "\r\n",
         .options = .{},
     };
@@ -1868,6 +1884,79 @@ test "precompile sleep step" {
     try std.testing.expectEqual(@as(usize, 2), task_steps.len);
     switch (task_steps[1].action) {
         .sleep => |s| try std.testing.expectEqual(@as(u64, 100), s.duration_ms),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "precompile recipe with list variable" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/psu.toml",
+        \\[metadata]
+        \\
+        \\[commands.set]
+        \\write = "VOLT {voltage}"
+    );
+    try workspace.writeFile("recipes/list_vars.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.toml
+        \\    resource: USB0::1::INSTR
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  idx: 0
+        \\  voltages:
+        \\    - 1.5
+        \\    - 3.0
+        \\    - 4.5
+        \\tasks:
+        \\  - steps:
+        \\      - compute: "${voltages}[${idx}]"
+        \\        assign: idx
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/list_vars.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
+    defer dir.close();
+
+    var compiled = try precompilePath(gpa, recipe_path, dir, null);
+    defer compiled.deinit();
+
+    // Verify the list variable was parsed as initial values.
+    // Slot 0 = idx (scalar), Slot 1 = voltages (list).
+    const initial = compiled.initial_values;
+    try std.testing.expectEqual(@as(usize, 2), initial.len);
+
+    // idx = 0 (int or float)
+    const idx_val = initial[0];
+    switch (idx_val) {
+        .int => |v| try std.testing.expectEqual(@as(i64, 0), v),
+        .float => |v| try std.testing.expectApproxEqAbs(@as(f64, 0.0), v, 1e-9),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // voltages = [1.5, 3.0, 4.5]
+    const list_val = initial[1];
+    switch (list_val) {
+        .list => |items| {
+            try std.testing.expectEqual(@as(usize, 3), items.len);
+            switch (items[0]) {
+                .float => |v| try std.testing.expectApproxEqAbs(@as(f64, 1.5), v, 1e-9),
+                else => return error.TestUnexpectedResult,
+            }
+            switch (items[2]) {
+                .float => |v| try std.testing.expectApproxEqAbs(@as(f64, 4.5), v, 1e-9),
+                else => return error.TestUnexpectedResult,
+            }
+        },
         else => return error.TestUnexpectedResult,
     }
 }

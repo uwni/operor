@@ -1,7 +1,6 @@
 const std = @import("std");
 const serde_lib = @import("serde");
 const Adapter = @import("../adapter/Adapter.zig");
-const template = @import("../adapter/template.zig");
 const diagnostic = @import("diagnostic.zig");
 const expr = @import("../expr.zig");
 const visa = @import("../visa/root.zig");
@@ -11,13 +10,15 @@ pub const Value = union(enum) {
     int: i64,
     bool: bool,
     string: []const u8,
+    list: []const Value,
 
     pub fn toResolvedValue(self: Value) expr.ResolvedValue {
         return switch (self) {
-            .float => |f| .{ .number = f },
-            .int => |i| .{ .number = @floatFromInt(i) },
-            .bool => |b| .{ .number = if (b) 1.0 else 0.0 },
+            .float => |f| .{ .float = f },
+            .int => |i| .{ .int = i },
+            .bool => |b| .{ .int = if (b) 1 else 0 },
             .string => |s| .{ .string = s },
+            .list => unreachable, // lists are resolved by Context directly
         };
     }
 
@@ -27,6 +28,12 @@ pub const Value = union(enum) {
             .int => |i| try writer.print("{d}", .{i}),
             .bool => |b| try writer.writeAll(if (b) "true" else "false"),
             .string => |s| try writer.writeAll(s),
+            .list => |items| {
+                for (items, 0..) |item, idx| {
+                    if (idx > 0) try writer.writeAll(", ");
+                    try item.format(writer);
+                }
+            },
         }
     }
 };
@@ -88,7 +95,11 @@ pub const PrecompiledCommand = struct {
     /// Unique placeholder names in render order.
     arg_names: []const []const u8,
     /// Errors that can occur while rendering the precompiled template.
-    pub const RenderError = template.RenderError;
+    pub const RenderError = error{
+        MissingVariable,
+        BufferTooSmall,
+        OutOfMemory,
+    };
 
     /// Releases heap-owned template and placeholder data.
     pub fn deinit(self: PrecompiledCommand, allocator: std.mem.Allocator) void {
@@ -297,7 +308,7 @@ pub const PrecompiledRecipe = struct {
     /// Null when the recipe runs indefinitely or stop conditions are dynamic.
     expected_iterations: ?u64,
     /// Default values for slot-based context variables at execution startup.
-    initial_values: []const ?Value,
+    initial_values: []const Value,
 
     /// Releases all arena-owned precompiled recipe data.
     pub fn deinit(self: *PrecompiledRecipe) void {

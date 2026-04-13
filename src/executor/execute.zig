@@ -48,13 +48,7 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
     }
 
     const instruments = try allocator.alloc(common.InstrumentRuntime, compiled.instruments.count());
-    var ctx: common.Context = try .init(allocator, compiled.initial_values.len);
-
-    // Initialize context variables from the recipe.
-    for (compiled.initial_values, 0..) |value_opt, slot_idx| {
-        const value = value_opt orelse continue;
-        try ctx.setSlot(slot_idx, value);
-    }
+    var ctx: common.Context = try .init(allocator, compiled.initial_values);
 
     defer {
         for (instruments) |*runtime| {

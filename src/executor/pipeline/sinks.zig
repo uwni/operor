@@ -1,4 +1,5 @@
 const std = @import("std");
+const common = @import("../common.zig");
 const ring_buffer_mod = @import("ring_buffer.zig");
 const types = @import("types.zig");
 
@@ -45,6 +46,18 @@ pub const AsyncLog = struct {
                 message.deinit(self.allocator);
                 return;
             },
+        };
+    }
+
+    pub fn logSink(self: *AsyncLog) common.LogSink {
+        return .{
+            .context = @ptrCast(self),
+            .writeFn = struct {
+                fn write(ctx: *anyopaque, bytes: []const u8) void {
+                    const log: *AsyncLog = @ptrCast(@alignCast(ctx));
+                    log.writeAll(bytes);
+                }
+            }.write,
         };
     }
 };

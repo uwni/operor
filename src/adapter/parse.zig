@@ -1,7 +1,6 @@
 const std = @import("std");
 const Adapter = @import("Adapter.zig");
 const doc_parse = @import("../doc_parse.zig");
-const testing = @import("../testing.zig");
 const types = @import("types.zig");
 const visa = @import("../visa/root.zig");
 
@@ -28,12 +27,19 @@ pub fn parseAdapterInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_nam
     const alloc = adapter_arena.allocator();
 
     const parsed = try doc_parse.parseFileInDir(AdapterDoc, alloc, dir, file_name, max_adapter_file_size);
+    const path = try dir.realpathAlloc(alloc, file_name);
+
+    return buildAdapter(&adapter_arena, parsed, path);
+}
+
+fn buildAdapter(adapter_arena: *std.heap.ArenaAllocator, parsed: AdapterDoc, path: []const u8) !Adapter {
+    const alloc = adapter_arena.allocator();
 
     var commands: std.StringHashMap(types.Command) = .init(alloc);
     var it = parsed.commands.iterator();
     while (it.next()) |entry| {
         const cmd_doc = entry.value_ptr.*;
-        const cmd = try types.Command.parse(alloc, cmd_doc.write, cmd_doc.read, cmd_doc.description);
+        const cmd: types.Command = try .parse(alloc, cmd_doc.write, cmd_doc.read, cmd_doc.description);
         try commands.put(entry.key_ptr.*, cmd);
     }
 
@@ -41,8 +47,8 @@ pub fn parseAdapterInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_nam
     const write_termination = inst.write_termination orelse "";
 
     return Adapter{
-        .arena = adapter_arena,
-        .path = try dir.realpathAlloc(alloc, file_name),
+        .arena = adapter_arena.*,
+        .path = path,
         .meta = parsed.metadata,
         .instrument = inst,
         .commands = commands,
@@ -59,23 +65,12 @@ pub fn parseAdapterInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_nam
 test "parse adapter templates and placeholders" {
     const gpa = std.testing.allocator;
 
-    var workspace: testing.TestWorkspace = .init(gpa);
-    defer workspace.deinit();
-
-    try workspace.writeFile("adapters/vendor_psu_set_voltage.toml",
+    var adapter = try parseTestToml(gpa,
         \\[metadata]
         \\
         \\[commands.set_voltage]
         \\write = "VOLT {voltage},(@{channels})"
     );
-
-    const adapter_dir = try workspace.realpathAlloc("adapters");
-    defer gpa.free(adapter_dir);
-
-    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
-    defer dir.close();
-
-    var adapter = try parseAdapterInDir(gpa, dir, "vendor_psu_set_voltage.toml");
     defer adapter.deinit();
 
     const cmd = adapter.commands.get("set_voltage") orelse return error.TestUnexpectedResult;
@@ -83,11 +78,11 @@ test "parse adapter templates and placeholders" {
     try std.testing.expectEqual(@as(usize, 5), cmd.template.len);
 
     switch (cmd.template[1]) {
-        .placeholder => |placeholder| try std.testing.expectEqualStrings("voltage", placeholder.name),
+        .placeholder => |name| try std.testing.expectEqualStrings("voltage", name),
         else => return error.TestUnexpectedResult,
     }
     switch (cmd.template[3]) {
-        .placeholder => |placeholder| try std.testing.expectEqualStrings("channels", placeholder.name),
+        .placeholder => |name| try std.testing.expectEqualStrings("channels", name),
         else => return error.TestUnexpectedResult,
     }
 }
@@ -95,24 +90,13 @@ test "parse adapter templates and placeholders" {
 test "parse adapter response encoding" {
     const gpa = std.testing.allocator;
 
-    var workspace: testing.TestWorkspace = .init(gpa);
-    defer workspace.deinit();
-
-    try workspace.writeFile("adapters/vendor_dmm_measure_voltage.toml",
+    var adapter = try parseTestToml(gpa,
         \\[metadata]
         \\
         \\[commands.measure_voltage]
         \\write = "MEAS:VOLT?"
         \\read = "float"
     );
-
-    const adapter_dir = try workspace.realpathAlloc("adapters");
-    defer gpa.free(adapter_dir);
-
-    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
-    defer dir.close();
-
-    var adapter = try parseAdapterInDir(gpa, dir, "vendor_dmm_measure_voltage.toml");
     defer adapter.deinit();
 
     const cmd = adapter.commands.get("measure_voltage") orelse return error.TestUnexpectedResult;
@@ -123,10 +107,7 @@ test "parse adapter response encoding" {
 test "parse adapter with write termination" {
     const gpa = std.testing.allocator;
 
-    var workspace: testing.TestWorkspace = .init(gpa);
-    defer workspace.deinit();
-
-    try workspace.writeFile("adapters/serial_psu.toml",
+    var adapter = try parseTestToml(gpa,
         \\[metadata]
         \\version = "1.0"
         \\description = "PSU over serial"
@@ -137,14 +118,6 @@ test "parse adapter with write termination" {
         \\[commands.set_voltage]
         \\write = "VOLT {voltage}"
     );
-
-    const adapter_dir = try workspace.realpathAlloc("adapters");
-    defer gpa.free(adapter_dir);
-
-    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
-    defer dir.close();
-
-    var adapter = try parseAdapterInDir(gpa, dir, "serial_psu.toml");
     defer adapter.deinit();
 
     try std.testing.expectEqualStrings("\n", adapter.write_termination);
@@ -153,24 +126,13 @@ test "parse adapter with write termination" {
 test "parse adapter without write termination defaults to none" {
     const gpa = std.testing.allocator;
 
-    var workspace: testing.TestWorkspace = .init(gpa);
-    defer workspace.deinit();
-
-    try workspace.writeFile("adapters/gpib_dmm.toml",
+    var adapter = try parseTestToml(gpa,
         \\[metadata]
         \\
         \\[commands.measure]
         \\write = "MEAS?"
         \\read = "float"
     );
-
-    const adapter_dir = try workspace.realpathAlloc("adapters");
-    defer gpa.free(adapter_dir);
-
-    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
-    defer dir.close();
-
-    var adapter = try parseAdapterInDir(gpa, dir, "gpib_dmm.toml");
     defer adapter.deinit();
 
     try std.testing.expectEqualStrings("", adapter.write_termination);
@@ -179,10 +141,7 @@ test "parse adapter without write termination defaults to none" {
 test "parse adapter instrument options" {
     const gpa = std.testing.allocator;
 
-    var workspace: testing.TestWorkspace = .init(gpa);
-    defer workspace.deinit();
-
-    try workspace.writeFile("adapters/tcp_scope.toml",
+    var adapter = try parseTestToml(gpa,
         \\[metadata]
         \\version = "1.0"
         \\description = "Scope over TCPIP"
@@ -198,14 +157,6 @@ test "parse adapter instrument options" {
         \\write = "*IDN?"
         \\read = "string"
     );
-
-    const adapter_dir = try workspace.realpathAlloc("adapters");
-    defer gpa.free(adapter_dir);
-
-    var dir = try std.fs.openDirAbsolute(adapter_dir, .{});
-    defer dir.close();
-
-    var adapter = try parseAdapterInDir(gpa, dir, "tcp_scope.toml");
     defer adapter.deinit();
 
     try std.testing.expectEqual(@as(?u32, 2500), adapter.options.timeout_ms);
@@ -213,4 +164,14 @@ test "parse adapter instrument options" {
     try std.testing.expectEqualStrings("\r\n", adapter.write_termination);
     try std.testing.expectEqual(@as(u32, 25), adapter.options.query_delay_ms);
     try std.testing.expectEqual(@as(usize, 4096), adapter.options.chunk_size);
+}
+
+fn parseTestToml(allocator: std.mem.Allocator, content: []const u8) !Adapter {
+    var adapter_arena: std.heap.ArenaAllocator = .init(allocator);
+    errdefer adapter_arena.deinit();
+    const alloc = adapter_arena.allocator();
+
+    const parsed = try doc_parse.parseByFormat(AdapterDoc, .toml, alloc, content);
+
+    return buildAdapter(&adapter_arena, parsed, try alloc.dupe(u8, "<test>"));
 }

@@ -4,7 +4,6 @@ const color = mibu.color;
 const Adapter = @import("../adapter/Adapter.zig");
 const recipe_mod = @import("../recipe/root.zig");
 const common = @import("common.zig");
-const pipeline_mod = @import("pipeline/root.zig");
 const expr = @import("../expr.zig");
 
 const warn_tag = color.print.fg(.yellow) ++ "[WARN]" ++ color.print.reset;
@@ -56,7 +55,7 @@ pub fn executeStep(
     step: *const recipe_mod.Step,
     ctx: *common.Context,
     dry_run: bool,
-    log_sink: pipeline_mod.AsyncLog,
+    log_sink: common.LogSink,
     scratch: *StepScratch,
 ) !?SavedValue {
     // Evaluate optional `if` guard.
@@ -90,7 +89,7 @@ fn executeCompute(
     allocator: std.mem.Allocator,
     comp: *const recipe_mod.Step.Compute,
     ctx: *common.Context,
-    log_sink: pipeline_mod.AsyncLog,
+    log_sink: common.LogSink,
 ) !?SavedValue {
     const result = comp.expression.eval(ctx.varResolver()) catch |err| switch (err) {
         error.VariableNotFound => {
@@ -108,12 +107,20 @@ fn executeCompute(
         else => return err,
     };
 
-    try ctx.setSlot(comp.save_slot, .{ .float = result });
+    try ctx.setSlot(comp.save_slot, switch (result) {
+        .int => |i| .{ .int = i },
+        .float => |f| .{ .float = f },
+        .string => |s| .{ .string = s },
+    });
 
     const save_column = comp.save_column orelse return null;
 
     // String for pipeline Frame.
-    const value_owned = try std.fmt.allocPrint(allocator, "{d}", .{result});
+    const value_owned = switch (result) {
+        .int => |i| try std.fmt.allocPrint(allocator, "{d}", .{i}),
+        .float => |f| try std.fmt.allocPrint(allocator, "{d}", .{f}),
+        .string => |s| try allocator.dupe(u8, s),
+    };
 
     return .{
         .column = save_column,
@@ -128,7 +135,7 @@ fn executeInstrumentCall(
     step: *const recipe_mod.Step.InstrumentCall,
     ctx: *common.Context,
     dry_run: bool,
-    log_sink: pipeline_mod.AsyncLog,
+    log_sink: common.LogSink,
     scratch: *StepScratch,
 ) !?SavedValue {
     const cmd = step.command;
@@ -217,10 +224,10 @@ pub fn parseResponse(encoding: Adapter.Encoding, resp: []const u8) !ParsedValue 
 fn resolveStepScalar(
     ctx: *const common.Context,
     value: recipe_mod.CompiledArgValue,
-) !common.Value {
+) common.Value {
     return switch (value) {
         .const_value => |const_value| const_value,
-        .binding => |binding| ctx.resolveBinding(binding) orelse error.MissingArgument,
+        .binding => |binding| ctx.resolveBinding(binding),
     };
 }
 
@@ -230,23 +237,27 @@ fn resolveStepArg(
     allocator: std.mem.Allocator,
 ) !common.RenderValue {
     return switch (value) {
-        .scalar => |scalar| .{ .scalar = try resolveStepScalar(ctx, scalar) },
+        .scalar => |scalar| .{ .scalar = resolveStepScalar(ctx, scalar) },
         .list => |items| blk: {
             const resolved = try allocator.alloc(common.Value, items.len);
             for (items, 0..) |item, idx| {
-                resolved[idx] = try resolveStepScalar(ctx, item);
+                resolved[idx] = resolveStepScalar(ctx, item);
             }
             break :blk .{ .list = resolved };
         },
     };
 }
 
-fn logWarning(log_sink: pipeline_mod.AsyncLog, message: []const u8) void {
-    log_sink.print(warn_tag ++ " {s}\n", .{message});
+fn logWarning(log_sink: common.LogSink, message: []const u8) void {
+    var buf: [512]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, warn_tag ++ " {s}\n", .{message}) catch return;
+    log_sink.writeAll(text);
 }
 
-fn logDryRun(log_sink: pipeline_mod.AsyncLog, adapter_name: []const u8, rendered: []const u8) void {
-    log_sink.print(dry_run_tag ++ " {s} -> {s}\n", .{ adapter_name, rendered });
+fn logDryRun(log_sink: common.LogSink, adapter_name: []const u8, rendered: []const u8) void {
+    var buf: [1024]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, dry_run_tag ++ " {s} -> {s}\n", .{ adapter_name, rendered }) catch return;
+    log_sink.writeAll(text);
 }
 
 test "executor parse response" {

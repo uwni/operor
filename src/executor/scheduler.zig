@@ -107,13 +107,14 @@ fn runTask(
             .instrument_call => |ic| &instruments[ic.instrument_idx],
             .compute, .sleep => null,
         };
+        var async_log = pipeline_runtime.asyncLog();
         const saved_value = try step_mod.executeStep(
             allocator,
             instrument,
             step,
             ctx,
             dry_run,
-            pipeline_runtime.asyncLog(),
+            async_log.logSink(),
             scratch,
         );
         if (saved_value) |captured| {
@@ -147,7 +148,7 @@ const TaskFrameBuilder = struct {
 
     fn deinit(self: *TaskFrameBuilder) void {
         for (self.values) |v| if (v) |owned| self.allocator.free(owned);
-        self.allocator.free(self.values);
+        if (self.values.len > 0) self.allocator.free(self.values);
     }
 
     fn captureOwned(self: *TaskFrameBuilder, column: usize, value_owned: []u8) void {
@@ -160,8 +161,8 @@ const TaskFrameBuilder = struct {
         if (!self.has_values) return null;
 
         const frame_values = self.values;
-        // Transfer ownership: allocate a fresh slate for builder reuse isn't needed
-        // since the builder is per-iteration. Just null out our pointer.
+        // Ownership of the values slice transfers to the returned Frame.
+        // Set to empty literal; deinit() skips freeing zero-length slices.
         self.values = &.{};
         self.has_values = false;
 

@@ -117,7 +117,7 @@ pub const RecipeConfig = struct {
     tasks: []TaskConfig,
     pipeline: ?PipelineConfig = null,
     stop_when: ?BooleanExpr = null,
-    vars: ?std.StringArrayHashMap(ArgScalarDoc) = null,
+    vars: ?std.StringArrayHashMap(ArgValueDoc) = null,
     expected_iterations: ?u64 = null,
 };
 

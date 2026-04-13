@@ -59,6 +59,7 @@ pub const Encoding = enum {
 };
 
 /// Parsed command entry from a adapter document.
+/// All owned data lives in the arena passed to `parse`; no individual `deinit` needed.
 pub const Command = struct {
     /// Optional human-readable description of the command.
     description: ?[]const u8 = null,
@@ -74,29 +75,17 @@ pub const Command = struct {
         read_value: ?[]const u8,
         description_value: ?[]const u8,
     ) !Command {
-        const parsed_template = try template.parseTemplate(allocator, write_template);
-        defer allocator.free(parsed_template);
-
         return .{
             .description = if (description_value) |d| try allocator.dupe(u8, d) else null,
             .response = try Encoding.resolveFromReadSpec(read_value),
-            .template = try cloneTemplateSegments(allocator, parsed_template),
+            .template = try template.parseTemplate(allocator, write_template),
         };
     }
 
-    /// Duplicates the parsed template into allocator-owned memory.
-    pub fn clone(self: Command, allocator: std.mem.Allocator) !Command {
-        return .{
-            .description = if (self.description) |d| try allocator.dupe(u8, d) else null,
-            .response = self.response,
-            .template = try cloneTemplateSegments(allocator, self.template),
-        };
-    }
-
-    /// Releases a command template previously allocated by `parse` or `clone`.
+    /// Frees all owned data allocated by `parse`.
     pub fn deinit(self: Command, allocator: std.mem.Allocator) void {
-        if (self.description) |d| allocator.free(d);
         template.freeSegments(allocator, self.template);
+        if (self.description) |d| allocator.free(d);
     }
 
     /// Returns unique placeholder names referenced by the command template.
@@ -107,9 +96,9 @@ pub const Command = struct {
         for (self.template) |segment| {
             switch (segment) {
                 .literal => {},
-                .placeholder => |placeholder| {
-                    if (containsString(placeholders.items, placeholder.name)) continue;
-                    try placeholders.append(allocator, placeholder.name);
+                .placeholder => |name| {
+                    if (containsString(placeholders.items, name)) continue;
+                    try placeholders.append(allocator, name);
                 },
             }
         }
@@ -123,47 +112,18 @@ pub const Command = struct {
         }
         return false;
     }
-
-    fn cloneTemplateSegments(
-        allocator: std.mem.Allocator,
-        source_template: []const template.Segment,
-    ) ![]template.Segment {
-        const cloned = try allocator.alloc(template.Segment, source_template.len);
-        errdefer allocator.free(cloned);
-
-        var initialized: usize = 0;
-        errdefer {
-            for (cloned[0..initialized]) |segment| {
-                switch (segment) {
-                    .literal => |literal| allocator.free(literal),
-                    .placeholder => |placeholder| allocator.free(placeholder.name),
-                }
-            }
-        }
-
-        for (source_template, 0..) |segment, idx| {
-            cloned[idx] = switch (segment) {
-                .literal => |literal| .{ .literal = try allocator.dupe(u8, literal) },
-                .placeholder => |placeholder| .{ .placeholder = .{ .name = try allocator.dupe(u8, placeholder.name) } },
-            };
-            initialized += 1;
-        }
-
-        return cloned;
-    }
 };
 
-test "adapter command clones and reports placeholders" {
+test "adapter command parses and reports placeholders" {
     const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const alloc = arena.allocator();
 
-    const parsed = try Command.parse(gpa, "VOLT {voltage},(@{channels})", null, null);
-    defer parsed.deinit(gpa);
+    const parsed = try Command.parse(alloc, "VOLT {voltage},(@{channels})", null, null);
 
-    const cloned = try parsed.clone(gpa);
-    defer cloned.deinit(gpa);
-
-    const placeholders = try cloned.placeholderNames(gpa);
-    defer gpa.free(placeholders);
+    const placeholders = try parsed.placeholderNames(alloc);
+    defer alloc.free(placeholders);
 
     try std.testing.expectEqual(@as(usize, 2), placeholders.len);
     try std.testing.expectEqualStrings("voltage", placeholders[0]);
