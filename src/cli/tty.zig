@@ -1,4 +1,6 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const is_windows = builtin.os.tag == .windows;
 const posix = std.posix;
 
 // ── ANSI attributes ─────────────────────────────────────────────────────
@@ -71,42 +73,90 @@ pub const clear = struct {
 
 // ── Terminal raw mode ───────────────────────────────────────────────────
 
-pub const RawTerm = struct {
+pub const RawTerm = if (is_windows) WinRawTerm else PosixRawTerm;
+
+const WinRawTerm = struct {
+    original_mode: u32,
+    handle: std.os.windows.HANDLE,
+
+    pub fn disableRawMode(self: *WinRawTerm) !void {
+        if (SetConsoleMode(self.handle, self.original_mode) == 0)
+            return error.Unexpected;
+    }
+};
+
+const PosixRawTerm = struct {
     original: posix.termios,
     handle: posix.fd_t,
 
-    pub fn disableRawMode(self: *RawTerm) !void {
+    pub fn disableRawMode(self: *PosixRawTerm) !void {
         try posix.tcsetattr(self.handle, .FLUSH, self.original);
     }
 };
 
-pub fn enableRawMode(handle: posix.fd_t) !RawTerm {
-    const original = try posix.tcgetattr(handle);
+pub fn enableRawMode(handle: if (is_windows) std.os.windows.HANDLE else posix.fd_t) !RawTerm {
+    if (is_windows) {
+        var mode: u32 = 0;
+        if (GetConsoleMode(handle, &mode) == 0) return error.Unexpected;
+        const raw_mode = mode & ~@as(u32, ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT) | ENABLE_VIRTUAL_TERMINAL_INPUT;
+        if (SetConsoleMode(handle, raw_mode) == 0) return error.Unexpected;
+        return .{ .original_mode = mode, .handle = handle };
+    } else {
+        const original = try posix.tcgetattr(handle);
 
-    var raw = original;
+        var raw = original;
 
-    raw.iflag.BRKINT = false;
-    raw.iflag.ICRNL = false;
-    raw.iflag.INPCK = false;
-    raw.iflag.ISTRIP = false;
-    raw.iflag.IXON = false;
+        raw.iflag.BRKINT = false;
+        raw.iflag.ICRNL = false;
+        raw.iflag.INPCK = false;
+        raw.iflag.ISTRIP = false;
+        raw.iflag.IXON = false;
 
-    raw.oflag.OPOST = false;
+        raw.oflag.OPOST = false;
 
-    raw.lflag.ECHO = false;
-    raw.lflag.ICANON = false;
-    raw.lflag.IEXTEN = false;
-    raw.lflag.ISIG = false;
+        raw.lflag.ECHO = false;
+        raw.lflag.ICANON = false;
+        raw.lflag.IEXTEN = false;
+        raw.lflag.ISIG = false;
 
-    raw.cflag.CSIZE = .CS8;
+        raw.cflag.CSIZE = .CS8;
 
-    raw.cc[@intFromEnum(posix.V.MIN)] = 1;
-    raw.cc[@intFromEnum(posix.V.TIME)] = 0;
+        raw.cc[@intFromEnum(posix.V.MIN)] = 1;
+        raw.cc[@intFromEnum(posix.V.TIME)] = 0;
 
-    try posix.tcsetattr(handle, .FLUSH, raw);
+        try posix.tcsetattr(handle, .FLUSH, raw);
 
-    return .{ .original = original, .handle = handle };
+        return .{ .original = original, .handle = handle };
+    }
 }
+
+// Windows console mode constants
+const ENABLE_ECHO_INPUT: u32 = 0x0004;
+const ENABLE_LINE_INPUT: u32 = 0x0002;
+const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+
+extern "kernel32" fn GetConsoleMode(hConsoleHandle: std.os.windows.HANDLE, lpMode: *u32) callconv(.winapi) i32;
+extern "kernel32" fn SetConsoleMode(hConsoleHandle: std.os.windows.HANDLE, dwMode: u32) callconv(.winapi) i32;
+extern "kernel32" fn ReadConsoleInputW(hConsoleInput: std.os.windows.HANDLE, lpBuffer: [*]INPUT_RECORD, nLength: u32, lpNumberOfEventsRead: *u32) callconv(.winapi) i32;
+extern "kernel32" fn PeekConsoleInputW(hConsoleInput: std.os.windows.HANDLE, lpBuffer: [*]INPUT_RECORD, nLength: u32, lpNumberOfEventsRead: *u32) callconv(.winapi) i32;
+
+const KEY_EVENT: u16 = 0x0001;
+
+const KEY_EVENT_RECORD = extern struct {
+    bKeyDown: i32,
+    wRepeatCount: u16,
+    wVirtualKeyCode: u16,
+    wVirtualScanCode: u16,
+    uChar: extern union { UnicodeChar: u16, AsciiChar: u8 },
+    dwControlKeyState: u32,
+};
+
+const INPUT_RECORD = extern struct {
+    EventType: u16,
+    _padding: u16 = 0,
+    Event: extern union { KeyEvent: KEY_EVENT_RECORD },
+};
 
 // ── Keyboard events ─────────────────────────────────────────────────────
 
@@ -141,6 +191,50 @@ pub const Event = union(enum) {
 
 /// Read the next terminal input event from `file`.
 pub fn nextEvent(file: std.Io.File) !Event {
+    if (is_windows) {
+        return nextEventWindows(file);
+    } else {
+        return nextEventPosix(file);
+    }
+}
+
+fn nextEventWindows(file: std.Io.File) !Event {
+    while (true) {
+        var record: [1]INPUT_RECORD = undefined;
+        var count: u32 = 0;
+        if (ReadConsoleInputW(file.handle, &record, 1, &count) == 0 or count == 0)
+            return .none;
+        if (record[0].EventType != KEY_EVENT) continue;
+        const key_ev = record[0].Event.KeyEvent;
+        if (key_ev.bKeyDown == 0) continue;
+
+        const vk = key_ev.wVirtualKeyCode;
+        const ctrl = (key_ev.dwControlKeyState & 0x000C) != 0; // LEFT_CTRL | RIGHT_CTRL
+        const uc = key_ev.uChar.UnicodeChar;
+
+        return switch (vk) {
+            0x0D => Event{ .key = .{ .code = .enter } },
+            0x1B => Event{ .key = .{ .code = .esc } },
+            0x08 => Event{ .key = .{ .code = .backspace } },
+            0x09 => Event{ .key = .{ .code = .tab } },
+            0x26 => Event{ .key = .{ .code = .up } },
+            0x28 => Event{ .key = .{ .code = .down } },
+            0x25 => Event{ .key = .{ .code = .left } },
+            0x27 => Event{ .key = .{ .code = .right } },
+            0x24 => Event{ .key = .{ .code = .home } },
+            0x23 => Event{ .key = .{ .code = .end } },
+            0x2E => Event{ .key = .{ .code = .delete } },
+            else => if (ctrl and uc >= 1 and uc <= 26)
+                Event{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = uc + 'a' - 1 } } }
+            else if (uc != 0)
+                Event{ .key = .{ .code = .{ .char = uc } } }
+            else
+                continue,
+        };
+    }
+}
+
+fn nextEventPosix(file: std.Io.File) !Event {
     const c0 = readByte(file.handle) orelse return .none;
 
     switch (c0) {
@@ -191,20 +285,15 @@ fn parseEscape(fd: posix.fd_t) Event {
             'D' => return Event{ .key = .{ .code = .left } },
             'H' => return Event{ .key = .{ .code = .home } },
             'F' => return Event{ .key = .{ .code = .end } },
-            '3' => {
+            '1', '3', '4' => |c2_num| {
                 const c3 = readByte(fd) orelse return .none;
-                if (c3 == '~') return Event{ .key = .{ .code = .delete } };
-                return .none;
-            },
-            '1' => {
-                const c3 = readByte(fd) orelse return .none;
-                if (c3 == '~') return Event{ .key = .{ .code = .home } };
-                return .none;
-            },
-            '4' => {
-                const c3 = readByte(fd) orelse return .none;
-                if (c3 == '~') return Event{ .key = .{ .code = .end } };
-                return .none;
+                if (c3 != '~') return .none;
+                return Event{ .key = .{ .code = switch (c2_num) {
+                    '1' => .home,
+                    '3' => .delete,
+                    '4' => .end,
+                    else => unreachable,
+                } } };
             },
             else => return .none,
         }

@@ -1,6 +1,6 @@
 ## Build
 
-Building Operor from source requires Zig 0.15.2 or newer.
+Building Operor from source requires Zig 0.16.0 or newer.
 
 Build the executable:
 

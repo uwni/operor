@@ -1,4 +1,6 @@
 const std = @import("std");
+const windows = std.os.windows;
+const builtin = @import("builtin");
 const c = @import("common.zig").c;
 
 // ---------------------------------------------------------------------------
@@ -53,7 +55,7 @@ pub const LoadDiagnostic = struct {
 };
 
 /// Platform-specific VISA shared library names tried in order when no explicit path is given.
-pub const default_lib_names: []const []const u8 = switch (@import("builtin").os.tag) {
+pub const default_lib_names: []const []const u8 = switch (builtin.os.tag) {
     .macos => &.{
         "/Library/Frameworks/VISA.framework/VISA",
         "/Library/Frameworks/VISA.framework/Versions/Current/VISA",
@@ -75,7 +77,15 @@ pub const default_lib_names: []const []const u8 = switch (@import("builtin").os.
 /// for the entire process lifetime because the returned function pointers
 /// become invalid after dlclose.
 pub fn load(path: ?[]const u8, diag: ?*LoadDiagnostic) Error!Vtable {
-    var lib: std.DynLib = if (path) |p| blk: {
+    if (builtin.os.tag == .windows) {
+        return loadWindows(path, diag);
+    } else {
+        return loadPosix(path, diag);
+    }
+}
+
+fn loadPosix(path: ?[]const u8, diag: ?*LoadDiagnostic) Error!Vtable {
+    var lib = if (path) |p| blk: {
         break :blk std.DynLib.open(p) catch {
             if (diag) |d| d.* = .{ .path = p };
             return error.VisaLibraryNotFound;
@@ -87,17 +97,58 @@ pub fn load(path: ?[]const u8, diag: ?*LoadDiagnostic) Error!Vtable {
         return error.VisaLibraryNotFound;
     };
 
-    var vtable: Vtable = undefined;
+    return resolveVtable(&lib, diag);
+}
 
+fn loadDll(name: []const u8) ?windows.HMODULE {
+    var wide_buf: [std.fs.max_path_bytes]u16 = undefined;
+    const wide_len = std.unicode.utf8ToUtf16Le(&wide_buf, name) catch return null;
+    if (wide_len >= wide_buf.len) return null;
+    wide_buf[wide_len] = 0;
+    return LoadLibraryExW(wide_buf[0..wide_len :0], null, 0);
+}
+
+fn loadWindows(path: ?[]const u8, diag: ?*LoadDiagnostic) Error!Vtable {
+    const handle: windows.HMODULE = if (path) |p|
+        loadDll(p) orelse {
+            if (diag) |d| d.* = .{ .path = p };
+            return error.VisaLibraryNotFound;
+        }
+    else for (default_lib_names) |name| {
+        if (loadDll(name)) |h| break h;
+    } else {
+        if (diag) |d| d.* = .{};
+        return error.VisaLibraryNotFound;
+    };
+
+    return resolveVtable(handle, diag);
+}
+
+fn resolveVtable(handle: anytype, diag: ?*LoadDiagnostic) Error!Vtable {
+    var vtable: Vtable = undefined;
     inline for (std.meta.fields(Vtable)) |field| {
         const ti = @typeInfo(field.type);
         const T = if (ti == .optional) ti.optional.child else field.type;
-        const ptr = lib.lookup(T, field.name);
+        const ptr: ?T = switch (@TypeOf(handle)) {
+            *std.DynLib => handle.lookup(T, field.name),
+            windows.HMODULE => if (GetProcAddress(handle, field.name)) |raw| @ptrCast(raw) else null,
+            else => unreachable,
+        };
         @field(vtable, field.name) = if (ti == .optional) ptr else ptr orelse {
             if (diag) |d| d.* = .{ .symbol = field.name };
             return error.VisaSymbolMissing;
         };
     }
-
     return vtable;
 }
+
+pub extern "kernel32" fn LoadLibraryExW(
+    lpLibFileName: windows.LPCWSTR,
+    hFile: ?windows.HANDLE,
+    dwFlags: windows.DWORD,
+) callconv(.winapi) ?windows.HMODULE;
+
+pub extern "kernel32" fn GetProcAddress(
+    hModule: windows.HMODULE,
+    lpProcName: windows.LPCSTR,
+) callconv(.winapi) ?windows.FARPROC;
