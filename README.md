@@ -1,6 +1,6 @@
 # Operor [ˈɔpɛrɔr]
 
-Operor Performs Experimental Runs On Resources.
+**Oᴘᴇʀᴏʀ Pᴇʀꜰᴏʀᴍꜱ Exᴘᴇʀɪᴍᴇɴᴛᴀʟ Rᴜɴꜱ Oɴ Rᴇꜱᴏᴜʀᴄᴇꜱ**
 
 Operor loads instrument adapters and recipes from JSON, precompiles command templates and expressions, and executes scheduled tasks with optional preview, dry-run, CSV output, and TCP streaming.
 
@@ -25,9 +25,10 @@ Operor loads instrument adapters and recipes from JSON, precompiles command temp
 > **macOS** users may get a Gatekeeper warning because the binary is not signed/notarized. If that happens, allow it manually in **System Settings -> Privacy & Security**.
   
 - For **Microsoft Windows** users, Run
-  ```ps
-  irm https://raw.githubusercontent.com/uwni/operor/main/install.ps1 | iex
-  ```
+
+```ps
+(command -v pwsh >/dev/null && pwsh || powershell) -ExecutionPolicy Bypass -NoProfile -Command "iwr https://raw.githubusercontent.com/uwni/operor/main/install.ps1 | iex"
+```
 
 ## Requirements
 
