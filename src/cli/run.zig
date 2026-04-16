@@ -1,6 +1,6 @@
 const std = @import("std");
 const clap = @import("clap");
-const ordo = @import("ordo");
+const operor = @import("operor");
 const common = @import("common.zig");
 
 /// Parser table for the `run` command.
@@ -26,49 +26,50 @@ const params = clap.parseParamsComptime(
 const Args = clap.ResultEx(clap.Help, &params, parsers);
 
 /// Parses and executes the `run` command, including preview mode.
-pub fn handle(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+pub fn handle(allocator: std.mem.Allocator, io: std.Io, iter: *std.process.Args.Iterator) !void {
     var diag = clap.Diagnostic{};
     var res: Args = clap.parseEx(clap.Help, &params, parsers, iter, .{
         .allocator = allocator,
         .diagnostic = &diag,
     }) catch |err| {
-        try diag.reportToFile(.stderr(), err);
+        try diag.reportToFile(io, .stderr(), err);
         return err;
     };
     defer res.deinit();
 
     if (res.args.help != 0) {
-        try common.usageAndHelpToFile(.stdout(), common.exe_name ++ " run", clap.Help, &params);
+        try common.usageAndHelpToFile(io, .stdout(), common.exe_name ++ " run", clap.Help, &params);
         return;
     }
 
     const adapter_dir = res.args.@"adapter-dir" orelse {
-        try common.usageAndHelpToFile(.stderr(), common.exe_name ++ " run", clap.Help, &params);
+        try common.usageAndHelpToFile(io, .stderr(), common.exe_name ++ " run", clap.Help, &params);
         return error.MissingAdapterDirectory;
     };
     const recipe_path = res.positionals[0] orelse {
-        try common.usageAndHelpToFile(.stderr(), common.exe_name ++ " run", clap.Help, &params);
+        try common.usageAndHelpToFile(io, .stderr(), common.exe_name ++ " run", clap.Help, &params);
         return error.MissingRecipePath;
     };
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const out = &stdout_writer.interface;
     defer out.flush() catch {};
 
     if (res.args.preview != 0) {
-        try ordo.preview(allocator, adapter_dir, recipe_path, out);
+        try operor.preview(allocator, io, adapter_dir, recipe_path, out);
         return;
     }
 
-    const opts = ordo.ExecOptions{
+    const opts = operor.ExecOptions{
         .adapter_dir = adapter_dir,
         .recipe_path = recipe_path,
+        .io = io,
         .dry_run = res.args.@"dry-run" != 0,
         .visa_lib = res.args.@"visa-lib",
         .log = out,
     };
 
-    try ordo.execute(allocator, opts);
+    try operor.execute(allocator, opts);
 }
 
 test "main parses run command" {
@@ -78,7 +79,7 @@ test "main parses run command" {
         "run",
         "--adapter-dir",
         "adapters",
-        "recipes/r1.yaml",
+        "recipes/r1.json",
         "--preview",
     } };
 
@@ -98,7 +99,7 @@ test "main parses run command" {
 
     try std.testing.expectEqual(@as(usize, 0), run.args.help);
     try std.testing.expectEqualStrings("adapters", run.args.@"adapter-dir".?);
-    try std.testing.expectEqualStrings("recipes/r1.yaml", run.positionals[0].?);
+    try std.testing.expectEqualStrings("recipes/r1.json", run.positionals[0].?);
     try std.testing.expect(run.args.preview != 0);
     try std.testing.expect(run.args.@"dry-run" == 0);
 }

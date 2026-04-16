@@ -19,6 +19,12 @@ pub const ViUInt32 = c.ViUInt32;
 pub const ViFindList = c.ViFindList;
 /// VISA attribute state type.
 pub const ViAttrState = c.ViAttrState;
+/// VISA asynchronous job identifier.
+pub const ViJobId = c.ViJobId;
+/// VISA event type code.
+pub const ViEventType = c.ViEventType;
+/// VISA event handle.
+pub const ViEvent = c.ViEvent;
 
 /// Project-level error set used by the VISA wrapper layer.
 pub const Error = error{

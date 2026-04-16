@@ -2,7 +2,7 @@ const std = @import("std");
 const clap = @import("clap");
 const build_options = @import("build_options");
 
-/// The executable name as set in build.zig (e.g. "ordo").
+/// The executable name as set in build.zig (e.g. "operor").
 pub const exe_name = build_options.exe_name;
 
 /// The package version from build.zig.zon, injected at build time.
@@ -16,14 +16,15 @@ pub const Command = enum {
 
 /// Prints "Usage: <name> <usage>" followed by the full help text to `file`.
 pub fn usageAndHelpToFile(
-    file: std.fs.File,
+    io: std.Io,
+    file: std.Io.File,
     name: []const u8,
     comptime Id: type,
     comptime params: []const clap.Param(Id),
 ) !void {
     var buf: [512]u8 = undefined;
-    var w = file.writer(&buf);
-    try w.interface.print("{s} is an automated experimental workflow engine for VISA-controlled instruments. ({s})\n\n", .{exe_name, version});
+    var w = file.writer(io, &buf);
+    try w.interface.print("{s} is an automated experimental workflow engine for VISA-controlled instruments. ({s})\n\n", .{ exe_name, version });
     try w.interface.print("Usage: {s} ", .{name});
     try clap.usage(&w.interface, Id, params);
     try w.interface.print("\n\n", .{});
@@ -34,21 +35,22 @@ pub fn usageAndHelpToFile(
 /// Writes a human-readable "unknown/missing command" message to stderr,
 /// then prints usage + help to stderr.
 ///
-/// `name`  – e.g. "ordo run"
+/// `name`  – e.g. "operor run"
 /// `arg`   – the unrecognised token typed by the user (empty string = nothing was typed)
 /// `valid` – comma-separated list of accepted values, e.g. "run, instrument, repl"
 pub fn reportUnknownPositional(
+    io: std.Io,
     comptime Id: type,
     comptime params: []const clap.Param(Id),
     name: []const u8,
     arg: []const u8,
     valid: []const u8,
 ) !void {
-    const stderr = std.fs.File.stderr();
-    try usageAndHelpToFile(stderr, name, Id, params);
+    const stderr: std.Io.File = .stderr();
+    try usageAndHelpToFile(io, stderr, name, Id, params);
 
     var buf: [256]u8 = undefined;
-    var w = stderr.writer(&buf);
+    var w = stderr.writer(io, &buf);
     if (arg.len > 0) {
         try w.interface.print(
             "\n\nUnknown command '{s}'. Valid commands: {s}.",

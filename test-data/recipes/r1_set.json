@@ -1,0 +1,26 @@
+{
+  "instruments": {
+    "d1": {
+      "adapter": "psu.json",
+      "resource": "USB0::1::INSTR"
+    }
+  },
+  "pipeline": {
+    "record": {"all": "all"}
+  },
+  "tasks": [
+    {
+      "steps": [
+        {
+          "call": {
+            "call": "d1.set",
+            "args": {
+              "voltage": {"scalar": {"string": "5"}}
+            },
+            "assign": "v"
+          }
+        }
+      ]
+    }
+  ]
+}

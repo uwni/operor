@@ -1,6 +1,7 @@
 const std = @import("std");
 const common = @import("common.zig");
 const execute_mod = @import("execute.zig");
+const parallel = @import("parallel.zig");
 const pipeline = @import("pipeline/root.zig");
 const scheduler = @import("scheduler.zig");
 const step = @import("step.zig");

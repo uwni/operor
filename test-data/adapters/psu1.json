@@ -1,0 +1,8 @@
+{
+  "metadata": {},
+  "commands": {
+    "set": {
+      "write": "VOLT {voltage}"
+    }
+  }
+}

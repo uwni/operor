@@ -1,5 +1,4 @@
 const std = @import("std");
-const serde_lib = @import("serde");
 const Adapter = @import("../adapter/Adapter.zig");
 const diagnostic = @import("diagnostic.zig");
 const expr = @import("../expr.zig");
@@ -129,16 +128,16 @@ pub const PrecompiledCommand = struct {
     ) RenderError!RenderedCommand {
         if (stack_buffer.len >= suffix.len) {
             const render_buffer = stack_buffer[0 .. stack_buffer.len - suffix.len];
-            var fbs = std.io.fixedBufferStream(render_buffer);
-            renderInternal(fbs.writer(), self.segments, args) catch |err| switch (err) {
-                error.NoSpaceLeft => {
+            var w: std.Io.Writer = .fixed(render_buffer);
+            renderInternal(&w, self.segments, args) catch |err| switch (err) {
+                error.WriteFailed => {
                     const owned = try renderAllocWithSuffix(allocator, self.segments, args, suffix);
                     return .{ .bytes = owned, .owned = owned };
                 },
                 else => unreachable,
             };
 
-            const rendered = fbs.getWritten();
+            const rendered = w.buffered();
             const combined_len = rendered.len + suffix.len;
             @memcpy(stack_buffer[rendered.len..combined_len], suffix);
             return .{ .bytes = stack_buffer[0..combined_len] };
@@ -178,6 +177,8 @@ pub const Step = struct {
         compute: Compute,
         /// Pause execution for a fixed duration.
         sleep: Sleep,
+        /// A group of independent steps that may be executed in parallel.
+        parallel: Parallel,
     };
 
     pub const InstrumentCall = struct {
@@ -209,6 +210,11 @@ pub const Step = struct {
     pub const Sleep = struct {
         /// Duration to sleep in milliseconds.
         duration_ms: u64,
+    };
+
+    pub const Parallel = struct {
+        /// Inner steps declared as independent by the user.
+        steps: []Step,
     };
 };
 
@@ -284,17 +290,13 @@ pub const RecordConfig = union(enum) {
     all: []const u8,
     /// Record only the listed variable names.
     explicit: []const []const u8,
-
-    pub const serde = .{
-        .tag = serde_lib.UnionTag.untagged,
-    };
 };
 
 /// Fully validated recipe ready for preview or execution.
 /// Owns arena-backed data and should have a single logical owner until `deinit`.
 pub const PrecompiledRecipe = struct {
     arena: std.heap.ArenaAllocator,
-    instruments: std.StringArrayHashMap(PrecompiledInstrument),
+    instruments: std.StringArrayHashMapUnmanaged(PrecompiledInstrument),
     tasks: []Task,
     pipeline: PipelineConfig,
     /// Optional stop condition expression; scheduler stops when this evaluates to truthy.
@@ -313,11 +315,12 @@ pub const PrecompiledRecipe = struct {
     /// Loads and precompiles a recipe document from disk.
     pub fn precompilePath(
         allocator: std.mem.Allocator,
+        io: std.Io,
         recipe_path: []const u8,
-        adapter_dir: std.fs.Dir,
-        precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
+        adapter_dir: std.Io.Dir,
+        precompile_diagnostic: *diagnostic.PrecompileDiagnostic,
     ) !PrecompiledRecipe {
-        return @import("precompile.zig").precompilePath(allocator, recipe_path, adapter_dir, precompile_diagnostic);
+        return @import("precompile.zig").precompilePath(allocator, io, recipe_path, adapter_dir, precompile_diagnostic);
     }
 };
 
@@ -336,14 +339,13 @@ fn renderAllocWithSuffix(
     args: []const RenderValue,
     suffix: []const u8,
 ) PrecompiledCommand.RenderError![]u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(allocator);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
 
-    renderInternal(out.writer(allocator), segments, args) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => |e| return e,
+    renderInternal(&out.writer, segments, args) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
     };
 
-    out.appendSlice(allocator, suffix) catch return error.OutOfMemory;
-    return out.toOwnedSlice(allocator) catch error.OutOfMemory;
+    out.writer.writeAll(suffix) catch return error.OutOfMemory;
+    return out.toOwnedSlice() catch error.OutOfMemory;
 }

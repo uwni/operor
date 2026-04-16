@@ -26,24 +26,33 @@ jobs:
   build_and_release:
     name: Build & Release
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: aarch64-macos
+            runner: ubuntu-latest
             os: macos
             ext: ""
           - target: x86_64-macos
+            runner: ubuntu-latest
             os: macos
             ext: ""
           - target: x86_64-linux-musl
+            runner: ubuntu-latest
             os: linux
             ext: ""
           - target: aarch64-linux-musl
+            runner: ubuntu-latest
             os: linux
             ext: ""
           - target: x86_64-windows
+            runner: windows-latest
+            os: windows
+            ext: ".exe"
+          - target: aarch64-windows
+            runner: windows-latest
             os: windows
             ext: ".exe"
 
@@ -53,7 +62,7 @@ jobs:
         with:
           version: 0.15.2
       - name: Build (${{ matrix.target }})
-        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast -Dstrip=true
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast
       - name: Package Artifact
         id: package
         shell: bash
@@ -64,7 +73,7 @@ jobs:
             VERSION="dev-${GITHUB_SHA:0:7}"
           fi
 
-          BIN_NAME="ordo"
+          BIN_NAME="operor"
           ARTIFACT_NAME="${BIN_NAME}-${VERSION}-${{ matrix.target }}"
           STAGING_DIR="staging"
           mkdir -p "${STAGING_DIR}"
@@ -80,7 +89,7 @@ jobs:
       - name: Upload Artifact to Workflow
         uses: actions/upload-artifact@v4
         with:
-          name: ordo-${{ matrix.target }}
+          name: operor-${{ matrix.target }}
           path: ${{ steps.package.outputs.archive_file }}
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')

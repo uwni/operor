@@ -597,8 +597,16 @@ fn joinList(allocator: std.mem.Allocator, list: ResolvedList, delimiter: []const
         if (i > 0) out.appendSlice(allocator, delimiter) catch return error.OutOfMemory;
         const elem = list.at(i) orelse return error.VariableNotFound;
         switch (elem) {
-            .int => |v| out.writer(allocator).print("{d}", .{v}) catch return error.OutOfMemory,
-            .float => |v| out.writer(allocator).print("{d}", .{v}) catch return error.OutOfMemory,
+            .int => |v| {
+                var buf: [64]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "{d}", .{v}) catch return error.OutOfMemory;
+                out.appendSlice(allocator, s) catch return error.OutOfMemory;
+            },
+            .float => |v| {
+                var buf: [64]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "{d}", .{v}) catch return error.OutOfMemory;
+                out.appendSlice(allocator, s) catch return error.OutOfMemory;
+            },
             .bool => |b| out.appendSlice(allocator, if (b) "true" else "false") catch return error.OutOfMemory,
             .string => |s| out.appendSlice(allocator, s) catch return error.OutOfMemory,
             .list => return error.InvalidExpression,
@@ -1007,13 +1015,13 @@ fn testBoundEval(source: []const u8, vars: *const std.StringHashMap([]const u8))
     var expr_obj = try parse(std.testing.allocator, source);
     defer expr_obj.deinit(std.testing.allocator);
     var tc = TestContext{ .vars = vars };
-    var slots: std.StringArrayHashMap(void) = .init(std.testing.allocator);
-    defer slots.deinit();
+    var slots: std.StringArrayHashMapUnmanaged(void) = .empty;
+    defer slots.deinit(std.testing.allocator);
     var it = expr_obj.variables();
     while (it.next()) |name| {
         if (slots.getIndex(name) == null) {
             _ = tc.addVar(name);
-            try slots.put(name, {});
+            try slots.put(std.testing.allocator, name, {});
         }
     }
     try expr_obj.bindVariables(&slots);
@@ -1110,8 +1118,8 @@ test "expr built-in variables" {
         }.resolve,
     };
 
-    var empty_slots: std.StringArrayHashMap(void) = .init(std.testing.allocator);
-    defer empty_slots.deinit();
+    var empty_slots: std.StringArrayHashMapUnmanaged(void) = .empty;
+    defer empty_slots.deinit(std.testing.allocator);
 
     var e1 = try parse(std.testing.allocator, "$ITER");
     defer e1.deinit(std.testing.allocator);
@@ -1180,13 +1188,13 @@ test "expr parse reuse" {
     defer expr_obj.deinit(std.testing.allocator);
 
     var tc = TestContext{ .vars = &vars };
-    var slots: std.StringArrayHashMap(void) = .init(std.testing.allocator);
-    defer slots.deinit();
+    var slots: std.StringArrayHashMapUnmanaged(void) = .empty;
+    defer slots.deinit(std.testing.allocator);
     var it = expr_obj.variables();
     while (it.next()) |name| {
         if (slots.getIndex(name) == null) {
             _ = tc.addVar(name);
-            try slots.put(name, {});
+            try slots.put(std.testing.allocator, name, {});
         }
     }
     try expr_obj.bindVariables(&slots);
@@ -1263,10 +1271,10 @@ const ListTestContext = struct {
         return .{ .ctx = @ptrCast(self), .resolve_fn = resolve };
     }
 
-    fn slots(self: *const ListTestContext) std.StringArrayHashMap(void) {
-        var map: std.StringArrayHashMap(void) = .init(std.testing.allocator);
+    fn slots(self: *const ListTestContext) std.StringArrayHashMapUnmanaged(void) {
+        var map: std.StringArrayHashMapUnmanaged(void) = .empty;
         for (self.slot_names[0..self.count]) |name| {
-            map.put(name, {}) catch unreachable;
+            map.put(std.testing.allocator, name, {}) catch unreachable;
         }
         return map;
     }
@@ -1277,7 +1285,7 @@ test "expr len() on list variable" {
     tc.addList("voltages", &.{ 1.0, 2.0, 3.0 });
 
     var slot_map = tc.slots();
-    defer slot_map.deinit();
+    defer slot_map.deinit(std.testing.allocator);
 
     var e = try parse(std.testing.allocator, "len(${voltages})");
     defer e.deinit(std.testing.allocator);
@@ -1292,7 +1300,7 @@ test "expr list indexing" {
     tc.addScalar("idx", "1");
 
     var slot_map = tc.slots();
-    defer slot_map.deinit();
+    defer slot_map.deinit(std.testing.allocator);
 
     var e = try parse(std.testing.allocator, "${arr}[${idx}]");
     defer e.deinit(std.testing.allocator);
@@ -1306,7 +1314,7 @@ test "expr list index with literal" {
     tc.addList("arr", &.{ 10.0, 20.0, 30.0 });
 
     var slot_map = tc.slots();
-    defer slot_map.deinit();
+    defer slot_map.deinit(std.testing.allocator);
 
     var e = try parse(std.testing.allocator, "${arr}[2]");
     defer e.deinit(std.testing.allocator);
@@ -1320,7 +1328,7 @@ test "expr list index out of bounds" {
     tc.addList("arr", &.{ 10.0, 20.0 });
 
     var slot_map = tc.slots();
-    defer slot_map.deinit();
+    defer slot_map.deinit(std.testing.allocator);
 
     var e = try parse(std.testing.allocator, "${arr}[5]");
     defer e.deinit(std.testing.allocator);
@@ -1334,7 +1342,7 @@ test "expr list in arithmetic" {
     tc.addList("arr", &.{ 10.0, 20.0, 30.0 });
 
     var slot_map = tc.slots();
-    defer slot_map.deinit();
+    defer slot_map.deinit(std.testing.allocator);
 
     var e = try parse(std.testing.allocator, "${arr}[0] + ${arr}[2]");
     defer e.deinit(std.testing.allocator);
@@ -1348,7 +1356,7 @@ test "expr bare list variable is error" {
     tc.addList("arr", &.{1.0});
 
     var slot_map = tc.slots();
-    defer slot_map.deinit();
+    defer slot_map.deinit(std.testing.allocator);
 
     var e = try parse(std.testing.allocator, "${arr} + 1");
     defer e.deinit(std.testing.allocator);
@@ -1362,7 +1370,7 @@ test "expr len() in arithmetic" {
     tc.addList("items", &.{ 5.0, 10.0, 15.0, 20.0 });
 
     var slot_map = tc.slots();
-    defer slot_map.deinit();
+    defer slot_map.deinit(std.testing.allocator);
 
     var e = try parse(std.testing.allocator, "len(${items}) - 1");
     defer e.deinit(std.testing.allocator);
@@ -1376,16 +1384,18 @@ test "expr stack overflow rejected at parse time" {
     // Each pending "1+" keeps its LHS on the stack while recursing into the RHS,
     // so 65 levels requires 65 simultaneous stack slots → exceeds max_stack.
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var pos: usize = 0;
     for (0..Expression.max_stack + 1) |_| {
-        writer.writeAll("1+(") catch unreachable;
+        @memcpy(buf[pos..][0..3], "1+(");
+        pos += 3;
     }
-    writer.writeAll("1") catch unreachable;
+    buf[pos] = '1';
+    pos += 1;
     for (0..Expression.max_stack + 1) |_| {
-        writer.writeByte(')') catch unreachable;
+        buf[pos] = ')';
+        pos += 1;
     }
-    const src = stream.getWritten();
+    const src = buf[0..pos];
     try std.testing.expectError(error.StackOverflow, parse(std.testing.allocator, src));
 }
 
@@ -1448,7 +1458,7 @@ test "expr join() on list variable" {
     tc.addList("channels", &.{ 1.0, 2.0, 3.0 });
 
     var slot_map = tc.slots();
-    defer slot_map.deinit();
+    defer slot_map.deinit(std.testing.allocator);
 
     var e = try parse(std.testing.allocator, "join(${channels}, \",\")");
     defer e.deinit(std.testing.allocator);
@@ -1464,7 +1474,7 @@ test "expr join() with custom delimiter" {
     tc.addList("items", &.{ 10.0, 20.0 });
 
     var slot_map = tc.slots();
-    defer slot_map.deinit();
+    defer slot_map.deinit(std.testing.allocator);
 
     var e = try parse(std.testing.allocator, "join(${items}, \" | \")");
     defer e.deinit(std.testing.allocator);
@@ -1480,7 +1490,7 @@ test "expr join() on empty list" {
     tc.addList("empty", &.{});
 
     var slot_map = tc.slots();
-    defer slot_map.deinit();
+    defer slot_map.deinit(std.testing.allocator);
 
     var e = try parse(std.testing.allocator, "join(${empty}, \",\")");
     defer e.deinit(std.testing.allocator);
@@ -1496,7 +1506,7 @@ test "expr join() on non-list is error" {
     tc.addScalar("x", "42");
 
     var slot_map = tc.slots();
-    defer slot_map.deinit();
+    defer slot_map.deinit(std.testing.allocator);
 
     var e = try parse(std.testing.allocator, "join(${x}, \",\")");
     defer e.deinit(std.testing.allocator);

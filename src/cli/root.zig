@@ -5,15 +5,11 @@ const repl = @import("repl.zig");
 const run = @import("run.zig");
 
 /// Parses top-level CLI arguments and dispatches to the selected subcommand.
-pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer {
-        const check = gpa_state.deinit();
-        std.debug.assert(check == .ok);
-    }
-    const allocator = gpa_state.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    var iter = try std.process.ArgIterator.initWithAllocator(allocator);
+    var iter = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
     defer iter.deinit();
     _ = iter.next();
 
@@ -23,13 +19,13 @@ pub fn main() !void {
         .diagnostic = &diag,
         .terminating_positional = 0,
     }) catch |err| {
-        try diag.reportToFile(.stderr(), err);
+        try diag.reportToFile(io, .stderr(), err);
         return err;
     };
     defer res.deinit();
 
     if (res.args.help != 0) {
-        try common.usageAndHelpToFile(.stdout(), common.exe_name, clap.Help, &common.root_params);
+        try common.usageAndHelpToFile(io, .stdout(), common.exe_name, clap.Help, &common.root_params);
         return;
     }
 
@@ -37,6 +33,7 @@ pub fn main() !void {
     // user what they actually typed instead of a cryptic error code.
     const raw = res.positionals[0] orelse {
         try common.reportUnknownPositional(
+            io,
             clap.Help,
             &common.root_params,
             common.exe_name,
@@ -48,6 +45,7 @@ pub fn main() !void {
 
     const command = std.meta.stringToEnum(common.Command, raw) orelse {
         try common.reportUnknownPositional(
+            io,
             clap.Help,
             &common.root_params,
             common.exe_name,
@@ -58,8 +56,8 @@ pub fn main() !void {
     };
 
     switch (command) {
-        .run => try run.handle(allocator, &iter),
-        .repl => try repl.handle(allocator, &iter),
+        .run => try run.handle(allocator, io, &iter),
+        .repl => try repl.handle(allocator, io, &iter),
     }
 }
 

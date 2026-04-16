@@ -1,6 +1,6 @@
 ## Build
 
-Building Ordo from source requires Zig 0.15.2 or newer.
+Building Operor from source requires Zig 0.15.2 or newer.
 
 Build the executable:
 
@@ -11,10 +11,10 @@ zig build
 The executable is produced at:
 
 ```text
-zig-out/bin/ordo
+zig-out/bin/operor
 ```
 
-If you build from source and do not install it into `PATH`, run it as `./zig-out/bin/ordo`.
+If you build from source and do not install it into `PATH`, run it as `./zig-out/bin/operor`.
 
 Run tests with:
 

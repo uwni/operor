@@ -1,6 +1,6 @@
 const std = @import("std");
 const clap = @import("clap");
-const ordo = @import("ordo");
+const operor = @import("operor");
 const common = @import("common.zig");
 
 /// Parser table for the `repl` command.
@@ -20,30 +20,30 @@ const params = clap.parseParamsComptime(
 const Args = clap.ResultEx(clap.Help, &params, parsers);
 
 /// Parses and executes the `repl` command.
-pub fn handle(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+pub fn handle(allocator: std.mem.Allocator, io: std.Io, iter: *std.process.Args.Iterator) !void {
     var diag = clap.Diagnostic{};
     var res: Args = clap.parseEx(clap.Help, &params, parsers, iter, .{
         .allocator = allocator,
         .diagnostic = &diag,
     }) catch |err| {
-        try diag.reportToFile(.stderr(), err);
+        try diag.reportToFile(io, .stderr(), err);
         return err;
     };
     defer res.deinit();
 
     if (res.args.help != 0) {
-        try common.usageAndHelpToFile(.stdout(), common.exe_name ++ " repl", clap.Help, &params);
+        try common.usageAndHelpToFile(io, .stdout(), common.exe_name ++ " repl", clap.Help, &params);
         return;
     }
 
     const resource_addr = res.args.resource;
 
-    var stdin_buffer: [ordo.repl_stdin_buffer_bytes]u8 = undefined;
-    var stdin_reader = std.fs.File.stdin().reader(&stdin_buffer);
+    var stdin_buffer: [operor.repl_stdin_buffer_bytes]u8 = undefined;
+    var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buffer);
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    try ordo.repl(allocator, resource_addr, res.args.@"visa-lib", &stdin_reader.interface, &stdout_writer.interface);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    try operor.repl(allocator, io, resource_addr, res.args.@"visa-lib", &stdin_reader.interface, &stdout_writer.interface);
 }
 
 test "main parses repl command with resource flag" {

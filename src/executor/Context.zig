@@ -8,7 +8,8 @@ pub const RenderValue = recipe_types.RenderValue;
 
 /// Execution-time value store used for `${name}` substitutions and `assign` outputs.
 allocator: std.mem.Allocator,
-start_ns: i128 = 0,
+io: std.Io,
+start_ns: i96 = 0,
 iteration: u64 = 0,
 task_idx: usize = 0,
 values: []Slot,
@@ -26,10 +27,10 @@ const Slot = union(enum) {
 };
 
 /// Creates an execution context from initial values, deep-copying owned data.
-pub fn init(allocator: std.mem.Allocator, initial_values: []const Value) !Context {
+pub fn init(allocator: std.mem.Allocator, io: std.Io, initial_values: []const Value) !Context {
     const values = try allocator.alloc(Slot, initial_values.len);
     @memset(values, .unset);
-    var self: Context = .{ .allocator = allocator, .values = values };
+    var self: Context = .{ .allocator = allocator, .io = io, .values = values };
     errdefer self.deinit();
     for (initial_values, 0..) |value, idx| {
         self.values[idx] = try self.dupeToSlot(value);
@@ -123,8 +124,12 @@ pub fn resolveBinding(self: *const Context, binding: expr.VariableBinding) Value
             .task_idx => .{ .int = @intCast(self.task_idx) },
             .elapsed_ms => .{ .int = if (self.start_ns == 0)
                 @as(i64, 0)
-            else
-                @intCast(@divTrunc(std.time.nanoTimestamp() - self.start_ns, 1_000_000)) },
+            else blk: {
+                const now = std.Io.Timestamp.now(self.io, .awake).toNanoseconds();
+                const delta_ns = now - self.start_ns;
+                const ms = @divTrunc(delta_ns, 1_000_000);
+                break :blk @as(i64, @intCast(@min(ms, std.math.maxInt(i64))));
+            } },
         },
     };
 }
@@ -217,7 +222,7 @@ test "Context exposes built-ins alongside stored values" {
     const testing = std.testing;
     const expr_mod = @import("../expr.zig");
 
-    var ctx: Context = try .init(testing.allocator, &.{Value{ .float = 3.3 }});
+    var ctx: Context = try .init(testing.allocator, std.testing.io, &.{Value{ .float = 3.3 }});
     defer ctx.deinit();
 
     ctx.task_idx = 2;
@@ -229,8 +234,8 @@ test "Context exposes built-ins alongside stored values" {
 
     var expr_obj = try expr_mod.parse(testing.allocator, "$ITER + $TASK_IDX");
     defer expr_obj.deinit(testing.allocator);
-    var empty_slots: std.StringArrayHashMap(void) = .init(testing.allocator);
-    defer empty_slots.deinit();
+    var empty_slots: std.StringArrayHashMapUnmanaged(void) = .empty;
+    defer empty_slots.deinit(testing.allocator);
     try expr_obj.bindVariables(&empty_slots);
     const eval_result = try expr_obj.eval(ctx.varResolver(), testing.allocator);
     try testing.expectEqual(@as(i64, 9), eval_result.value.int);
@@ -239,14 +244,14 @@ test "Context exposes built-ins alongside stored values" {
 test "Context stores run start state separately from iteration state" {
     const testing = std.testing;
 
-    var ctx: Context = try .init(testing.allocator, &.{});
+    var ctx: Context = try .init(testing.allocator, std.testing.io, &.{});
     defer ctx.deinit();
 
     ctx.start_ns = 1234;
     ctx.task_idx = 5;
     ctx.iteration = 9;
 
-    try testing.expectEqual(@as(i128, 1234), ctx.start_ns);
+    try testing.expectEqual(@as(i96, 1234), ctx.start_ns);
     try testing.expectEqual(@as(usize, 5), ctx.task_idx);
     try testing.expectEqual(@as(u64, 9), ctx.iteration);
 }
@@ -256,7 +261,7 @@ test "Context list round-trip through setSlot and varResolver" {
     const expr_mod = @import("../expr.zig");
 
     const items = [_]Value{ .{ .float = 10.0 }, .{ .float = 20.0 }, .{ .float = 30.0 } };
-    var ctx: Context = try .init(testing.allocator, &.{
+    var ctx: Context = try .init(testing.allocator, std.testing.io, &.{
         Value{ .list = items[0..] },
         Value{ .int = 0 },
     });
@@ -270,10 +275,10 @@ test "Context list round-trip through setSlot and varResolver" {
     }
 
     // Evaluate len(${arr}) via varResolver.
-    var slots: std.StringArrayHashMap(void) = .init(testing.allocator);
-    defer slots.deinit();
-    try slots.put("arr", {});
-    try slots.put("idx", {});
+    var slots: std.StringArrayHashMapUnmanaged(void) = .empty;
+    defer slots.deinit(testing.allocator);
+    try slots.put(testing.allocator, "arr", {});
+    try slots.put(testing.allocator, "idx", {});
 
     var e = try expr_mod.parse(testing.allocator, "${arr}[${idx}]");
     defer e.deinit(testing.allocator);
@@ -294,7 +299,7 @@ test "Context list round-trip through setSlot and varResolver" {
 test "Context resolves $ELAPSED_MS builtin as elapsed milliseconds" {
     const testing = std.testing;
 
-    var ctx: Context = try .init(testing.allocator, &.{});
+    var ctx: Context = try .init(testing.allocator, std.testing.io, &.{});
     defer ctx.deinit();
 
     // Before start_ns is set, elapsed_ms is 0.
@@ -302,7 +307,7 @@ test "Context resolves $ELAPSED_MS builtin as elapsed milliseconds" {
     try testing.expectEqual(@as(i64, 0), before.int);
 
     // Set start_ns to a recent past so elapsed > 0.
-    ctx.start_ns = std.time.nanoTimestamp() - 50_000_000; // 50ms ago
+    ctx.start_ns = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds - 50_000_000; // 50ms ago
     const after = ctx.resolveBinding(.{ .builtin = .elapsed_ms });
     try testing.expect(after.int >= 40 and after.int <= 200);
 }
@@ -310,7 +315,7 @@ test "Context resolves $ELAPSED_MS builtin as elapsed milliseconds" {
 test "setSlot auto-coerces between int and float" {
     const testing = std.testing;
 
-    var ctx: Context = try .init(testing.allocator, &.{
+    var ctx: Context = try .init(testing.allocator, std.testing.io, &.{
         Value{ .int = 5 },
         Value{ .float = 1.0 },
     });
@@ -329,7 +334,7 @@ test "setSlot rejects incompatible types" {
     const testing = std.testing;
 
     const list_items = [_]Value{.{ .int = 1 }};
-    var ctx: Context = try .init(testing.allocator, &.{
+    var ctx: Context = try .init(testing.allocator, std.testing.io, &.{
         Value{ .string = "hello" },
         Value{ .float = 1.0 },
         Value{ .list = list_items[0..] },
@@ -351,7 +356,7 @@ test "init cleans up on partial allocation failure" {
 
     // alloc 0: Slot slice, alloc 1: first string dupe, alloc 2: fail
     var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 2 });
-    const result = Context.init(failing.allocator(), &.{
+    const result = Context.init(failing.allocator(), std.testing.io, &.{
         Value{ .string = "aaa" },
         Value{ .string = "bbb" },
     });

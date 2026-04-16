@@ -1,8 +1,8 @@
-# Ordo
+# Operor [ˈɔpɛrɔr]
 
-Ordo [ˈoːr.doː] is an automated experimental workflow engine for VISA-controlled instruments.
+Operor Performs Experimental Runs On Resources.
 
-Ordo loads instrument adapters from TOML, recipes from YAML, precompiles command templates and expressions, and executes scheduled tasks with optional preview, dry-run, CSV output, and TCP streaming.
+Operor loads instrument adapters from TOML, recipes from YAML, precompiles command templates and expressions, and executes scheduled tasks with optional preview, dry-run, CSV output, and TCP streaming.
 
 ## Requirements
 
@@ -15,10 +15,10 @@ Ordo loads instrument adapters from TOML, recipes from YAML, precompiles command
 ## Installation
 - For **Linux** or **macOS** users, Run
   ```sh
-  # download and install ordo via a install script
-  curl -fsSL https://raw.githubusercontent.com/uwni/ordo/main/install.sh | sh
+  # download and install operor via a install script
+  curl -fsSL https://raw.githubusercontent.com/uwni/operor/main/install.sh | sh
   # or use wget instead via
-  wget -qO- https://raw.githubusercontent.com/uwni/ordo/main/install.sh | sh
+  wget -qO- https://raw.githubusercontent.com/uwni/operor/main/install.sh | sh
   ```
 
 > [!NOTE]
@@ -26,12 +26,12 @@ Ordo loads instrument adapters from TOML, recipes from YAML, precompiles command
   
 - For **Microsoft Windows** users, Run
   ```ps
-  irm https://raw.githubusercontent.com/uwni/ordo/main/install.ps1 | iex
+  irm https://raw.githubusercontent.com/uwni/operor/main/install.ps1 | iex
   ```
 
 ## Requirements
 
-To run an existing Ordo binary, only the VISA runtime is required. You can download it from [National Instrument](https://www.ni.com/en/support/downloads/drivers/download.ni-visa.html).
+To run an existing Operor binary, only the VISA runtime is required. You can download it from [National Instrument](https://www.ni.com/en/support/downloads/drivers/download.ni-visa.html).
 
 If your VISA library is not installed in a standard location, pass it explicitly with `--visa-lib <path>`.
 
@@ -40,32 +40,32 @@ If your VISA library is not installed in a standard location, pass it explicitly
 Preview the bundled example recipe without opening instruments:
 
 ```sh
-ordo run -d test-data/adapters test-data/recipes/r1_set.yaml --preview
+operor run -d test-data/adapters test-data/recipes/r1_set.yaml --preview
 ```
 
 Open an interactive REPL and discover instruments:
 
 ```sh
-ordo repl
+operor repl
 ```
 
 Or connect directly to a known resource:
 
 ```sh
-ordo repl -r USB0::...::INSTR
+operor repl -r USB0::...::INSTR
 ```
 
 Execute a recipe:
 
 ```sh
-ordo run -d ./adapters ./recipes/measure.yaml
+operor run -d ./adapters ./recipes/measure.yaml
 ```
 
 ## CLI
 
 ```text
-ordo run -d <adapter_dir> <recipe> [--preview] [--dry-run] [--visa-lib <path>]
-ordo repl [-r <resource>] [--visa-lib <path>]
+operor run -d <adapter_dir> <recipe> [--preview] [--dry-run] [--visa-lib <path>]
+operor repl [-r <resource>] [--visa-lib <path>]
 ```
 
 Command behavior:
@@ -81,7 +81,7 @@ Command behavior:
 
 ## Core Concepts
 
-Ordo has two configuration layers:
+Operor has two configuration layers:
 
 - Adapters define instrument metadata and command templates in TOML.
 - Recipes define instruments, variables, task schedules, expressions, and sinks in YAML.
@@ -321,10 +321,10 @@ Examples:
 
 ```sh
 # Start disconnected, discover and connect interactively
-ordo repl
+operor repl
 
 # Connect to a known resource on startup
-ordo repl -r USB0::0x0957::0x1798::MY12345678::INSTR
+operor repl -r USB0::0x0957::0x1798::MY12345678::INSTR
 ```
 
 ## Examples

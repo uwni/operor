@@ -13,7 +13,7 @@ pub fn initializeStopHandling() void {
 }
 
 /// Signal handler that asks the scheduler loop to stop at the next safe point.
-fn sigintHandler(_: c_int) callconv(.c) void {
+fn sigintHandler(_: std.posix.SIG) callconv(.c) void {
     stop_requested.store(true, .seq_cst);
 }
 
@@ -40,7 +40,7 @@ pub fn runTasks(
 ) !void {
     if (compiled_recipe.tasks.len == 0) return;
 
-    ctx.start_ns = std.time.nanoTimestamp();
+    ctx.start_ns = std.Io.Timestamp.now(ctx.io, .awake).toNanoseconds();
     ctx.task_idx = 0;
     ctx.iteration = 0;
 
@@ -105,7 +105,7 @@ fn runTask(
     for (task.steps()) |*step| {
         const instrument: ?*common.InstrumentRuntime = switch (step.action) {
             .instrument_call => |ic| &instruments[ic.instrument_idx],
-            .compute, .sleep => null,
+            .compute, .sleep, .parallel => null,
         };
         var async_log = pipeline_runtime.asyncLog();
         const saved_value = try step_mod.executeStep(
@@ -116,6 +116,7 @@ fn runTask(
             dry_run,
             async_log.logSink(),
             scratch,
+            instruments,
         );
         if (saved_value) |captured| {
             frame_builder.captureOwned(captured.column, captured.value_owned);
@@ -237,7 +238,7 @@ fn shouldStop(compiled_recipe: *const recipe_mod.PrecompiledRecipe, ctx: *common
 }
 
 pub fn runTasksThread(state: *SamplerState) void {
-    state.result = null;
+    defer state.done.store(true, .seq_cst);
     runTasks(
         state.allocator,
         state.compiled_recipe,
@@ -248,5 +249,4 @@ pub fn runTasksThread(state: *SamplerState) void {
     ) catch |err| {
         state.result = err;
     };
-    state.done.store(true, .seq_cst);
 }

@@ -1,6 +1,5 @@
 const std = @import("std");
-const mibu = @import("mibu");
-const color = mibu.color;
+const tty = @import("../../cli/tty.zig");
 const config_mod = @import("config.zig");
 const sinks = @import("sinks.zig");
 const types = @import("types.zig");
@@ -8,10 +7,10 @@ const types = @import("types.zig");
 const idle_sleep_ns: u64 = 100 * std.time.ns_per_us;
 const min_log_queue_capacity: usize = 256;
 
-const warn_tag = color.print.fg(.yellow) ++ "[WARN]" ++ color.print.reset;
-const error_tag = color.print.fg(.red) ++ "[ERROR]" ++ color.print.reset;
-const summary_tag = color.print.fg(.aqua) ++ "[SUMMARY]" ++ color.print.reset;
-const hint_tag = color.print.fg(.aqua) ++ "[HINT]" ++ color.print.reset;
+const warn_tag = tty.styledText("[WARN]", .{.yellow});
+const error_tag = tty.styledText("[ERROR]", .{.red});
+const summary_tag = tty.styledText("[SUMMARY]", .{.aqua});
+const hint_tag = tty.styledText("[HINT]", .{.aqua});
 
 pub const monitor_interval_ns: u64 = 250 * std.time.ns_per_ms;
 
@@ -27,6 +26,7 @@ pub fn usagePercent(used: usize, capacity: usize) u8 {
 
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: config_mod.ResolvedConfig,
     log_writer: *std.Io.Writer,
     log_queue: sinks.LogQueue,
@@ -42,12 +42,14 @@ pub const Runtime = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
+        io: std.Io,
         config: config_mod.ResolvedConfig,
         frame_columns: []const []const u8,
         log_writer: *std.Io.Writer,
     ) !Runtime {
         var runtime = Runtime{
             .allocator = allocator,
+            .io = io,
             .config = config,
             .log_writer = log_writer,
             .log_queue = try sinks.LogQueue.init(allocator, logQueueCapacity(config.buffer_size)),
@@ -57,12 +59,12 @@ pub const Runtime = struct {
         errdefer runtime.frame_queue.deinit();
 
         if (config.file_path) |path| {
-            runtime.file_sink = try sinks.FileSink.init(allocator, path, frame_columns);
+            runtime.file_sink = try sinks.FileSink.init(allocator, io, path, frame_columns);
         }
         errdefer if (runtime.file_sink) |*sink| sink.deinit();
 
         if (config.network_host) |host| {
-            runtime.network_sink = try sinks.NetworkSink.init(allocator, host, config.network_port.?, frame_columns);
+            runtime.network_sink = try sinks.NetworkSink.init(allocator, io, host, config.network_port.?, frame_columns);
         }
         errdefer if (runtime.network_sink) |*sink| sink.deinit();
 
@@ -197,7 +199,7 @@ pub const Runtime = struct {
             }
 
             if (self.frame_producer_done.load(.acquire)) break;
-            std.Thread.sleep(idle_sleep_ns);
+            self.io.sleep(.fromNanoseconds(idle_sleep_ns), .awake) catch break;
         }
 
         while (self.frame_queue.pop(&frame)) {
@@ -216,7 +218,7 @@ pub const Runtime = struct {
             }
 
             if (self.log_producer_done.load(.acquire)) break;
-            std.Thread.sleep(idle_sleep_ns);
+            self.io.sleep(.fromNanoseconds(idle_sleep_ns), .awake) catch break;
         }
 
         while (self.log_queue.pop(&message)) {

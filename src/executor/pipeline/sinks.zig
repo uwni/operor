@@ -64,22 +64,24 @@ pub const AsyncLog = struct {
 
 pub const FileSink = struct {
     allocator: std.mem.Allocator,
-    file: std.fs.File,
+    io: std.Io,
+    file: std.Io.File,
     frame_columns: []const []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, path: []const u8, frame_columns: []const []const u8) !FileSink {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, path: []const u8, frame_columns: []const []const u8) !FileSink {
         const columns_copy = try allocator.dupe([]const u8, frame_columns);
         errdefer allocator.free(columns_copy);
 
         var sink = FileSink{
             .allocator = allocator,
+            .io = io,
             .file = if (std.fs.path.isAbsolute(path))
-                try std.fs.createFileAbsolute(path, .{ .truncate = true })
+                try std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true })
             else
-                try std.fs.cwd().createFile(path, .{ .truncate = true }),
+                try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true }),
             .frame_columns = columns_copy,
         };
-        errdefer sink.file.close();
+        errdefer sink.file.close(io);
         errdefer sink.allocator.free(sink.frame_columns);
 
         try sink.writeHeader();
@@ -88,12 +90,12 @@ pub const FileSink = struct {
 
     pub fn deinit(self: *FileSink) void {
         self.allocator.free(self.frame_columns);
-        self.file.close();
+        self.file.close(self.io);
     }
 
     pub fn writeFrame(self: *FileSink, frame: *const types.Frame) !void {
         var io_buffer: [4096]u8 = undefined;
-        var file_writer = self.file.writerStreaming(&io_buffer);
+        var file_writer = self.file.writerStreaming(self.io, &io_buffer);
         const writer = &file_writer.interface;
 
         var first = true;
@@ -110,7 +112,7 @@ pub const FileSink = struct {
 
     fn writeHeader(self: *FileSink) !void {
         var io_buffer: [1024]u8 = undefined;
-        var file_writer = self.file.writerStreaming(&io_buffer);
+        var file_writer = self.file.writerStreaming(self.io, &io_buffer);
         const writer = &file_writer.interface;
 
         var first = true;
@@ -125,25 +127,28 @@ pub const FileSink = struct {
 };
 
 pub const NetworkSink = struct {
-    stream: std.net.Stream,
+    io: std.Io,
+    stream: std.Io.net.Stream,
     frame_columns: []const []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, host: []const u8, port: u16, frame_columns: []const []const u8) !NetworkSink {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, frame_columns: []const []const u8) !NetworkSink {
         const columns_copy = try allocator.dupe([]const u8, frame_columns);
+        const addr = try std.Io.net.IpAddress.resolve(io, host, port);
         return .{
-            .stream = try std.net.tcpConnectToHost(allocator, host, port),
+            .io = io,
+            .stream = try addr.connect(io, .{ .mode = .stream }),
             .frame_columns = columns_copy,
         };
     }
 
     pub fn deinit(self: *NetworkSink, allocator: std.mem.Allocator) void {
         allocator.free(self.frame_columns);
-        self.stream.close();
+        self.stream.close(self.io);
     }
 
     pub fn writeFrame(self: *NetworkSink, frame: *const types.Frame) !void {
         var io_buffer: [2048]u8 = undefined;
-        var stream_writer = self.stream.writer(&io_buffer);
+        var stream_writer = self.stream.writer(self.io, &io_buffer);
         try writeFrameJson(&stream_writer.interface, frame, self.frame_columns);
         try stream_writer.interface.flush();
     }
@@ -190,13 +195,13 @@ test "file sink writes one frame row with all saved fields" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const dir_path = try tmp.dir.realpathAlloc(gpa, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
     defer gpa.free(dir_path);
     const sink_path = try std.fs.path.join(gpa, &[_][]const u8{ dir_path, "samples.csv" });
     defer gpa.free(sink_path);
 
     const columns = [_][]const u8{ "voltage", "current" };
-    var sink: FileSink = try .init(gpa, sink_path, &columns);
+    var sink: FileSink = try .init(gpa, std.testing.io, sink_path, &columns);
     defer sink.deinit();
 
     const values = try gpa.alloc(?[]u8, 2);
@@ -210,7 +215,7 @@ test "file sink writes one frame row with all saved fields" {
 
     try sink.writeFrame(&frame);
 
-    const file_data = try tmp.dir.readFileAlloc(gpa, "samples.csv", 8 * 1024);
+    const file_data = try tmp.dir.readFileAlloc(std.testing.io, "samples.csv", gpa, .limited(8 * 1024));
     defer gpa.free(file_data);
 
     try std.testing.expectEqualStrings(
@@ -224,13 +229,13 @@ test "file sink leaves unrelated frame columns blank" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const dir_path = try tmp.dir.realpathAlloc(gpa, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
     defer gpa.free(dir_path);
     const sink_path = try std.fs.path.join(gpa, &[_][]const u8{ dir_path, "partial.csv" });
     defer gpa.free(sink_path);
 
     const columns = [_][]const u8{ "voltage", "current" };
-    var sink: FileSink = try .init(gpa, sink_path, &columns);
+    var sink: FileSink = try .init(gpa, std.testing.io, sink_path, &columns);
     defer sink.deinit();
 
     const values = try gpa.alloc(?[]u8, 2);
@@ -244,7 +249,7 @@ test "file sink leaves unrelated frame columns blank" {
 
     try sink.writeFrame(&frame);
 
-    const file_data = try tmp.dir.readFileAlloc(gpa, "partial.csv", 8 * 1024);
+    const file_data = try tmp.dir.readFileAlloc(std.testing.io, "partial.csv", gpa, .limited(8 * 1024));
     defer gpa.free(file_data);
 
     try std.testing.expectEqualStrings(
@@ -258,13 +263,13 @@ test "file sink escapes csv quotes commas and newlines in frame values" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const dir_path = try tmp.dir.realpathAlloc(gpa, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
     defer gpa.free(dir_path);
     const sink_path = try std.fs.path.join(gpa, &[_][]const u8{ dir_path, "escaped.csv" });
     defer gpa.free(sink_path);
 
     const columns = [_][]const u8{"reading"};
-    var sink: FileSink = try .init(gpa, sink_path, &columns);
+    var sink: FileSink = try .init(gpa, std.testing.io, sink_path, &columns);
     defer sink.deinit();
 
     const values = try gpa.alloc(?[]u8, 1);
@@ -277,7 +282,7 @@ test "file sink escapes csv quotes commas and newlines in frame values" {
 
     try sink.writeFrame(&frame);
 
-    const file_data = try tmp.dir.readFileAlloc(gpa, "escaped.csv", 8 * 1024);
+    const file_data = try tmp.dir.readFileAlloc(std.testing.io, "escaped.csv", gpa, .limited(8 * 1024));
     defer gpa.free(file_data);
 
     try std.testing.expect(std.mem.containsAtLeast(u8, file_data, 1, "\"1,\"\"2\"\"\n3\""));

@@ -87,45 +87,4 @@ pub const Command = struct {
         template.freeSegments(allocator, self.template);
         if (self.description) |d| allocator.free(d);
     }
-
-    /// Returns unique placeholder names referenced by the command template.
-    pub fn placeholderNames(self: Command, allocator: std.mem.Allocator) ![]const []const u8 {
-        var placeholders = std.ArrayList([]const u8).empty;
-        defer placeholders.deinit(allocator);
-
-        for (self.template) |segment| {
-            switch (segment) {
-                .literal => {},
-                .placeholder => |name| {
-                    if (containsString(placeholders.items, name)) continue;
-                    try placeholders.append(allocator, name);
-                },
-            }
-        }
-
-        return placeholders.toOwnedSlice(allocator);
-    }
-
-    fn containsString(haystack: []const []const u8, needle: []const u8) bool {
-        for (haystack) |item| {
-            if (std.mem.eql(u8, item, needle)) return true;
-        }
-        return false;
-    }
 };
-
-test "adapter command parses and reports placeholders" {
-    const gpa = std.testing.allocator;
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const parsed = try Command.parse(alloc, "VOLT {voltage},(@{channels})", null, null);
-
-    const placeholders = try parsed.placeholderNames(alloc);
-    defer alloc.free(placeholders);
-
-    try std.testing.expectEqual(@as(usize, 2), placeholders.len);
-    try std.testing.expectEqualStrings("voltage", placeholders[0]);
-    try std.testing.expectEqualStrings("channels", placeholders[1]);
-}

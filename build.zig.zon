@@ -1,5 +1,5 @@
 .{
-    .fingerprint = 0xc9e8561d56377b08,
+    .fingerprint = 0xb651209474080f53,
 
     // This is the default name used by packages depending on this one. For
     // example, when a user runs `zig fetch --save <url>`, this field is used
@@ -8,7 +8,7 @@
     //
     // It is redundant to include "zig" in this name because it is already
     // within the Zig package namespace.
-    .name = .ordo,
+    .name = .operor,
 
     // This is a [Semantic Version](https://semver.org/).
     // In a future version of Zig it will be used for package deduplication.
@@ -17,7 +17,7 @@
     // This field is optional.
     // This is currently advisory only; Zig does not yet do anything
     // with this value.
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0-dev.3153+d6f43caad",
 
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
@@ -25,17 +25,9 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        .serde = .{
-            .url = "git+https://github.com/OrlovEvgeny/serde.zig#48915d4397b0a67567e0842c22f3c9624825df3f",
-            .hash = "serde-1.0.1-1DszT2s2CwDSg1Jvg0Q4f1B3xkKNRmX3yUumWQgtmTEJ",
-        },
         .clap = .{
-            .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.11.0.tar.gz",
-            .hash = "clap-0.11.0-oBajB-HnAQDPCKYzwF7rO3qDFwRcD39Q0DALlTSz5H7e",
-        },
-        .mibu = .{
-            .url = "git+https://github.com/xyaman/mibu#fa883b8d903573ca6ac44279f31d1317f0bcb595",
-            .hash = "mibu-0.0.1-dev-Ddr1rrDIAACi6HKDko6IdyxEpm_XaGYrPpAxyGnH2B3I",
+            .url = "git+https://github.com/Hejsil/zig-clap#fc1e5cc3f6d9d3001112385ee6256d694e959d2f",
+            .hash = "clap-0.11.0-oBajB7foAQC3Iyn4IVCkUdYaOVVng5IZkSncySTjNig1",
         },
     },
     .paths = .{

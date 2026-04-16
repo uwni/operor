@@ -9,13 +9,6 @@ pub const resolveConfig = config.resolveConfig;
 
 pub const monitor_interval_ns = runtime.monitor_interval_ns;
 pub const MonitorState = runtime.MonitorState;
-pub const usagePercent = runtime.usagePercent;
-
-pub const FrameQueue = types.FrameQueue;
-pub const AsyncLog = sinks.AsyncLog;
-pub const FileSink = sinks.FileSink;
-pub const NetworkSink = sinks.NetworkSink;
-
 pub const Frame = types.Frame;
 
 pub const Runtime = runtime.Runtime;

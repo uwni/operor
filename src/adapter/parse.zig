@@ -10,7 +10,7 @@ const max_adapter_file_size: usize = 512 * 1024;
 const AdapterDoc = struct {
     metadata: types.AdapterMeta = .{},
     instrument: types.InstrumentSpec = .{},
-    commands: std.StringHashMap(CommandDoc),
+    commands: std.json.ArrayHashMap(CommandDoc),
 };
 
 /// Raw serialized shape of a single command entry.
@@ -21,13 +21,13 @@ const CommandDoc = struct {
 };
 
 /// Parses a adapter document from an already-open directory.
-pub fn parseAdapterInDir(allocator: std.mem.Allocator, dir: std.fs.Dir, file_name: []const u8) !Adapter {
+pub fn parseAdapterInDir(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, file_name: []const u8) !Adapter {
     var adapter_arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer adapter_arena.deinit();
     const alloc = adapter_arena.allocator();
 
-    const parsed = try doc_parse.parseFileInDir(AdapterDoc, alloc, dir, file_name, max_adapter_file_size);
-    const path = try dir.realpathAlloc(alloc, file_name);
+    const parsed = try doc_parse.parseFileInDir(AdapterDoc, alloc, io, dir, file_name, max_adapter_file_size);
+    const path = try dir.realPathFileAlloc(io, file_name, alloc);
 
     return buildAdapter(&adapter_arena, parsed, path);
 }
@@ -36,7 +36,7 @@ fn buildAdapter(adapter_arena: *std.heap.ArenaAllocator, parsed: AdapterDoc, pat
     const alloc = adapter_arena.allocator();
 
     var commands: std.StringHashMap(types.Command) = .init(alloc);
-    var it = parsed.commands.iterator();
+    var it = parsed.commands.map.iterator();
     while (it.next()) |entry| {
         const cmd_doc = entry.value_ptr.*;
         const cmd: types.Command = try .parse(alloc, cmd_doc.write, cmd_doc.read, cmd_doc.description);
@@ -65,11 +65,14 @@ fn buildAdapter(adapter_arena: *std.heap.ArenaAllocator, parsed: AdapterDoc, pat
 test "parse adapter templates and placeholders" {
     const gpa = std.testing.allocator;
 
-    var adapter = try parseTestToml(gpa,
-        \\[metadata]
-        \\
-        \\[commands.set_voltage]
-        \\write = "VOLT {voltage},(@{channels})"
+    var adapter = try parseTestJson(gpa,
+        \\{
+        \\  "commands": {
+        \\    "set_voltage": {
+        \\      "write": "VOLT {voltage},(@{channels})"
+        \\    }
+        \\  }
+        \\}
     );
     defer adapter.deinit();
 
@@ -90,12 +93,15 @@ test "parse adapter templates and placeholders" {
 test "parse adapter response encoding" {
     const gpa = std.testing.allocator;
 
-    var adapter = try parseTestToml(gpa,
-        \\[metadata]
-        \\
-        \\[commands.measure_voltage]
-        \\write = "MEAS:VOLT?"
-        \\read = "float"
+    var adapter = try parseTestJson(gpa,
+        \\{
+        \\  "commands": {
+        \\    "measure_voltage": {
+        \\      "write": "MEAS:VOLT?",
+        \\      "read": "float"
+        \\    }
+        \\  }
+        \\}
     );
     defer adapter.deinit();
 
@@ -107,16 +113,21 @@ test "parse adapter response encoding" {
 test "parse adapter with write termination" {
     const gpa = std.testing.allocator;
 
-    var adapter = try parseTestToml(gpa,
-        \\[metadata]
-        \\version = "1.0"
-        \\description = "PSU over serial"
-        \\
-        \\[instrument]
-        \\write_termination = "\n"
-        \\
-        \\[commands.set_voltage]
-        \\write = "VOLT {voltage}"
+    var adapter = try parseTestJson(gpa,
+        \\{
+        \\  "metadata": {
+        \\    "version": "1.0",
+        \\    "description": "PSU over serial"
+        \\  },
+        \\  "instrument": {
+        \\    "write_termination": "\n"
+        \\  },
+        \\  "commands": {
+        \\    "set_voltage": {
+        \\      "write": "VOLT {voltage}"
+        \\    }
+        \\  }
+        \\}
     );
     defer adapter.deinit();
 
@@ -126,12 +137,15 @@ test "parse adapter with write termination" {
 test "parse adapter without write termination defaults to none" {
     const gpa = std.testing.allocator;
 
-    var adapter = try parseTestToml(gpa,
-        \\[metadata]
-        \\
-        \\[commands.measure]
-        \\write = "MEAS?"
-        \\read = "float"
+    var adapter = try parseTestJson(gpa,
+        \\{
+        \\  "commands": {
+        \\    "measure": {
+        \\      "write": "MEAS?",
+        \\      "read": "float"
+        \\    }
+        \\  }
+        \\}
     );
     defer adapter.deinit();
 
@@ -141,21 +155,26 @@ test "parse adapter without write termination defaults to none" {
 test "parse adapter instrument options" {
     const gpa = std.testing.allocator;
 
-    var adapter = try parseTestToml(gpa,
-        \\[metadata]
-        \\version = "1.0"
-        \\description = "Scope over TCPIP"
-        \\
-        \\[instrument]
-        \\timeout_ms = 2500
-        \\read_termination = "\n"
-        \\write_termination = "\r\n"
-        \\query_delay_ms = 25
-        \\chunk_size = 4096
-        \\
-        \\[commands.idn]
-        \\write = "*IDN?"
-        \\read = "string"
+    var adapter = try parseTestJson(gpa,
+        \\{
+        \\  "metadata": {
+        \\    "version": "1.0",
+        \\    "description": "Scope over TCPIP"
+        \\  },
+        \\  "instrument": {
+        \\    "timeout_ms": 2500,
+        \\    "read_termination": "\n",
+        \\    "write_termination": "\r\n",
+        \\    "query_delay_ms": 25,
+        \\    "chunk_size": 4096
+        \\  },
+        \\  "commands": {
+        \\    "idn": {
+        \\      "write": "*IDN?",
+        \\      "read": "string"
+        \\    }
+        \\  }
+        \\}
     );
     defer adapter.deinit();
 
@@ -166,12 +185,12 @@ test "parse adapter instrument options" {
     try std.testing.expectEqual(@as(usize, 4096), adapter.options.chunk_size);
 }
 
-fn parseTestToml(allocator: std.mem.Allocator, content: []const u8) !Adapter {
+fn parseTestJson(allocator: std.mem.Allocator, content: []const u8) !Adapter {
     var adapter_arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer adapter_arena.deinit();
     const alloc = adapter_arena.allocator();
 
-    const parsed = try doc_parse.parseByFormat(AdapterDoc, .toml, alloc, content);
+    const parsed = try doc_parse.parseFromSlice(AdapterDoc, alloc, content);
 
     return buildAdapter(&adapter_arena, parsed, try alloc.dupe(u8, "<test>"));
 }

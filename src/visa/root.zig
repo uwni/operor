@@ -14,18 +14,8 @@ pub const Error = common.Error;
 pub const InstrumentOptions = common.InstrumentOptions;
 /// Re-exported fixed-size termination buffer type.
 pub const Termination = common.Termination;
-/// Re-exported VISA session handle type.
-pub const ViSession = common.ViSession;
-/// Re-exported VISA status code type.
-pub const ViStatus = common.ViStatus;
-/// Re-exported VISA unsigned 32-bit integer type.
-pub const ViUInt32 = common.ViUInt32;
-/// Re-exported VISA search handle type.
-pub const ViFindList = common.ViFindList;
-/// Re-exported VISA attribute state type.
-pub const ViAttrState = common.ViAttrState;
-/// Re-exported helper for checking VISA status codes.
-pub const checkStatus = common.checkStatus;
+/// Re-exported VISA async job identifier type.
+pub const ViJobId = common.ViJobId;
 /// Default chunk size used by instrument-owned reads.
 pub const default_chunk_size = common.default_chunk_size;
 /// Re-exported resource list result type.

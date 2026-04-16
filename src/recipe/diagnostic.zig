@@ -1,9 +1,8 @@
 const std = @import("std");
-const mibu = @import("mibu");
-const color = mibu.color;
 
-/// Lightweight context used while building diagnostics during precompile.
-pub const DiagnosticContext = struct {
+/// Context captured for the most recent precompile failure.
+pub const PrecompileDiagnostic = struct {
+    allocator: std.mem.Allocator,
     task_idx: ?usize = null,
     step_idx: ?usize = null,
     instrument_name: ?[]const u8 = null,
@@ -11,18 +10,7 @@ pub const DiagnosticContext = struct {
     command_name: ?[]const u8 = null,
     argument_name: ?[]const u8 = null,
     argument_spec: ?[]const u8 = null,
-};
-
-/// Context captured for the most recent precompile failure.
-pub const PrecompileDiagnostic = struct {
-    allocator: std.mem.Allocator,
-    task_idx: ?usize = null,
-    step_idx: ?usize = null,
-    instrument_name: ?[]u8 = null,
-    adapter_name: ?[]u8 = null,
-    command_name: ?[]u8 = null,
-    argument_name: ?[]u8 = null,
-    argument_spec: ?[]u8 = null,
+    owned: bool = false,
 
     /// Creates an empty diagnostic object owned by `allocator`.
     pub fn init(allocator: std.mem.Allocator) PrecompileDiagnostic {
@@ -31,35 +19,29 @@ pub const PrecompileDiagnostic = struct {
 
     /// Releases any captured diagnostic strings.
     pub fn deinit(self: *PrecompileDiagnostic) void {
-        self.reset();
+        self.release();
     }
 
     /// Clears all currently captured diagnostic fields.
     pub fn reset(self: *PrecompileDiagnostic) void {
-        self.freeTextField(&self.instrument_name);
-        self.freeTextField(&self.adapter_name);
-        self.freeTextField(&self.command_name);
-        self.freeTextField(&self.argument_name);
-        self.freeTextField(&self.argument_spec);
-        self.task_idx = null;
-        self.step_idx = null;
+        self.release();
+        self.* = .{ .allocator = self.allocator };
     }
 
-    /// Replaces the current diagnostic state with a new contextual snapshot.
-    pub fn capture(self: *PrecompileDiagnostic, context: DiagnosticContext) !void {
-        self.reset();
-        self.task_idx = context.task_idx;
-        self.step_idx = context.step_idx;
-        try self.setTextField(&self.instrument_name, context.instrument_name);
-        try self.setTextField(&self.adapter_name, context.adapter_name);
-        try self.setTextField(&self.command_name, context.command_name);
-        try self.setTextField(&self.argument_name, context.argument_name);
-        try self.setTextField(&self.argument_spec, context.argument_spec);
+    /// Takes ownership of borrowed slices by duplicating them.
+    /// Must be called before the source data is freed.
+    pub fn snapshot(self: *PrecompileDiagnostic) void {
+        if (self.owned) return;
+        self.instrument_name = self.dupeOrNull(self.instrument_name);
+        self.adapter_name = self.dupeOrNull(self.adapter_name);
+        self.command_name = self.dupeOrNull(self.command_name);
+        self.argument_name = self.dupeOrNull(self.argument_name);
+        self.argument_spec = self.dupeOrNull(self.argument_spec);
+        self.owned = true;
     }
 
     /// Writes a human-readable diagnostic line for a precompile error.
     pub fn write(self: *const PrecompileDiagnostic, writer: *std.Io.Writer, err: anyerror) !void {
-        try writer.writeAll(color.print.fg(.red) ++ "precompile failed" ++ color.print.reset);
         if (self.task_idx) |task_idx| {
             if (self.step_idx) |step_idx| {
                 try writer.print(" at task {d} step {d}", .{ task_idx, step_idx });
@@ -98,25 +80,20 @@ pub const PrecompileDiagnostic = struct {
             error.InvalidRecordConfig => try writer.writeAll("pipeline record must be \"all\" or an array of variable names"),
             error.RecordVariableNotFound => try writer.writeAll("pipeline record references unknown assign variable"),
             error.UndeclaredVariable => try writer.writeAll("variable used but not declared in recipe 'vars' section"),
+            error.NestedParallelStep => try writer.writeAll("parallel steps cannot be nested"),
             else => try writer.print("{s}", .{@errorName(err)}),
         }
         try writer.writeByte('\n');
     }
 
-    /// Stores an optional text field as allocator-owned memory.
-    fn setTextField(self: *PrecompileDiagnostic, field: *?[]u8, value: ?[]const u8) !void {
-        if (value) |text| {
-            field.* = try self.allocator.dupe(u8, text);
-        } else {
-            field.* = null;
+    fn release(self: *PrecompileDiagnostic) void {
+        if (!self.owned) return;
+        inline for (.{ &self.instrument_name, &self.adapter_name, &self.command_name, &self.argument_name, &self.argument_spec }) |field| {
+            if (field.*) |s| self.allocator.free(@constCast(s));
         }
     }
 
-    /// Frees one optional allocator-owned text field.
-    fn freeTextField(self: *PrecompileDiagnostic, field: *?[]u8) void {
-        if (field.*) |text| {
-            self.allocator.free(text);
-            field.* = null;
-        }
+    fn dupeOrNull(self: *PrecompileDiagnostic, value: ?[]const u8) ?[]const u8 {
+        return if (value) |s| self.allocator.dupe(u8, s) catch null else null;
     }
 };

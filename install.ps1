@@ -1,7 +1,7 @@
-# Ordo installer for Windows — downloads a prebuilt binary from GitHub Releases.
+# Operor installer for Windows — downloads a prebuilt binary from GitHub Releases.
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/uwni/ordo/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/uwni/operor/main/install.ps1 | iex
 #   install.ps1 -To C:\tools -Version v0.1.0
 
 param(
@@ -11,18 +11,18 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Repo = "uwni/ordo"
-$BinName = "ordo.exe"
+$Repo = "uwni/operor"
+$BinName = "operor.exe"
 
 function Show-Usage {
     Write-Host @"
-Ordo installer for Windows
+Operor installer for Windows
 
 Usage:
     install.ps1 [OPTIONS]
 
 Options:
-    -To <dir>        Install directory (default: %LOCALAPPDATA%\Programs\ordo)
+    -To <dir>        Install directory (default: %LOCALAPPDATA%\Programs\operor)
     -Version <tag>   Install a specific release tag (default: latest)
     -Help            Show this help
 "@
@@ -45,11 +45,11 @@ if (-not $Version) {
 
 # Resolve install directory
 if (-not $To) {
-    $To = Join-Path $env:LOCALAPPDATA "Programs\ordo"
+    $To = Join-Path $env:LOCALAPPDATA "Programs\operor"
 }
 
 $Target = "x86_64-windows"
-$Archive = "ordo-$Version-$Target.zip"
+$Archive = "operor-$Version-$Target.zip"
 $Url = "https://github.com/$Repo/releases/download/$Version/$Archive"
 
 Write-Host "  target:  $Target"
@@ -59,7 +59,7 @@ Write-Host "  dest:    $To"
 Write-Host ""
 
 # Download
-$TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ordo-install-" + [guid]::NewGuid().ToString("N"))
+$TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("operor-install-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $TmpDir -Force | Out-Null
 
 try {

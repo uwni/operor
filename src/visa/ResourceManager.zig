@@ -6,7 +6,6 @@ const c = common.c;
 /// Default VISA resource manager session and discovery helpers.
 const ResourceManager = @This();
 const ViSession = common.ViSession;
-const ViStatus = common.ViStatus;
 const ViUInt32 = common.ViUInt32;
 const ViFindList = common.ViFindList;
 const default_resource_query = "?*INSTR";
@@ -25,25 +24,18 @@ pub const ResourceList = struct {
 };
 
 session: ViSession,
-status: ViStatus,
 vtable: *const loader.Vtable,
 
 /// Opens the default VISA resource manager using the provided vtable.
 pub fn init(vtable: *const loader.Vtable) common.Error!ResourceManager {
     var session: ViSession = undefined;
-    const status = vtable.openDefaultRM(&session);
-    try common.checkStatus(status);
-    return .{ .session = session, .status = status, .vtable = vtable };
+    try common.checkStatus(vtable.viOpenDefaultRM(&session));
+    return .{ .session = session, .vtable = vtable };
 }
 
 /// Closes the resource manager session.
 pub fn deinit(self: *ResourceManager) void {
-    _ = self.vtable.close(self.session);
-}
-
-/// Returns the raw VISA status reported by the most recent resource-manager call.
-pub fn lastStatus(self: *const ResourceManager) ViStatus {
-    return self.status;
+    common.checkStatus(self.vtable.viClose(self.session)) catch {};
 }
 
 /// Enumerates VISA instrument resources that match the default query.
@@ -58,27 +50,27 @@ pub fn listResources(self: *ResourceManager, allocator: std.mem.Allocator) commo
     var count: ViUInt32 = 0;
     var buffer: [c.VI_FIND_BUFLEN]u8 = undefined;
 
-    self.status = self.vtable.findRsrc(
+    common.checkStatus(self.vtable.viFindRsrc(
         self.session,
         query_z.ptr,
         &find_list,
         &count,
         @ptrCast(&buffer),
-    );
-    if (self.status == c.VI_ERROR_RSRC_NFOUND) {
-        const empty = try alloc.alloc([]const u8, 0);
-        return .{ .arena = arena, .items = empty };
-    }
-    try common.checkStatus(self.status);
-    defer _ = self.vtable.close(find_list);
+    )) catch |err| {
+        if (err == error.ResourceNotFound) {
+            const empty = try alloc.alloc([]const u8, 0);
+            return .{ .arena = arena, .items = empty };
+        }
+        return err;
+    };
+    defer common.checkStatus(self.vtable.viClose(find_list)) catch {};
 
     var resources: std.ArrayList([]const u8) = .empty;
 
     try resources.append(alloc, try copyBufferString(alloc, buffer[0..]));
     var index: usize = 1;
     while (index < count) : (index += 1) {
-        self.status = self.vtable.findNext(find_list, @ptrCast(&buffer));
-        try common.checkStatus(self.status);
+        try common.checkStatus(self.vtable.viFindNext(find_list, @ptrCast(&buffer)));
         try resources.append(alloc, try copyBufferString(alloc, buffer[0..]));
     }
 

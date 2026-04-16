@@ -1,6 +1,5 @@
 const std = @import("std");
-const mibu = @import("mibu");
-const color = mibu.color;
+const tty = @import("../cli/tty.zig");
 const Adapter = @import("../adapter/Adapter.zig");
 const recipe_mod = @import("../recipe/root.zig");
 const testing = @import("../testing.zig");
@@ -9,7 +8,7 @@ const common = @import("common.zig");
 const pipeline_mod = @import("pipeline/root.zig");
 const scheduler = @import("scheduler.zig");
 
-const plan_tag = color.print.fg(.aqua) ++ "[PLAN]" ++ color.print.reset;
+const plan_tag = tty.styledText("[PLAN]", .{.aqua});
 
 /// Precompiles a recipe, opens instrument sessions, and runs tasks until completion.
 pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
@@ -21,7 +20,12 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
     var rm: ?visa.ResourceManager = null;
     defer if (rm) |*mgr| mgr.deinit();
     if (!opts.dry_run) {
-        vtable = try visa.loader.load(opts.visa_lib);
+        var visa_diag: visa.loader.LoadDiagnostic = undefined;
+        vtable = visa.loader.load(opts.visa_lib, &visa_diag) catch |err| {
+            try log.writeAll(tty.styledText("error: ", .{.red}));
+            try visa_diag.write(log, err);
+            return err;
+        };
         rm = try visa.ResourceManager.init(&vtable);
     }
 
@@ -30,11 +34,12 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
 
     var compiled = blk: {
         var dir = if (std.fs.path.isAbsolute(opts.adapter_dir))
-            try std.fs.openDirAbsolute(opts.adapter_dir, .{})
+            try std.Io.Dir.openDirAbsolute(opts.io, opts.adapter_dir, .{})
         else
-            try std.fs.cwd().openDir(opts.adapter_dir, .{});
-        defer dir.close();
-        break :blk recipe_mod.PrecompiledRecipe.precompilePath(allocator, opts.recipe_path, dir, &precompile_diagnostic) catch |err| {
+            try std.Io.Dir.cwd().openDir(opts.io, opts.adapter_dir, .{});
+        defer dir.close(opts.io);
+        break :blk recipe_mod.PrecompiledRecipe.precompilePath(allocator, opts.io, opts.recipe_path, dir, &precompile_diagnostic) catch |err| {
+            try log.writeAll(tty.styledText("precompile failed", .{.red}));
             try precompile_diagnostic.write(log, err);
             return err;
         };
@@ -48,7 +53,7 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
     }
 
     const instruments = try allocator.alloc(common.InstrumentRuntime, compiled.instruments.count());
-    var ctx: common.Context = try .init(allocator, compiled.initial_values);
+    var ctx: common.Context = try .init(allocator, opts.io, compiled.initial_values);
 
     defer {
         for (instruments) |*runtime| {
@@ -74,7 +79,7 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
 
     const frame_columns = compiled.pipeline.record.?.explicit;
 
-    var pipeline_runtime: pipeline_mod.Runtime = try .init(allocator, pipeline_config, frame_columns, log);
+    var pipeline_runtime: pipeline_mod.Runtime = try .init(allocator, opts.io, pipeline_config, frame_columns, log);
     defer pipeline_runtime.deinit();
     try pipeline_runtime.start();
 
@@ -91,26 +96,26 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
     const sampler_thread = try std.Thread.spawn(.{}, scheduler.runTasksThread, .{&sampler_state});
     var finalized = false;
     defer if (!finalized) {
-        finalizeExecution(&pipeline_runtime, &monitor_state, sampler_thread);
+        sampler_thread.join();
+        finalizePipeline(&pipeline_runtime, &monitor_state);
     };
     while (!sampler_state.done.load(.seq_cst)) {
         pipeline_runtime.emitWarnings(&monitor_state);
-        std.Thread.sleep(pipeline_mod.monitor_interval_ns);
+        opts.io.sleep(.fromNanoseconds(pipeline_mod.monitor_interval_ns), .awake) catch break;
     }
 
-    finalizeExecution(&pipeline_runtime, &monitor_state, sampler_thread);
+    sampler_thread.join();
+    finalizePipeline(&pipeline_runtime, &monitor_state);
     finalized = true;
 
     if (sampler_state.result) |err| return err;
     if (pipeline_runtime.workerResult()) |err| return err;
 }
 
-fn finalizeExecution(
+fn finalizePipeline(
     pipeline_runtime: *pipeline_mod.Runtime,
     monitor_state: *pipeline_mod.MonitorState,
-    sampler_thread: std.Thread,
 ) void {
-    sampler_thread.join();
     pipeline_runtime.markProducerDone();
     pipeline_runtime.emitWarnings(monitor_state);
     pipeline_runtime.join();
@@ -130,7 +135,7 @@ fn resolveConfiguredPath(allocator: std.mem.Allocator, recipe_path: []const u8, 
 /// Opens VISA sessions for every precompiled instrument when not running in dry-run mode.
 fn prepareRuntime(
     allocator: std.mem.Allocator,
-    precompiled_instruments: *const std.StringArrayHashMap(recipe_mod.PrecompiledInstrument),
+    precompiled_instruments: *const std.StringArrayHashMapUnmanaged(recipe_mod.PrecompiledInstrument),
     instruments: []common.InstrumentRuntime,
     rm: ?visa.ResourceManager,
 ) !void {
@@ -144,10 +149,7 @@ fn prepareRuntime(
 }
 
 const vendor_psu_adapter =
-    \\[metadata]
-    \\
-    \\[commands.set_voltage]
-    \\write = "VOLT {voltage},(@{channels})"
+    \\{"metadata": {}, "commands": {"set_voltage": {"write": "VOLT {voltage},(@{channels})"}}}
 ;
 
 test "executor execute dry run" {
@@ -156,27 +158,14 @@ test "executor execute dry run" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
-    try workspace.writeFile("recipes/r1_set_voltage.yaml",
-        \\instruments:
-        \\  d1:
-        \\    adapter: psu0.toml
-        \\    resource: USB0::1::INSTR
-        \\pipeline:
-        \\  record: all
-        \\tasks:
-        \\  - steps:
-        \\      - call: d1.set_voltage
-        \\        args:
-        \\          voltage: 5
-        \\          channels:
-        \\            - 1
-        \\            - 2
+    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
+    try workspace.writeFile("recipes/r1_set_voltage.json",
+        \\{"instruments": {"d1": {"adapter": "psu0.json", "resource": "USB0::1::INSTR"}}, "pipeline": {"record": {"all": "all"}}, "tasks": [{"steps": [{"call": {"call": "d1.set_voltage", "args": {"voltage": {"scalar": {"int": 5}}, "channels": {"list": [{"int": 1}, {"int": 2}]}}}}]}]}
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.yaml");
+    const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.json");
     defer gpa.free(recipe_path);
 
     var out: std.Io.Writer.Allocating = .init(gpa);
@@ -185,6 +174,7 @@ test "executor execute dry run" {
     const opts = common.ExecOptions{
         .adapter_dir = adapter_dir,
         .recipe_path = recipe_path,
+        .io = std.testing.io,
         .dry_run = true,
         .log = &out.writer,
     };
@@ -201,32 +191,14 @@ test "executor pipeline creates csv frame sink during dry run" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.toml", vendor_psu_adapter);
-    try workspace.writeFile("recipes/pipeline.yaml",
-        \\instruments:
-        \\  d1:
-        \\    adapter: psu0.toml
-        \\    resource: USB0::1::INSTR
-        \\pipeline:
-        \\  buffer_size: 64
-        \\  warn_usage_percent: 80
-        \\  mode: safe
-        \\  file_path: samples.csv
-        \\  record: all
-        \\tasks:
-        \\  - steps:
-        \\      - call: d1.set_voltage
-        \\        args:
-        \\          voltage: 5
-        \\          channels:
-        \\            - 1
-        \\            - 2
-        \\stop_when: "$ITER >= 2"
+    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
+    try workspace.writeFile("recipes/pipeline.json",
+        \\{"instruments": {"d1": {"adapter": "psu0.json", "resource": "USB0::1::INSTR"}}, "pipeline": {"buffer_size": 64, "warn_usage_percent": 80, "mode": "safe", "file_path": "samples.csv", "record": {"all": "all"}}, "stop_when": {"string": "$ITER >= 2"}, "tasks": [{"steps": [{"call": {"call": "d1.set_voltage", "args": {"voltage": {"scalar": {"int": 5}}, "channels": {"list": [{"int": 1}, {"int": 2}]}}}}]}]}
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/pipeline.yaml");
+    const recipe_path = try workspace.realpathAlloc("recipes/pipeline.json");
     defer gpa.free(recipe_path);
 
     var out: std.Io.Writer.Allocating = .init(gpa);
@@ -236,6 +208,7 @@ test "executor pipeline creates csv frame sink during dry run" {
         .adapter_dir = adapter_dir,
         .recipe_path = recipe_path,
         .dry_run = true,
+        .io = std.testing.io,
         .log = &out.writer,
     });
 

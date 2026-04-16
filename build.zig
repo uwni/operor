@@ -8,27 +8,18 @@ pub fn build(b: *std.Build) !void {
 
     const test_filters = b.option([]const []const u8, "test-filter", "Skip tests that do not match filters") orelse &.{};
 
-    const ordo_mod = b.addModule("ordo", .{
+    const operor_mod = b.addModule("operor", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .link_libc = true,
     });
-    ordo_mod.addIncludePath(b.path("include/"));
-    const serde_dep = b.dependency("serde", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    ordo_mod.addImport("serde", serde_dep.module("serde"));
-
-    const mibu_dep = b.dependency("mibu", .{});
-    ordo_mod.addImport("mibu", mibu_dep.module("mibu"));
+    operor_mod.addIncludePath(b.path("include/"));
 
     const semver = std.SemanticVersion.parse(pkg.version) catch unreachable;
 
     // Create the executable
     const exe = b.addExecutable(.{
-        .name = "ordo",
+        .name = "operor",
         .version = semver,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
@@ -36,7 +27,7 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
             .strip = strip,
             .imports = &.{
-                .{ .name = "ordo", .module = ordo_mod },
+                .{ .name = "operor", .module = operor_mod },
             },
             .link_libc = true,
         }),
@@ -57,7 +48,7 @@ pub fn build(b: *std.Build) !void {
     });
     exe.root_module.addImport("clap", clap.module("clap"));
 
-    const run_step = b.step("run", "Run ordo");
+    const run_step = b.step("run", "Run operor");
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -66,9 +57,9 @@ pub fn build(b: *std.Build) !void {
         run_cmd.addArgs(args);
     }
 
-    // Tests for the ordo module
+    // Tests for the operor module
     const mod_tests = b.addTest(.{
-        .root_module = ordo_mod,
+        .root_module = operor_mod,
         .filters = test_filters,
     });
 

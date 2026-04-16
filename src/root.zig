@@ -30,7 +30,7 @@ pub fn execute(allocator: std.mem.Allocator, opts: ExecOptions) !void {
 /// Enumerates VISA resources visible to the default resource manager.
 /// `visa_lib` optionally overrides the VISA shared library path.
 pub fn listResources(allocator: std.mem.Allocator, visa_lib: ?[]const u8) !ResourceList {
-    const vtable = try visa.loader.load(visa_lib);
+    const vtable = try visa.loader.load(visa_lib, null);
     var rm = try visa.ResourceManager.init(&vtable);
     defer rm.deinit();
 
@@ -41,17 +41,19 @@ pub fn listResources(allocator: std.mem.Allocator, visa_lib: ?[]const u8) !Resou
 /// `visa_lib` optionally overrides the VISA shared library path.
 pub fn repl(
     allocator: std.mem.Allocator,
+    io: std.Io,
     resource_addr: ?[]const u8,
     visa_lib: ?[]const u8,
     reader: *std.Io.Reader,
     out: *std.Io.Writer,
 ) !void {
-    try repl_api.run(allocator, resource_addr, visa_lib, reader, out);
+    try repl_api.run(allocator, io, resource_addr, visa_lib, reader, out);
 }
 
 /// Precompiles and prints a human-readable preview of a recipe without opening VISA sessions.
 pub fn preview(
     allocator: std.mem.Allocator,
+    io: std.Io,
     adapter_dir: []const u8,
     recipe_path: []const u8,
     log: *std.Io.Writer,
@@ -61,11 +63,12 @@ pub fn preview(
 
     var compiled = blk: {
         var dir = if (std.fs.path.isAbsolute(adapter_dir))
-            try std.fs.openDirAbsolute(adapter_dir, .{})
+            try std.Io.Dir.openDirAbsolute(io, adapter_dir, .{})
         else
-            try std.fs.cwd().openDir(adapter_dir, .{});
-        defer dir.close();
-        break :blk recipe.PrecompiledRecipe.precompilePath(allocator, recipe_path, dir, &precompile_diagnostic) catch |err| {
+            try std.Io.Dir.cwd().openDir(io, adapter_dir, .{});
+        defer dir.close(io);
+        break :blk recipe.PrecompiledRecipe.precompilePath(allocator, io, recipe_path, dir, &precompile_diagnostic) catch |err| {
+            try log.writeAll("precompile failed");
             try precompile_diagnostic.write(log, err);
             return err;
         };
@@ -126,6 +129,9 @@ pub fn preview(
                 .sleep => |s| {
                     try log.print("    [{d}] sleep {d}ms\n", .{ step_idx, s.duration_ms });
                 },
+                .parallel => |par| {
+                    try log.print("    [{d}] parallel ({d} steps)\n", .{ step_idx, par.steps.len });
+                },
             }
             if (step.@"if" != null) {
                 try log.print("         if: (guard expression)\n", .{});
@@ -141,38 +147,22 @@ test "preview output" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.toml",
-        \\[metadata]
-        \\
-        \\[commands.set_voltage]
-        \\write = "VOLT {voltage},(@{channels})"
+    try workspace.writeFile("adapters/psu0.json",
+        \\{"metadata": {}, "commands": {"set_voltage": {"write": "VOLT {voltage},(@{channels})"}}}
     );
-    try workspace.writeFile("recipes/r1_set_voltage.yaml",
-        \\instruments:
-        \\  d1:
-        \\    adapter: psu0.toml
-        \\    resource: USB0::1::INSTR
-        \\pipeline:
-        \\  record: all
-        \\tasks:
-        \\  - steps:
-        \\      - call: d1.set_voltage
-        \\        args:
-        \\          voltage: 5
-        \\          channels:
-        \\            - 1
-        \\            - 2
+    try workspace.writeFile("recipes/r1_set_voltage.json",
+        \\{"instruments": {"d1": {"adapter": "psu0.json", "resource": "USB0::1::INSTR"}}, "pipeline": {"record": {"all": "all"}}, "tasks": [{"steps": [{"call": {"call": "d1.set_voltage", "args": {"voltage": {"scalar": {"int": 5}}, "channels": {"list": [{"int": 1}, {"int": 2}]}}}}]}]}
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.yaml");
+    const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.json");
     defer gpa.free(recipe_path);
 
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
 
-    try preview(gpa, adapter_dir, recipe_path, &out.writer);
+    try preview(gpa, std.testing.io, adapter_dir, recipe_path, &out.writer);
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "Instruments: 1"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "Tasks: 1"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "call=set_voltage"));

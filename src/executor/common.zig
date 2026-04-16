@@ -9,6 +9,8 @@ pub const ExecOptions = struct {
     adapter_dir: []const u8,
     /// Path to the recipe document to execute.
     recipe_path: []const u8,
+    /// I/O interface for filesystem and other operations.
+    io: std.Io,
     /// If true, rendered commands are logged instead of being sent to instruments.
     dry_run: bool = true,
     /// Optional runtime override for the ring buffer size.

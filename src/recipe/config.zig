@@ -1,5 +1,4 @@
 const std = @import("std");
-const serde_lib = @import("serde");
 const doc_parse = @import("../doc_parse.zig");
 const types = @import("types.zig");
 
@@ -13,10 +12,6 @@ pub const ArgScalarDoc = union(enum) {
     float: f64,
     /// Boolean literal formatted as `true` or `false`.
     bool: bool,
-
-    pub const serde = .{
-        .tag = serde_lib.UnionTag.untagged,
-    };
 };
 
 /// Recipe argument document value that may be a scalar or a list of scalars.
@@ -25,10 +20,6 @@ pub const ArgValueDoc = union(enum) {
     scalar: ArgScalarDoc,
     /// Ordered list argument value.
     list: []const ArgScalarDoc,
-
-    pub const serde = .{
-        .tag = serde_lib.UnionTag.untagged,
-    };
 };
 
 /// Parsed instrument object straight from the recipe document.
@@ -44,10 +35,6 @@ pub const BooleanExpr = union(enum) {
     string: []const u8,
     bool: bool,
 
-    pub const serde = .{
-        .tag = serde_lib.UnionTag.untagged,
-    };
-
     /// Returns the expression string, or a fixed literal for booleans.
     pub fn source(self: BooleanExpr) []const u8 {
         return switch (self) {
@@ -59,23 +46,21 @@ pub const BooleanExpr = union(enum) {
 
 /// Parsed step object before precompile validation.
 ///
-/// A step is either an instrument `call`, a local `compute` expression, or a `sleep_ms` pause.
+/// A step is either an instrument `call`, a local `compute` expression, a `sleep_ms` pause,
+/// or a `parallel` group of independent steps.
 /// Both call and compute variants support an optional `if` guard expression.
 pub const StepConfig = union(enum) {
     call: CallStepConfig,
     compute: ComputeStepConfig,
     sleep_ms: SleepStepConfig,
-
-    pub const serde = .{
-        .tag = serde_lib.UnionTag.untagged,
-    };
+    parallel: ParallelStepConfig,
 };
 
 pub const CallStepConfig = struct {
     /// Qualified command reference in `instrument.command` format.
     call: []const u8,
     /// Arguments forwarded to the adapter command template.
-    args: ?std.StringHashMap(ArgValueDoc) = null,
+    args: ?std.json.ArrayHashMap(ArgValueDoc) = null,
     /// Context key that receives the step result (response or computed value).
     assign: ?[]const u8 = null,
     /// Guard expression; step is skipped when the result is falsy (0.0).
@@ -98,6 +83,15 @@ pub const SleepStepConfig = struct {
     @"if": ?BooleanExpr = null,
 };
 
+/// A group of steps declared as independent, enabling parallel execution.
+/// Nesting parallel steps is not allowed.
+pub const ParallelStepConfig = struct {
+    /// Steps that may be executed concurrently.
+    parallel: []StepConfig,
+    /// Guard expression; the entire group is skipped when the result is falsy (0.0).
+    @"if": ?BooleanExpr = null,
+};
+
 /// Parsed task object supporting loop, sequential, and conditional variants.
 pub const TaskConfig = struct {
     /// Steps to execute.
@@ -113,36 +107,37 @@ pub const PipelineConfig = types.PipelineConfig;
 
 /// Parsed top-level recipe document.
 pub const RecipeConfig = struct {
-    instruments: std.StringArrayHashMap(InstrumentConfig),
+    instruments: std.json.ArrayHashMap(InstrumentConfig),
     tasks: []TaskConfig,
     pipeline: ?PipelineConfig = null,
     stop_when: ?BooleanExpr = null,
-    consts: ?std.StringArrayHashMap(ArgValueDoc) = null,
-    vars: ?std.StringArrayHashMap(ArgValueDoc) = null,
+    consts: ?std.json.ArrayHashMap(ArgValueDoc) = null,
+    vars: ?std.json.ArrayHashMap(ArgValueDoc) = null,
     expected_iterations: ?u64 = null,
 };
 
 test "parse recipe arg object values" {
     const Parsed = struct {
-        args: std.StringHashMap(ArgValueDoc),
+        args: std.json.ArrayHashMap(ArgValueDoc),
     };
 
     const gpa = std.testing.allocator;
     const content =
-        \\args:
-        \\  voltage: "5"
-        \\  channels:
-        \\    - 1
-        \\    - 2
-        \\  enabled: true
+        \\{
+        \\  "args": {
+        \\    "voltage": {"scalar": {"string": "5"}},
+        \\    "channels": {"list": [{"int": 1}, {"int": 2}]},
+        \\    "enabled": {"scalar": {"bool": true}}
+        \\  }
+        \\}
     ;
 
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
-    const parsed = try doc_parse.parseByFormat(Parsed, .yaml, arena.allocator(), content);
+    const parsed = try doc_parse.parseFromSlice(Parsed, arena.allocator(), content);
 
-    const voltage = parsed.args.get("voltage") orelse return error.TestUnexpectedResult;
+    const voltage = parsed.args.map.get("voltage") orelse return error.TestUnexpectedResult;
     switch (voltage) {
         .scalar => |scalar| switch (scalar) {
             .string => |value| try std.testing.expectEqualStrings("5", value),
@@ -151,7 +146,7 @@ test "parse recipe arg object values" {
         .list => return error.TestUnexpectedResult,
     }
 
-    const channels = parsed.args.get("channels") orelse return error.TestUnexpectedResult;
+    const channels = parsed.args.map.get("channels") orelse return error.TestUnexpectedResult;
     switch (channels) {
         .scalar => return error.TestUnexpectedResult,
         .list => |items| {
@@ -167,7 +162,7 @@ test "parse recipe arg object values" {
         },
     }
 
-    const enabled = parsed.args.get("enabled") orelse return error.TestUnexpectedResult;
+    const enabled = parsed.args.map.get("enabled") orelse return error.TestUnexpectedResult;
     switch (enabled) {
         .scalar => |scalar| switch (scalar) {
             .bool => |value| try std.testing.expect(value),

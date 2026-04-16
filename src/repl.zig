@@ -1,14 +1,11 @@
 const std = @import("std");
-const mibu = @import("mibu");
-const color = mibu.color;
-const style = mibu.style;
-const events = mibu.events;
-const term = mibu.term;
-const cursorctl = mibu.cursor;
+const tty = @import("cli/tty.zig");
+const cursorctl = tty.cursor;
+const clearctl = tty.clear;
 const visa = @import("visa/root.zig");
 
-const repl_prompt = color.print.fg(.aqua) ++ "repl> " ++ color.print.reset;
-const err_label = color.print.fg(.red) ++ "error:" ++ color.print.reset;
+const repl_prompt = tty.styledText("repl> ", .{.aqua});
+const err_label = tty.styledText("error:", .{.red});
 const repl_max_line_bytes: usize = 4096;
 const repl_whitespace = " \t\r\n";
 
@@ -86,12 +83,18 @@ const ParseError = error{
 /// Opens a VISA resource manager and starts the interactive REPL loop.
 pub fn run(
     allocator: std.mem.Allocator,
+    io: std.Io,
     resource_addr: ?[]const u8,
     visa_lib: ?[]const u8,
     reader: *std.Io.Reader,
     out: *std.Io.Writer,
 ) !void {
-    const vtable = try visa.loader.load(visa_lib);
+    var visa_diag: visa.loader.LoadDiagnostic = undefined;
+    const vtable = visa.loader.load(visa_lib, &visa_diag) catch |err| {
+        out.writeAll(err_label ++ " ") catch {};
+        visa_diag.write(out, err) catch {};
+        return err;
+    };
     var rm: visa.ResourceManager = try .init(&vtable);
     defer rm.deinit();
 
@@ -103,14 +106,14 @@ pub fn run(
 
     if (resource_addr) |addr| {
         const name = try ctx.openConnection(addr, null);
-        try out.print(color.print.fg(.green) ++ "Connected to {s} ({s})" ++ color.print.reset ++ "\n", .{ addr, name });
+        try out.print(tty.styledText("Connected to {s} ({s})", .{.green}) ++ "\n", .{ addr, name });
     }
 
     try printHelp(out, ctx.state());
     try out.flush();
     defer out.flush() catch {};
-    if (std.posix.isatty(std.fs.File.stdin().handle)) {
-        var editor = LineEditor.init(allocator, std.fs.File.stdin(), out);
+    if ((std.Io.File.stdin().isTty(io) catch false)) {
+        var editor = LineEditor.init(allocator, std.Io.File.stdin(), out);
         defer editor.deinit();
         try runLoop(allocator, reader, out, &ctx, &editor);
     } else {
@@ -264,12 +267,12 @@ const ReplContext = struct {
     }
 };
 
-/// Interactive line editor using mibu raw mode and event handling.
+/// Interactive line editor using tty raw mode and event handling.
 /// Supports left/right arrow keys, Home/End, Backspace/Delete,
 /// Up/Down for command history, and Ctrl+A/E/U/K/L shortcuts.
 const LineEditor = struct {
     allocator: std.mem.Allocator,
-    stdin: std.fs.File,
+    stdin: std.Io.File,
     out: *std.Io.Writer,
     buf: [repl_max_line_bytes]u8 = undefined,
     len: usize = 0,
@@ -279,7 +282,7 @@ const LineEditor = struct {
     saved_buf: [repl_max_line_bytes]u8 = undefined,
     saved_len: usize = 0,
 
-    fn init(allocator: std.mem.Allocator, stdin: std.fs.File, out: *std.Io.Writer) LineEditor {
+    fn init(allocator: std.mem.Allocator, stdin: std.Io.File, out: *std.Io.Writer) LineEditor {
         return .{
             .allocator = allocator,
             .stdin = stdin,
@@ -298,7 +301,7 @@ const LineEditor = struct {
     fn editLine(self: *LineEditor, prompt: []const u8) !?[]const u8 {
         // Flush pending output before entering raw mode, where \n no longer implies \r.
         try self.out.flush();
-        var raw = try term.enableRawMode(self.stdin.handle);
+        var raw = try tty.enableRawMode(self.stdin.handle);
         defer raw.disableRawMode() catch {};
 
         self.len = 0;
@@ -309,7 +312,7 @@ const LineEditor = struct {
         try self.out.flush();
 
         while (true) {
-            const event = try events.next(self.stdin);
+            const event = try tty.nextEvent(self.stdin);
             switch (event) {
                 .key => |k| {
                     if (k.mods.ctrl) {
@@ -327,8 +330,8 @@ const LineEditor = struct {
                                         return null;
                                     }
                                 },
-                                'a' => try self.moveToPos(0),
-                                'e' => try self.moveToPos(self.len),
+                                'a' => try self.moveToPos(0, prompt),
+                                'e' => try self.moveToPos(self.len, prompt),
                                 'u' => {
                                     const tail = self.len - self.pos;
                                     std.mem.copyForwards(u8, self.buf[0..tail], self.buf[self.pos..self.len]);
@@ -341,7 +344,7 @@ const LineEditor = struct {
                                     try self.refreshLine(prompt);
                                 },
                                 'l' => {
-                                    try self.out.writeAll("\x1b[2J\x1b[H");
+                                    try clearctl.screen(self.out);
                                     try self.refreshLine(prompt);
                                 },
                                 else => {},
@@ -363,22 +366,26 @@ const LineEditor = struct {
                             .delete => try self.deleteForward(prompt),
                             .left => {
                                 if (self.pos > 0) {
+                                    // Skip back over UTF-8 continuation bytes.
                                     self.pos -= 1;
-                                    try cursorctl.goLeft(self.out, @as(u16, 1));
-                                    try self.out.flush();
+                                    while (self.pos > 0 and (self.buf[self.pos] & 0xC0) == 0x80) {
+                                        self.pos -= 1;
+                                    }
+                                    try self.refreshLine(prompt);
                                 }
                             },
                             .right => {
                                 if (self.pos < self.len) {
-                                    self.pos += 1;
-                                    try cursorctl.goRight(self.out, @as(u16, 1));
-                                    try self.out.flush();
+                                    // Skip forward over one full UTF-8 codepoint.
+                                    const byte_len = std.unicode.utf8ByteSequenceLength(self.buf[self.pos]) catch 1;
+                                    self.pos = @min(self.pos + byte_len, self.len);
+                                    try self.refreshLine(prompt);
                                 }
                             },
                             .up => try self.historyPrev(prompt),
                             .down => try self.historyNext(prompt),
-                            .home => try self.moveToPos(0),
-                            .end => try self.moveToPos(self.len),
+                            .home => try self.moveToPos(0, prompt),
+                            .end => try self.moveToPos(self.len, prompt),
                             else => {},
                         }
                     }
@@ -389,16 +396,17 @@ const LineEditor = struct {
     }
 
     fn insertChar(self: *LineEditor, ch: u21, prompt: []const u8) !void {
-        if (ch > 0x7F or self.len >= repl_max_line_bytes) return;
-        const byte: u8 = @intCast(ch);
+        var encoded: [4]u8 = undefined;
+        const byte_len = std.unicode.utf8Encode(ch, &encoded) catch return;
+        if (self.len + byte_len > repl_max_line_bytes) return;
         if (self.pos < self.len) {
-            std.mem.copyBackwards(u8, self.buf[self.pos + 1 .. self.len + 1], self.buf[self.pos..self.len]);
+            std.mem.copyBackwards(u8, self.buf[self.pos + byte_len .. self.len + byte_len], self.buf[self.pos..self.len]);
         }
-        self.buf[self.pos] = byte;
-        self.len += 1;
-        self.pos += 1;
+        @memcpy(self.buf[self.pos..][0..byte_len], encoded[0..byte_len]);
+        self.len += byte_len;
+        self.pos += byte_len;
         if (self.pos == self.len) {
-            try self.out.writeByte(byte);
+            try self.out.writeAll(encoded[0..byte_len]);
             try self.out.flush();
         } else {
             try self.refreshLine(prompt);
@@ -407,28 +415,30 @@ const LineEditor = struct {
 
     fn deleteBack(self: *LineEditor, prompt: []const u8) !void {
         if (self.pos == 0) return;
-        std.mem.copyForwards(u8, self.buf[self.pos - 1 .. self.len - 1], self.buf[self.pos..self.len]);
-        self.pos -= 1;
-        self.len -= 1;
+        // Walk backwards to find the start of the previous UTF-8 codepoint.
+        var del_len: usize = 1;
+        while (del_len < self.pos and (self.buf[self.pos - del_len] & 0xC0) == 0x80) {
+            del_len += 1;
+        }
+        std.mem.copyForwards(u8, self.buf[self.pos - del_len .. self.len - del_len], self.buf[self.pos..self.len]);
+        self.pos -= del_len;
+        self.len -= del_len;
         try self.refreshLine(prompt);
     }
 
     fn deleteForward(self: *LineEditor, prompt: []const u8) !void {
         if (self.pos >= self.len) return;
-        std.mem.copyForwards(u8, self.buf[self.pos .. self.len - 1], self.buf[self.pos + 1 .. self.len]);
-        self.len -= 1;
+        const del_len = std.unicode.utf8ByteSequenceLength(self.buf[self.pos]) catch 1;
+        const actual = @min(del_len, self.len - self.pos);
+        std.mem.copyForwards(u8, self.buf[self.pos .. self.len - actual], self.buf[self.pos + actual .. self.len]);
+        self.len -= actual;
         try self.refreshLine(prompt);
     }
 
-    fn moveToPos(self: *LineEditor, new_pos: usize) !void {
+    fn moveToPos(self: *LineEditor, new_pos: usize, prompt: []const u8) !void {
         if (new_pos == self.pos) return;
-        if (new_pos < self.pos) {
-            try cursorctl.goLeft(self.out, self.pos - new_pos);
-        } else {
-            try cursorctl.goRight(self.out, new_pos - self.pos);
-        }
         self.pos = new_pos;
-        try self.out.flush();
+        try self.refreshLine(prompt);
     }
 
     fn historyPrev(self: *LineEditor, prompt: []const u8) !void {
@@ -473,18 +483,62 @@ const LineEditor = struct {
     }
 
     fn refreshLine(self: *LineEditor, prompt: []const u8) !void {
-        try self.out.writeAll("\r");
+        try clearctl.lineStart(self.out);
         try self.out.writeAll(prompt);
         try self.out.writeAll(self.buf[0..self.len]);
-        try self.out.writeAll("\x1b[K");
-        const tail = self.len - self.pos;
-        if (tail > 0) try cursorctl.goLeft(self.out, tail);
+        try clearctl.toEndOfLine(self.out);
+        // Move cursor back from end-of-line to current position.
+        // Count display columns of the tail (bytes after cursor).
+        const tail_cols = displayWidth(self.buf[self.pos..self.len]);
+        if (tail_cols > 0) try cursorctl.goLeft(self.out, tail_cols);
         try self.out.flush();
+    }
+
+    /// Count the display width (columns) of a UTF-8 string.
+    /// CJK characters (U+1100..U+115F, U+2E80..U+A4CF, U+AC00..U+D7AF,
+    /// U+F900..U+FAFF, U+FE10..U+FE6F, U+FF01..U+FF60, U+FFE0..U+FFE6,
+    /// U+1F000..U+1FAFF, U+20000..U+2FA1F) are counted as 2 columns;
+    /// other printable codepoints are 1 column.
+    fn displayWidth(s: []const u8) usize {
+        var cols: usize = 0;
+        var i: usize = 0;
+        while (i < s.len) {
+            const byte_len = std.unicode.utf8ByteSequenceLength(s[i]) catch {
+                i += 1;
+                continue;
+            };
+            if (i + byte_len > s.len) break;
+            const cp = std.unicode.utf8Decode(s[i..][0..byte_len]) catch {
+                i += byte_len;
+                continue;
+            };
+            cols += charWidth(cp);
+            i += byte_len;
+        }
+        return cols;
+    }
+
+    fn charWidth(cp: u21) usize {
+        // Common CJK / fullwidth ranges
+        if ((cp >= 0x1100 and cp <= 0x115F) or // Hangul Jamo
+            (cp >= 0x2E80 and cp <= 0xA4CF and cp != 0x303F) or // CJK Radicals..Yi
+            (cp >= 0xAC00 and cp <= 0xD7AF) or // Hangul Syllables
+            (cp >= 0xF900 and cp <= 0xFAFF) or // CJK Compat Ideographs
+            (cp >= 0xFE10 and cp <= 0xFE6F) or // CJK Compat Forms..Small Forms
+            (cp >= 0xFF01 and cp <= 0xFF60) or // Fullwidth Forms
+            (cp >= 0xFFE0 and cp <= 0xFFE6) or // Fullwidth Signs
+            (cp >= 0x1F000 and cp <= 0x1FAFF) or // Emojis
+            (cp >= 0x20000 and cp <= 0x2FA1F) or // CJK Ext B..Compat Ideographs Sup
+            (cp >= 0x30000 and cp <= 0x3134F)) // CJK Ext G..H
+        {
+            return 2;
+        }
+        return 1;
     }
 };
 
 /// Runs the command prompt loop until EOF or a quit command is received.
-/// When `editor` is non-null, uses interactive line editing via mibu;
+/// When `editor` is non-null, uses interactive line editing via tty;
 /// otherwise falls back to plain line-oriented reading from `reader`.
 fn runLoop(
     allocator: std.mem.Allocator,
@@ -534,8 +588,8 @@ fn runLoop(
 
 fn buildPrompt(ctx: anytype, buf: []u8) []const u8 {
     if (ctx.selectedName()) |name| {
-        return std.fmt.bufPrint(buf, "{s}repl[{s}]> {s}", .{
-            color.print.fg(.aqua), name, color.print.reset,
+        return std.fmt.bufPrint(buf, tty.styledText("repl[{s}]> ", .{.aqua}), .{
+            name,
         }) catch repl_prompt;
     }
     return repl_prompt;
@@ -587,7 +641,7 @@ fn handleOpen(
             return;
         }
         const name = try ctx.openConnection(addr, args.name);
-        try out.print(color.print.fg(.green) ++ "Connected to {s} ({s})" ++ color.print.reset ++ "\n", .{ addr, name });
+        try out.print(tty.styledText("Connected to {s} ({s})", .{.green}) ++ "\n", .{ addr, name });
         return;
     }
     // Interactive mode: scan and prompt for index.
@@ -629,7 +683,7 @@ fn handleOpen(
         return;
     };
     const name = try ctx.openConnection(target_addr, args.name);
-    try out.print(color.print.fg(.green) ++ "Connected to {s} ({s})" ++ color.print.reset ++ "\n", .{ target_addr, name });
+    try out.print(tty.styledText("Connected to {s} ({s})", .{.green}) ++ "\n", .{ target_addr, name });
 }
 
 fn handleClose(ctx: anytype, target: ?[]const u8, out: *std.Io.Writer) !void {
@@ -708,7 +762,7 @@ fn handleSet(allocator: std.mem.Allocator, ctx: anytype, target: ?[]const u8, pa
         return;
     };
     const key = payload[0..space];
-    const raw_value = std.mem.trimLeft(u8, payload[space..], repl_whitespace);
+    const raw_value = std.mem.trimStart(u8, payload[space..], repl_whitespace);
     if (raw_value.len == 0) {
         try out.writeAll(err_label ++ " usage: set <key> <value>\n");
         return;
@@ -784,9 +838,9 @@ fn handleList(allocator: std.mem.Allocator, ctx: anytype, out: *std.Io.Writer) !
             const conn = ctx.connections.items[ci];
             const is_selected = if (ctx.selected) |sel| sel == ci else false;
             if (is_selected) {
-                try out.print("  " ++ style.print.bold ++ color.print.fg(.green) ++ "{s}) {s}" ++ color.print.reset ++ "\n", .{ conn.name, resource });
+                try out.print("  " ++ tty.styledText("{s}) {s}", .{ .bold, .green }) ++ "\n", .{ conn.name, resource });
             } else {
-                try out.print("  " ++ color.print.fg(.yellow) ++ "{s}) {s}" ++ color.print.reset ++ "\n", .{ conn.name, resource });
+                try out.print("  " ++ tty.styledText("{s}) {s}", .{.yellow}) ++ "\n", .{ conn.name, resource });
             }
         } else {
             try out.print("  {s}\n", .{resource});
@@ -837,7 +891,7 @@ fn parseCommand(line: []const u8) ParseError!Command {
 
     const verb_end = std.mem.indexOfAny(u8, line, repl_whitespace) orelse line.len;
     const first_token = line[0..verb_end];
-    const rest = std.mem.trimLeft(u8, line[verb_end..], repl_whitespace);
+    const rest = std.mem.trimStart(u8, line[verb_end..], repl_whitespace);
 
     // Check for name.verb pattern.
     if (std.mem.indexOfScalar(u8, first_token, '.')) |dot| {
@@ -895,7 +949,7 @@ fn parseOpenArgs(args: []const u8) Command {
     if (args.len == 0) return .{ .open = .{ .addr = null, .name = null } };
     if (std.mem.indexOf(u8, args, " as ")) |as_pos| {
         const addr = args[0..as_pos];
-        const name = std.mem.trimLeft(u8, args[as_pos + 4 ..], repl_whitespace);
+        const name = std.mem.trimStart(u8, args[as_pos + 4 ..], repl_whitespace);
         if (name.len == 0) return .{ .open = .{ .addr = if (addr.len > 0) addr else null, .name = null } };
         return .{ .open = .{ .addr = if (addr.len > 0) addr else null, .name = name } };
     }

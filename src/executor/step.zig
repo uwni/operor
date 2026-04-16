@@ -1,13 +1,13 @@
 const std = @import("std");
-const mibu = @import("mibu");
-const color = mibu.color;
+const tty = @import("../cli/tty.zig");
 const Adapter = @import("../adapter/Adapter.zig");
 const recipe_mod = @import("../recipe/root.zig");
 const common = @import("common.zig");
 const expr = @import("../expr.zig");
+const parallel_mod = @import("parallel.zig");
 
-const warn_tag = color.print.fg(.yellow) ++ "[WARN]" ++ color.print.reset;
-const dry_run_tag = color.print.fg(.fuchsia) ++ "[dry-run]" ++ color.print.reset;
+const warn_tag = tty.styledText("[WARN]", .{.yellow});
+const dry_run_tag = tty.styledText("[dry-run]", .{.fuchsia});
 
 const command_stack_bytes: usize = 512;
 /// Parsed response value in the native Zig type indicated by the command encoding.
@@ -37,7 +37,7 @@ pub const StepScratch = struct {
         self.temp_arena.deinit();
     }
 
-    fn tempAllocator(self: *StepScratch) std.mem.Allocator {
+    pub fn tempAllocator(self: *StepScratch) std.mem.Allocator {
         return self.temp_arena.allocator();
     }
 
@@ -57,55 +57,32 @@ pub fn executeStep(
     dry_run: bool,
     log_sink: common.LogSink,
     scratch: *StepScratch,
+    instruments: []common.InstrumentRuntime,
 ) !?SavedValue {
     // Evaluate optional `if` guard.
     if (step.@"if") |*if_expr| {
-        const is_true = if_expr.isTruthy(ctx.varResolver(), allocator) catch |err| switch (err) {
-            error.VariableNotFound => {
-                logWarning(log_sink, "if guard: variable not found, skipping step");
-                return null;
-            },
-            error.InvalidNumber => {
-                logWarning(log_sink, "if guard: invalid number in variable, skipping step");
-                return null;
-            },
-            else => return err,
-        };
+        const is_true = try if_expr.isTruthy(ctx.varResolver(), allocator);
         if (!is_true) return null;
     }
 
     return switch (step.action) {
         .instrument_call => |ic| executeInstrumentCall(allocator, instrument.?, &ic, ctx, dry_run, log_sink, scratch),
-        .compute => |comp| executeCompute(allocator, &comp, ctx, log_sink),
+        .compute => |comp| executeCompute(allocator, &comp, ctx),
         .sleep => |s| {
-            std.Thread.sleep(s.duration_ms * 1_000_000);
+            ctx.io.sleep(.fromNanoseconds(@as(i96, s.duration_ms) * 1_000_000), .awake) catch {};
             return null;
         },
+        .parallel => |p| parallel_mod.executeParallel(allocator, &p, instruments, ctx, dry_run, log_sink, scratch),
     };
 }
 
 /// Evaluates a local compute expression and stores the result in the context.
-fn executeCompute(
+pub fn executeCompute(
     allocator: std.mem.Allocator,
     comp: *const recipe_mod.Step.Compute,
     ctx: *common.Context,
-    log_sink: common.LogSink,
 ) !?SavedValue {
-    const eval_res = comp.expression.eval(ctx.varResolver(), allocator) catch |err| switch (err) {
-        error.VariableNotFound => {
-            logWarning(log_sink, "compute: variable not found");
-            return null;
-        },
-        error.InvalidNumber => {
-            logWarning(log_sink, "compute: invalid number in variable");
-            return null;
-        },
-        error.DivisionByZero => {
-            logWarning(log_sink, "compute: division by zero");
-            return null;
-        },
-        else => return err,
-    };
+    const eval_res = try comp.expression.eval(ctx.varResolver(), allocator);
     defer eval_res.deinit();
     const result = eval_res.value;
 
@@ -240,7 +217,7 @@ fn evalToValue(
     };
 }
 
-fn resolveStepArg(
+pub fn resolveStepArg(
     ctx: *const common.Context,
     value: recipe_mod.StepArg,
     allocator: std.mem.Allocator,

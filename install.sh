@@ -1,21 +1,21 @@
 #!/bin/sh
-# Ordo installer — downloads a prebuilt binary from GitHub Releases.
+# Operor installer — downloads a prebuilt binary from GitHub Releases.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/uwni/ordo/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/uwni/ordo/main/install.sh | sh -s -- --to ~/.local/bin
-#   curl -fsSL https://raw.githubusercontent.com/uwni/ordo/main/install.sh | sh -s -- --version v0.1.0
+#   curl -fsSL https://raw.githubusercontent.com/uwni/operor/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/uwni/operor/main/install.sh | sh -s -- --to ~/.local/bin
+#   curl -fsSL https://raw.githubusercontent.com/uwni/operor/main/install.sh | sh -s -- --version v0.1.0
 
 set -eu
 
-REPO="uwni/ordo"
-BIN_NAME="ordo"
+REPO="uwni/operor"
+BIN_NAME="operor"
 INSTALL_DIR=""
 VERSION=""
 
 usage() {
     cat <<EOF
-Ordo installer
+Operor installer
 
 Usage:
     install.sh [OPTIONS]
@@ -156,6 +156,11 @@ unzip -qo "${TMP_DIR}/${ARCHIVE}" -d "${TMP_DIR}/extract"
 mkdir -p "$INSTALL_DIR"
 cp "${TMP_DIR}/extract/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
 chmod +x "${INSTALL_DIR}/${BIN_NAME}"
+
+# Remove macOS quarantine flag (unsigned binary would be blocked by Gatekeeper)
+case "$(uname -s)" in
+    Darwin*) xattr -d com.apple.quarantine "${INSTALL_DIR}/${BIN_NAME}" 2>/dev/null || true ;;
+esac
 
 printf "\n✓ Installed %s to %s/%s\n" "$VERSION" "$INSTALL_DIR" "$BIN_NAME"
 
