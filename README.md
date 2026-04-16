@@ -2,7 +2,7 @@
 
 Operor Performs Experimental Runs On Resources.
 
-Operor loads instrument adapters from TOML, recipes from YAML, precompiles command templates and expressions, and executes scheduled tasks with optional preview, dry-run, CSV output, and TCP streaming.
+Operor loads instrument adapters and recipes from JSON, precompiles command templates and expressions, and executes scheduled tasks with optional preview, dry-run, CSV output, and TCP streaming.
 
 ## Requirements
 
@@ -40,7 +40,7 @@ If your VISA library is not installed in a standard location, pass it explicitly
 Preview the bundled example recipe without opening instruments:
 
 ```sh
-operor run -d test-data/adapters test-data/recipes/r1_set.yaml --preview
+operor run -d test-data/adapters test-data/recipes/r1_set.json --preview
 ```
 
 Open an interactive REPL and discover instruments:
@@ -58,7 +58,7 @@ operor repl -r USB0::...::INSTR
 Execute a recipe:
 
 ```sh
-operor run -d ./adapters ./recipes/measure.yaml
+operor run -d ./adapters ./recipes/measure.json
 ```
 
 ## CLI
@@ -83,34 +83,39 @@ Command behavior:
 
 Operor has two configuration layers:
 
-- Adapters define instrument metadata and command templates in TOML.
-- Recipes define instruments, variables, task schedules, expressions, and sinks in YAML.
+- Adapters define instrument metadata and command templates in JSON.
+- Recipes define instruments, variables, task schedules, expressions, and sinks in JSON.
 
 ### Adapter Files
 
-Adapter documents are TOML files with optional metadata, an optional `instrument` section for VISA session defaults, and a `commands` table.
+Adapter documents are JSON files with optional metadata, an optional `instrument` section for VISA session defaults, and a `commands` object.
 
-```toml
-[metadata]
-version = "1.2.3"
-description = "Bench power supply"
-
-[instrument]
-timeout_ms = 2500
-write_termination = "\n"
-read_termination = "\n"
-query_delay_ms = 25
-chunk_size = 4096
-manufacturer = "Keysight Technologies"
-models = ["E36312A"]
-firmware = "1.10"
-
-[commands.set_voltage]
-write = "VOLT {voltage},(@{channels})"
-
-[commands.measure_voltage]
-write = "MEAS:VOLT?"
-read = "float"
+```json
+{
+  "metadata": {
+    "version": "1.2.3",
+    "description": "Bench power supply"
+  },
+  "instrument": {
+    "timeout_ms": 2500,
+    "write_termination": "\n",
+    "read_termination": "\n",
+    "query_delay_ms": 25,
+    "chunk_size": 4096,
+    "manufacturer": "Keysight Technologies",
+    "models": ["E36312A"],
+    "firmware": "1.10"
+  },
+  "commands": {
+    "set_voltage": {
+      "write": "VOLT {voltage},(@{channels})"
+    },
+    "measure_voltage": {
+      "write": "MEAS:VOLT?",
+      "read": "float"
+    }
+  }
+}
 ```
 
 Notes:
@@ -123,9 +128,9 @@ Notes:
 
 ### Recipe Files
 
-Recipe documents are YAML files with these top-level sections:
+Recipe documents are JSON files with these top-level sections:
 
-- `instruments`: named instrument instances with a adapter file and VISA resource string
+- `instruments`: named instrument instances with an adapter file and VISA resource string
 - `vars`: initial variable values used by expressions and `assign` slots
 - `tasks`: periodic work definitions
 - `pipeline`: optional CSV and TCP sink configuration
@@ -133,39 +138,50 @@ Recipe documents are YAML files with these top-level sections:
 
 Example:
 
-```yaml
-instruments:
-    psu:
-        adapter: psu.toml
-        resource: USB0::1::INSTR
-
-vars:
-    target_voltage: 5
-    measured_voltage: 0
-    delta: 0
-
-pipeline:
-    mode: realtime
-    record:
-        - measured_voltage
-        - delta
-    file_path: samples.csv
-
-tasks:
-    - while: true
-      steps:
-        - call: psu.set_voltage
-          args:
-              voltage: "${target_voltage}"
-              channels: [1, 2]
-        - call: measure_voltage
-          instrument: psu
-          assign: measured_voltage
-        - compute: "${measured_voltage} - ${target_voltage}"
-          assign: delta
-          if: "$ITER > 0"
-
-stop_when: "$ELAPSED_MS >= 2000 || $ITER >= 20"
+```json
+{
+  "instruments": {
+    "psu": {
+      "adapter": "psu.json",
+      "resource": "USB0::1::INSTR"
+    }
+  },
+  "vars": {
+    "target_voltage": 5,
+    "measured_voltage": 0,
+    "delta": 0
+  },
+  "pipeline": {
+    "mode": "realtime",
+    "record": ["measured_voltage", "delta"],
+    "file_path": "samples.csv"
+  },
+  "tasks": [
+    {
+      "while": "true",
+      "steps": [
+        {
+          "call": "psu.set_voltage",
+          "args": {
+            "voltage": "${target_voltage}",
+            "channels": [1, 2]
+          }
+        },
+        {
+          "call": "measure_voltage",
+          "instrument": "psu",
+          "assign": "measured_voltage"
+        },
+        {
+          "compute": "${measured_voltage} - ${target_voltage}",
+          "assign": "delta",
+          "if": "$ITER > 0"
+        }
+      ]
+    }
+  ],
+  "stop_when": "$ELAPSED_MS >= 2000 || $ITER >= 20"
+}
 ```
 
 Recipe notes:
@@ -191,8 +207,10 @@ For a **sequential** task (no `while` or `if`), the steps run exactly once — t
 
 Set `expected_iterations` at the recipe top level to tell the runtime how many iterations to expect. This enables progress reporting (e.g. progress bars).
 
-```yaml
-expected_iterations: 100
+```json
+{
+  "expected_iterations": 100
+}
 ```
 
 ## Expressions
@@ -255,7 +273,7 @@ Important distinction:
 `--dry-run` performs full scheduling and expression evaluation, but instrument calls are logged instead of written:
 
 ```text
-[dry-run] psu.toml -> VOLT 5,(@1,2)
+[dry-run] psu.json -> VOLT 5,(@1,2)
 ```
 
 This is useful for validating template rendering and variable flow before touching hardware.
@@ -271,15 +289,18 @@ Execution uses a dedicated sampler thread plus an SPSC ring buffer so slow sinks
 
 Pipeline fields:
 
-```yaml
-pipeline:
-    mode: realtime
-    buffer_size: 8192
-    warn_usage_percent: 90
-    file_path: samples.csv
-    network_host: 127.0.0.1
-    network_port: 9000
-    record: all
+```json
+{
+  "pipeline": {
+    "mode": "realtime",
+    "buffer_size": 8192,
+    "warn_usage_percent": 90,
+    "file_path": "samples.csv",
+    "network_host": "127.0.0.1",
+    "network_port": 9000,
+    "record": "all"
+  }
+}
 ```
 
 Notes:
@@ -336,8 +357,8 @@ Bundled examples live in:
 
 Useful starting points:
 
-- `test-data/adapters/psu.toml`
-- `test-data/adapters/dmm.toml`
-- `test-data/recipes/r1_set.yaml`
-- `test-data/recipes/r1_set_voltage.yaml`
-- `test-data/recipes/r2_stop_when.yaml`
+- `test-data/adapters/psu.json`
+- `test-data/adapters/dmm.json`
+- `test-data/recipes/r1_set.json`
+- `test-data/recipes/r1_set_voltage.json`
+- `test-data/recipes/r2_stop_when.json`
