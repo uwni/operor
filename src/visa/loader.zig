@@ -131,7 +131,7 @@ fn resolveVtable(handle: anytype, diag: ?*LoadDiagnostic) Error!Vtable {
         const T = if (ti == .optional) ti.optional.child else field.type;
         const ptr: ?T = switch (@TypeOf(handle)) {
             *std.DynLib => handle.lookup(T, field.name),
-            windows.HMODULE => if (GetProcAddress(handle, field.name)) |raw| @ptrCast(raw) else null,
+            windows.HMODULE => if (GetProcAddress(handle, field.name)) |raw| @ptrCast(@alignCast(raw)) else null,
             else => unreachable,
         };
         @field(vtable, field.name) = if (ti == .optional) ptr else ptr orelse {
