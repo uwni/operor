@@ -1,6 +1,6 @@
 # Operor [ˈɔpɛrɔr]
 
-**Oᴘᴇʀᴏʀ Pᴇʀꜰᴏʀᴍꜱ Exᴘᴇʀɪᴍᴇɴᴛᴀʟ Rᴜɴꜱ Oɴ Rᴇꜱᴏᴜʀᴄᴇꜱ**
+**[Oᴘᴇʀᴏʀ](https://en.wiktionary.org/wiki/operor#Latin) Pᴇʀꜰᴏʀᴍꜱ Exᴘᴇʀɪᴍᴇɴᴛᴀʟ Rᴜɴꜱ Oɴ Rᴇꜱᴏᴜʀᴄᴇꜱ**
 
 Operor loads instrument adapters and recipes from JSON, precompiles command templates and expressions, and executes scheduled tasks with optional preview, dry-run, CSV output, and TCP streaming.
 
