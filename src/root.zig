@@ -70,12 +70,12 @@ pub fn preview(
         const opened = dir catch |err| {
             try log.writeAll(tty.error_prefix);
             try log.print("cannot open adapter directory '{s}': {s}\n", .{ adapter_dir, @errorName(err) });
-            std.process.exit(1);
+            return error.Diagnosed;
         };
         defer opened.close(io);
         break :blk recipe.PrecompiledRecipe.precompilePath(allocator, io, recipe_path, opened, &precompile_diagnostic) catch |err| {
             try precompile_diagnostic.write(log, err);
-            std.process.exit(1);
+            return error.Diagnosed;
         };
     };
     defer compiled.deinit();

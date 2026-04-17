@@ -1,6 +1,6 @@
 const std = @import("std");
 const recipe_mod = @import("../recipe/root.zig");
-const common = @import("common.zig");
+const session = @import("session.zig");
 const pipeline_mod = @import("pipeline/root.zig");
 const step_mod = @import("step.zig");
 
@@ -33,8 +33,8 @@ fn installSigintHandler() void {
 pub fn runTasks(
     allocator: std.mem.Allocator,
     compiled_recipe: *const recipe_mod.PrecompiledRecipe,
-    instruments: []common.InstrumentRuntime,
-    ctx: *common.Context,
+    instruments: []session.InstrumentRuntime,
+    ctx: *session.Context,
     pipeline_runtime: *pipeline_mod.Runtime,
     dry_run: bool,
 ) !void {
@@ -89,8 +89,8 @@ fn runTask(
     allocator: std.mem.Allocator,
     compiled_recipe: *const recipe_mod.PrecompiledRecipe,
     task_idx: usize,
-    instruments: []common.InstrumentRuntime,
-    ctx: *common.Context,
+    instruments: []session.InstrumentRuntime,
+    ctx: *session.Context,
     pipeline_runtime: *pipeline_mod.Runtime,
     dry_run: bool,
     scratch: *step_mod.StepScratch,
@@ -103,7 +103,7 @@ fn runTask(
     ctx.task_idx = task_idx;
 
     for (task.steps()) |*step| {
-        const instrument: ?*common.InstrumentRuntime = switch (step.action) {
+        const instrument: ?*session.InstrumentRuntime = switch (step.action) {
             .instrument_call => |ic| &instruments[ic.instrument_idx],
             .compute, .sleep, .parallel => null,
         };
@@ -224,15 +224,15 @@ test "task frame builder captures saved value by ownership transfer" {
 pub const SamplerState = struct {
     allocator: std.mem.Allocator,
     compiled_recipe: *const recipe_mod.PrecompiledRecipe,
-    instruments: []common.InstrumentRuntime,
-    ctx: *common.Context,
+    instruments: []session.InstrumentRuntime,
+    ctx: *session.Context,
     pipeline_runtime: *pipeline_mod.Runtime,
     dry_run: bool,
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     result: ?anyerror = null,
 };
 
-fn shouldStop(compiled_recipe: *const recipe_mod.PrecompiledRecipe, ctx: *common.Context, allocator: std.mem.Allocator) bool {
+fn shouldStop(compiled_recipe: *const recipe_mod.PrecompiledRecipe, ctx: *session.Context, allocator: std.mem.Allocator) bool {
     const stop_expr = compiled_recipe.stop_when orelse return false;
     return stop_expr.isTruthy(ctx.varResolver(), allocator) catch false;
 }

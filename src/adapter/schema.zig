@@ -1,8 +1,8 @@
 const std = @import("std");
 const template = @import("template.zig");
-const shared_types = @import("../types.zig");
+const instrument = @import("../instrument.zig");
 
-pub const Encoding = shared_types.Encoding;
+pub const Encoding = instrument.Encoding;
 
 /// Human-readable metadata declared in a adapter document.
 pub const AdapterMeta = struct {

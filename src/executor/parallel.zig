@@ -1,6 +1,6 @@
 const std = @import("std");
 const recipe_mod = @import("../recipe/root.zig");
-const common = @import("common.zig");
+const session = @import("session.zig");
 const step_mod = @import("step.zig");
 const visa = @import("../visa/root.zig");
 
@@ -41,10 +41,10 @@ const SessionState = struct {
 pub fn executeParallel(
     allocator: std.mem.Allocator,
     parallel: *const recipe_mod.Step.Parallel,
-    instruments: []common.InstrumentRuntime,
-    ctx: *common.Context,
+    instruments: []session.InstrumentRuntime,
+    ctx: *session.Context,
     dry_run: bool,
-    log_sink: common.LogSink,
+    log_sink: session.LogSink,
     scratch: *step_mod.StepScratch,
 ) !?SavedValue {
     const steps = parallel.steps;
@@ -167,8 +167,8 @@ fn initialPhase(action: *const recipe_mod.Step.Action) Phase {
 fn advanceState(
     st: *SessionState,
     allocator: std.mem.Allocator,
-    instruments: []common.InstrumentRuntime,
-    ctx: *common.Context,
+    instruments: []session.InstrumentRuntime,
+    ctx: *session.Context,
     scratch: *step_mod.StepScratch,
 ) !void {
     switch (st.phase) {
@@ -178,7 +178,7 @@ fn advanceState(
 
             scratch.reset();
             const alloc = scratch.tempAllocator();
-            const resolved_args = try alloc.alloc(common.RenderValue, ic.args.len);
+            const resolved_args = try alloc.alloc(session.RenderValue, ic.args.len);
             for (ic.args, 0..) |arg, idx| {
                 resolved_args[idx] = try step_mod.resolveStepArg(ctx, arg, alloc);
             }
@@ -277,7 +277,7 @@ fn processReadResult(
     allocator: std.mem.Allocator,
     ic: *const recipe_mod.Step.InstrumentCall,
     instr: *const visa.Instrument,
-    ctx: *common.Context,
+    ctx: *session.Context,
 ) !void {
     // Trim read termination (same logic as Instrument.readToOwnedWithChunk).
     const term = instr.options.read_termination.constSlice();
@@ -289,7 +289,7 @@ fn processReadResult(
     const slot = ic.save_slot orelse return;
     const encoding = ic.command.response orelse return;
     const stored = try step_mod.parseResponse(encoding, read_data);
-    const value: common.Value = switch (stored) {
+    const value: session.Value = switch (stored) {
         .raw => |v| .{ .string = v },
         .string => |v| .{ .string = v },
         .int => |v| .{ .int = v },
@@ -307,15 +307,15 @@ fn processReadResult(
 fn executeSequentialFallback(
     allocator: std.mem.Allocator,
     parallel: *const recipe_mod.Step.Parallel,
-    instruments: []common.InstrumentRuntime,
-    ctx: *common.Context,
+    instruments: []session.InstrumentRuntime,
+    ctx: *session.Context,
     dry_run: bool,
-    log_sink: common.LogSink,
+    log_sink: session.LogSink,
     scratch: *step_mod.StepScratch,
 ) anyerror!?SavedValue {
     var first_result: ?SavedValue = null;
     for (parallel.steps) |*s| {
-        const instrument: ?*common.InstrumentRuntime = switch (s.action) {
+        const instrument: ?*session.InstrumentRuntime = switch (s.action) {
             .instrument_call => |ic| &instruments[ic.instrument_idx],
             .compute, .sleep, .parallel => null,
         };

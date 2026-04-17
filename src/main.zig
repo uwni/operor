@@ -6,9 +6,12 @@ const cli = @import("cli/root.zig");
 /// CLI layer before being returned; we catch them here to suppress the Zig
 /// runtime error trace and exit with code 1 instead.
 pub fn main(init: std.process.Init) void {
-    cli.main(init) catch |err| {
-        std.debug.print("Unexpected error: {s}\n", .{@errorName(err)});
-        std.process.exit(1);
+    cli.main(init) catch |err| switch (err) {
+        error.Diagnosed => std.process.exit(1),
+        else => {
+            std.debug.print("Unexpected error: {s}\n", .{@errorName(err)});
+            std.process.exit(1);
+        },
     };
 }
 

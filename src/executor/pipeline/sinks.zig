@@ -1,7 +1,7 @@
 const std = @import("std");
-const common = @import("../common.zig");
+const session = @import("../session.zig");
 const ring_buffer_mod = @import("ring_buffer.zig");
-const types = @import("types.zig");
+const frame_mod = @import("frame.zig");
 
 /// Queue message that owns its heap-allocated text buffer.
 pub const LogMessage = struct {
@@ -49,7 +49,7 @@ pub const AsyncLog = struct {
         };
     }
 
-    pub fn logSink(self: *AsyncLog) common.LogSink {
+    pub fn logSink(self: *AsyncLog) session.LogSink {
         return .{
             .context = @ptrCast(self),
             .writeFn = struct {
@@ -93,7 +93,7 @@ pub const FileSink = struct {
         self.file.close(self.io);
     }
 
-    pub fn writeFrame(self: *FileSink, frame: *const types.Frame) !void {
+    pub fn writeFrame(self: *FileSink, frame: *const frame_mod.Frame) !void {
         var io_buffer: [4096]u8 = undefined;
         var file_writer = self.file.writerStreaming(self.io, &io_buffer);
         const writer = &file_writer.interface;
@@ -146,7 +146,7 @@ pub const NetworkSink = struct {
         self.stream.close(self.io);
     }
 
-    pub fn writeFrame(self: *NetworkSink, frame: *const types.Frame) !void {
+    pub fn writeFrame(self: *NetworkSink, frame: *const frame_mod.Frame) !void {
         var io_buffer: [2048]u8 = undefined;
         var stream_writer = self.stream.writer(self.io, &io_buffer);
         try writeFrameJson(&stream_writer.interface, frame, self.frame_columns);
@@ -154,7 +154,7 @@ pub const NetworkSink = struct {
     }
 };
 
-fn writeFrameJson(writer: *std.Io.Writer, frame: *const types.Frame, columns: []const []const u8) !void {
+fn writeFrameJson(writer: *std.Io.Writer, frame: *const frame_mod.Frame, columns: []const []const u8) !void {
     try writer.writeAll("{\"fields\":[");
 
     var first = true;
@@ -208,7 +208,7 @@ test "file sink writes one frame row with all saved fields" {
     values[0] = try gpa.dupe(u8, "1.23");
     values[1] = try gpa.dupe(u8, "0.45");
 
-    var frame = types.Frame{
+    var frame = frame_mod.Frame{
         .values = values,
     };
     defer frame.deinit(gpa);
@@ -242,7 +242,7 @@ test "file sink leaves unrelated frame columns blank" {
     values[0] = try gpa.dupe(u8, "1.23");
     values[1] = null;
 
-    var frame = types.Frame{
+    var frame = frame_mod.Frame{
         .values = values,
     };
     defer frame.deinit(gpa);
@@ -275,7 +275,7 @@ test "file sink escapes csv quotes commas and newlines in frame values" {
     const values = try gpa.alloc(?[]u8, 1);
     values[0] = try gpa.dupe(u8, "1,\"2\"\n3");
 
-    var frame = types.Frame{
+    var frame = frame_mod.Frame{
         .values = values,
     };
     defer frame.deinit(gpa);
@@ -295,7 +295,7 @@ test "writeFrameJson escapes column names and values without heap allocation" {
     values[0] = try gpa.dupe(u8, "1,\"2\"\n3");
     values[1] = null;
 
-    var frame = types.Frame{
+    var frame = frame_mod.Frame{
         .values = values,
     };
     defer frame.deinit(gpa);

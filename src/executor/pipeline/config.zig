@@ -1,10 +1,10 @@
 const std = @import("std");
-const common = @import("../common.zig");
-const recipe_types = @import("../../recipe/types.zig");
+const session = @import("../session.zig");
+const recipe_compiled = @import("../../recipe/compiled.zig");
 
 /// Fully resolved runtime configuration for the sampling pipeline.
 pub const ResolvedConfig = struct {
-    mode: recipe_types.PipelineMode,
+    mode: recipe_compiled.PipelineMode,
     buffer_size: usize,
     warn_usage_percent: u8,
     file_path: ?[]const u8 = null,
@@ -12,7 +12,7 @@ pub const ResolvedConfig = struct {
     network_port: ?u16 = null,
 };
 
-pub fn resolveConfig(recipe_pipeline: *const recipe_types.PipelineConfig, opts: *const common.ExecOptions) ResolvedConfig {
+pub fn resolveConfig(recipe_pipeline: *const recipe_compiled.PipelineConfig, opts: *const session.ExecOptions) ResolvedConfig {
     const mode = opts.pipeline_mode orelse recipe_pipeline.mode orelse .safe;
     const requested_buffer_size = opts.pipeline_buffer_size orelse recipe_pipeline.buffer_size orelse defaultBufferSize(mode);
 
@@ -26,7 +26,7 @@ pub fn resolveConfig(recipe_pipeline: *const recipe_types.PipelineConfig, opts: 
     };
 }
 
-fn defaultBufferSize(mode: recipe_types.PipelineMode) usize {
+fn defaultBufferSize(mode: recipe_compiled.PipelineMode) usize {
     return switch (mode) {
         .safe => 4096,
         .realtime => 8192,

@@ -2,7 +2,7 @@ const std = @import("std");
 const tty = @import("../../tty.zig");
 const config_mod = @import("config.zig");
 const sinks = @import("sinks.zig");
-const types = @import("types.zig");
+const frame_mod = @import("frame.zig");
 
 const idle_sleep_ns: u64 = 100 * std.time.ns_per_us;
 const min_log_queue_capacity: usize = 256;
@@ -31,7 +31,7 @@ pub const Runtime = struct {
     log_writer: *std.Io.Writer,
     log_queue: sinks.LogQueue,
     log_drop_count: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    frame_queue: types.FrameQueue,
+    frame_queue: frame_mod.FrameQueue,
     frame_producer_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     log_producer_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     consumer_thread: ?std.Thread = null,
@@ -53,7 +53,7 @@ pub const Runtime = struct {
             .config = config,
             .log_writer = log_writer,
             .log_queue = try sinks.LogQueue.init(allocator, logQueueCapacity(config.buffer_size)),
-            .frame_queue = try types.FrameQueue.init(allocator, config.buffer_size),
+            .frame_queue = try frame_mod.FrameQueue.init(allocator, config.buffer_size),
         };
         errdefer runtime.log_queue.deinit();
         errdefer runtime.frame_queue.deinit();
@@ -98,7 +98,7 @@ pub const Runtime = struct {
         };
     }
 
-    pub fn publish(self: *Runtime, frame: *types.Frame) bool {
+    pub fn publish(self: *Runtime, frame: *frame_mod.Frame) bool {
         self.frame_queue.push(frame) catch |err| switch (err) {
             error.BufferOverflow => {
                 frame.deinit(self.allocator);
@@ -190,7 +190,7 @@ pub const Runtime = struct {
     }
 
     fn runWorker(self: *Runtime) !void {
-        var frame: types.Frame = .{};
+        var frame: frame_mod.Frame = .{};
         while (true) {
             if (self.frame_queue.pop(&frame)) {
                 defer frame.deinit(self.allocator);
@@ -227,12 +227,12 @@ pub const Runtime = struct {
         }
     }
 
-    fn processFrame(self: *Runtime, frame: *const types.Frame) !void {
+    fn processFrame(self: *Runtime, frame: *const frame_mod.Frame) !void {
         try self.writeFileSink(frame);
         try self.writeNetworkSink(frame);
     }
 
-    fn writeFileSink(self: *Runtime, frame: *const types.Frame) !void {
+    fn writeFileSink(self: *Runtime, frame: *const frame_mod.Frame) !void {
         const sink = &(self.file_sink orelse return);
         sink.writeFrame(frame) catch |err| {
             self.asyncLog().print(error_tag ++ " file sink write failed: {s}\n", .{@errorName(err)});
@@ -240,7 +240,7 @@ pub const Runtime = struct {
         };
     }
 
-    fn writeNetworkSink(self: *Runtime, frame: *const types.Frame) !void {
+    fn writeNetworkSink(self: *Runtime, frame: *const frame_mod.Frame) !void {
         if (self.network_sink == null) return;
         self.network_sink.?.writeFrame(frame) catch |err| {
             self.network_sink.?.deinit(self.allocator);

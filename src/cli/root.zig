@@ -1,6 +1,6 @@
 const std = @import("std");
 const clap = @import("clap");
-const common = @import("common.zig");
+const args_mod = @import("args.zig");
 const repl = @import("repl.zig");
 const run = @import("run.zig");
 
@@ -9,7 +9,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
 
-    var cli_diag: common.CliDiagnostic = .{};
+    var cli_diag: args_mod.CliDiagnostic = .{};
     return dispatch(allocator, io, init.minimal.args, &cli_diag) catch |err| {
         switch (err) {
             error.MissingCommand,
@@ -22,7 +22,7 @@ pub fn main(init: std.process.Init) !void {
                 var w = std.Io.File.stderr().writer(io, &buf);
                 cli_diag.write(&w.interface, cli_err) catch {};
                 w.interface.flush() catch {};
-                std.process.exit(1);
+                return error.Diagnosed;
             },
             else => {},
         }
@@ -30,13 +30,13 @@ pub fn main(init: std.process.Init) !void {
     };
 }
 
-fn dispatch(allocator: std.mem.Allocator, io: std.Io, args: anytype, cli_diag: *common.CliDiagnostic) !void {
+fn dispatch(allocator: std.mem.Allocator, io: std.Io, args: anytype, cli_diag: *args_mod.CliDiagnostic) !void {
     var iter = try std.process.Args.Iterator.initAllocator(args, allocator);
     defer iter.deinit();
     _ = iter.next();
 
     var diag = clap.Diagnostic{};
-    var res = clap.parseEx(clap.Help, &common.root_params, common.root_parsers, &iter, .{
+    var res = clap.parseEx(clap.Help, &args_mod.root_params, args_mod.root_parsers, &iter, .{
         .allocator = allocator,
         .diagnostic = &diag,
         .terminating_positional = 0,
@@ -47,12 +47,12 @@ fn dispatch(allocator: std.mem.Allocator, io: std.Io, args: anytype, cli_diag: *
     defer res.deinit();
 
     if (res.args.help != 0) {
-        try common.usageAndHelpToFile(io, .stdout(), common.exe_name, clap.Help, &common.root_params);
+        try args_mod.usageAndHelpToFile(io, .stdout(), args_mod.exe_name, clap.Help, &args_mod.root_params);
         return;
     }
 
     const raw = res.positionals[0] orelse return error.MissingCommand;
-    const command = std.meta.stringToEnum(common.Command, raw) orelse {
+    const command = std.meta.stringToEnum(args_mod.Command, raw) orelse {
         cli_diag.command = raw;
         return error.UnknownCommand;
     };

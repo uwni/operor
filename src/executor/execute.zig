@@ -1,17 +1,16 @@
 const std = @import("std");
 const tty = @import("../tty.zig");
-const Adapter = @import("../adapter/Adapter.zig");
 const recipe_mod = @import("../recipe/root.zig");
 const testing = @import("../testing.zig");
 const visa = @import("../visa/root.zig");
-const common = @import("common.zig");
+const session = @import("session.zig");
 const pipeline_mod = @import("pipeline/root.zig");
 const scheduler = @import("scheduler.zig");
 
 const plan_tag = tty.styledText("[PLAN]", .{.aqua});
 
 /// Precompiles a recipe, opens instrument sessions, and runs tasks until completion.
-pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
+pub fn execute(allocator: std.mem.Allocator, opts: session.ExecOptions) !void {
     const log = opts.log;
 
     scheduler.initializeStopHandling();
@@ -23,7 +22,7 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
         var visa_diag: visa.loader.LoadDiagnostic = undefined;
         vtable = visa.loader.load(opts.visa_lib, &visa_diag) catch |err| {
             try visa_diag.write(log, err);
-            std.process.exit(1);
+            return error.Diagnosed;
         };
         rm = try visa.ResourceManager.init(&vtable);
     }
@@ -39,12 +38,12 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
         const opened = dir catch |err| {
             try log.writeAll(tty.error_prefix);
             try log.print("cannot open adapter directory '{s}': {s}\n", .{ opts.adapter_dir, @errorName(err) });
-            std.process.exit(1);
+            return error.Diagnosed;
         };
         defer opened.close(opts.io);
         break :blk recipe_mod.PrecompiledRecipe.precompilePath(allocator, opts.io, opts.recipe_path, opened, &precompile_diagnostic) catch |err| {
             try precompile_diagnostic.write(log, err);
-            std.process.exit(1);
+            return error.Diagnosed;
         };
     };
     defer compiled.deinit();
@@ -55,8 +54,8 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
         try log.print(plan_tag ++ " Expected iterations: Unknown (running until manual stop or time limit)\n", .{});
     }
 
-    const instruments = try allocator.alloc(common.InstrumentRuntime, compiled.instruments.count());
-    var ctx: common.Context = try .init(allocator, opts.io, compiled.initial_values);
+    const instruments = try allocator.alloc(session.InstrumentRuntime, compiled.instruments.count());
+    var ctx: session.Context = try .init(allocator, opts.io, compiled.initial_values);
 
     defer {
         for (instruments) |*runtime| {
@@ -139,7 +138,7 @@ fn resolveConfiguredPath(allocator: std.mem.Allocator, recipe_path: []const u8, 
 fn prepareRuntime(
     allocator: std.mem.Allocator,
     precompiled_instruments: *const std.StringArrayHashMapUnmanaged(recipe_mod.PrecompiledInstrument),
-    instruments: []common.InstrumentRuntime,
+    instruments: []session.InstrumentRuntime,
     rm: ?visa.ResourceManager,
 ) !void {
     const mgr = rm orelse return;
@@ -174,7 +173,7 @@ test "executor execute dry run" {
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
 
-    const opts = common.ExecOptions{
+    const opts = session.ExecOptions{
         .adapter_dir = adapter_dir,
         .recipe_path = recipe_path,
         .io = std.testing.io,

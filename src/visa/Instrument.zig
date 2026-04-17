@@ -1,19 +1,19 @@
 const std = @import("std");
-const common = @import("common.zig");
+const bindings = @import("bindings.zig");
 const loader = @import("loader.zig");
 
-const c = common.c;
+const c = bindings.c;
 /// Open VISA instrument session and convenience helpers for reads and writes.
 const Instrument = @This();
-const ViSession = common.ViSession;
-const ViUInt32 = common.ViUInt32;
-const ViAttrState = common.ViAttrState;
+const ViSession = bindings.ViSession;
+const ViUInt32 = bindings.ViUInt32;
+const ViAttrState = bindings.ViAttrState;
 
-const read_stack_chunk_bytes: usize = common.default_chunk_size;
+const read_stack_chunk_bytes: usize = bindings.default_chunk_size;
 
 instrument: ViSession,
 rm: ViSession,
-options: common.InstrumentOptions,
+options: bindings.InstrumentOptions,
 vtable: *const loader.Vtable,
 
 /// Result of a single read operation.
@@ -38,13 +38,13 @@ pub fn open(
     self: *Instrument,
     allocator: std.mem.Allocator,
     resource_addr: []const u8,
-    options: common.InstrumentOptions,
-) common.Error!void {
-    const resource_addr_z = allocator.dupeZ(u8, resource_addr) catch return common.Error.OutOfMemory;
+    options: bindings.InstrumentOptions,
+) bindings.Error!void {
+    const resource_addr_z = allocator.dupeZ(u8, resource_addr) catch return bindings.Error.OutOfMemory;
     defer allocator.free(resource_addr_z);
 
     self.options = options;
-    try common.checkStatus(self.vtable.viOpen(self.rm, resource_addr_z.ptr, c.VI_NULL, c.VI_NULL, &self.instrument));
+    try bindings.checkStatus(self.vtable.viOpen(self.rm, resource_addr_z.ptr, c.VI_NULL, c.VI_NULL, &self.instrument));
     self.applyOptions() catch |err| {
         self.close(self.instrument) catch {};
         return err;
@@ -61,7 +61,7 @@ pub fn readToWriter(
     self: *Instrument,
     writer: *std.Io.Writer,
     chunk_buffer: []u8,
-) (common.Error || std.Io.Writer.Error)!usize {
+) (bindings.Error || std.Io.Writer.Error)!usize {
     var total_read: usize = 0;
 
     while (true) {
@@ -79,7 +79,7 @@ pub fn readToWriter(
 }
 
 /// Reads a complete response into a newly allocated slice.
-pub fn readToOwned(self: *Instrument, allocator: std.mem.Allocator) common.Error![]u8 {
+pub fn readToOwned(self: *Instrument, allocator: std.mem.Allocator) bindings.Error![]u8 {
     const chunk_size = self.options.normalizedChunkSize();
     var stack_chunk: [read_stack_chunk_bytes]u8 = undefined;
 
@@ -92,7 +92,7 @@ pub fn readToOwned(self: *Instrument, allocator: std.mem.Allocator) common.Error
     return self.readToOwnedWithChunk(allocator, chunk_buffer);
 }
 
-fn readToOwnedWithChunk(self: *Instrument, allocator: std.mem.Allocator, chunk_buffer: []u8) common.Error![]u8 {
+fn readToOwnedWithChunk(self: *Instrument, allocator: std.mem.Allocator, chunk_buffer: []u8) bindings.Error![]u8 {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(allocator);
 
@@ -119,14 +119,14 @@ pub fn waitQueryDelay(self: *const Instrument) void {
 }
 
 /// Writes a command and reads the complete response using the configured query delay.
-pub fn queryToOwned(self: *Instrument, allocator: std.mem.Allocator, command: []const u8) common.Error![]u8 {
+pub fn queryToOwned(self: *Instrument, allocator: std.mem.Allocator, command: []const u8) bindings.Error![]u8 {
     try self.write(command);
     self.waitQueryDelay();
     return self.readToOwned(allocator);
 }
 
 /// Writes a command and returns the first read chunk directly into `buffer`.
-pub fn queryRaw(self: *Instrument, command: []const u8, buffer: []u8) common.Error!ReadResult {
+pub fn queryRaw(self: *Instrument, command: []const u8, buffer: []u8) bindings.Error!ReadResult {
     try self.write(command);
     self.waitQueryDelay();
     return self.read(buffer);
@@ -137,7 +137,7 @@ pub fn queryRaw(self: *Instrument, command: []const u8, buffer: []u8) common.Err
 // These are only available when the VISA library exposes the async symbols.
 // ---------------------------------------------------------------------------
 
-pub const AsyncError = error{AsyncNotSupported} || common.Error;
+pub const AsyncError = error{AsyncNotSupported} || bindings.Error;
 
 /// Returns true when the loaded VISA library supports async I/O primitives.
 pub fn hasAsyncSupport(self: *const Instrument) bool {
@@ -159,39 +159,39 @@ pub inline fn disableAsyncEvents(self: *const Instrument) AsyncError!void {
 
 /// Polls for a completed I/O event with timeout (0 = non-blocking).
 /// Returns the event handle on success, or null on timeout.
-pub inline fn waitEvent(self: *const Instrument, timeout_ms: common.ViUInt32) AsyncError!?common.ViEvent {
+pub inline fn waitEvent(self: *const Instrument, timeout_ms: bindings.ViUInt32) AsyncError!?bindings.ViEvent {
     return self.waitOnEvent(c.VI_EVENT_IO_COMPLETION, timeout_ms);
 }
 
 /// Retrieves the actual byte count from a completed I/O event.
-pub fn eventRetCount(self: *const Instrument, event: common.ViEvent) AsyncError!common.ViUInt32 {
-    var count: common.ViUInt32 = 0;
+pub fn eventRetCount(self: *const Instrument, event: bindings.ViEvent) AsyncError!bindings.ViUInt32 {
+    var count: bindings.ViUInt32 = 0;
     try self.getAttribute(event, c.VI_ATTR_RET_COUNT_32, @ptrCast(&count));
     return count;
 }
 
 /// Checks whether a completed async read has more data available.
 /// Returns true when the I/O completed with VI_SUCCESS_MAX_CNT (buffer full, more pending).
-pub fn eventIoHasMore(self: *const Instrument, event: common.ViEvent) AsyncError!bool {
-    var io_status: common.ViStatus = undefined;
+pub fn eventIoHasMore(self: *const Instrument, event: bindings.ViEvent) AsyncError!bool {
+    var io_status: bindings.ViStatus = undefined;
     try self.getAttribute(event, c.VI_ATTR_STATUS, @ptrCast(&io_status));
     return switch (io_status) {
         c.VI_SUCCESS_MAX_CNT => true,
         else => {
-            try common.checkStatus(io_status);
+            try bindings.checkStatus(io_status);
             return false;
         },
     };
 }
 
-pub fn applyOptions(self: *Instrument) common.Error!void {
+pub fn applyOptions(self: *Instrument) bindings.Error!void {
     if (self.options.timeout_ms) |timeout_ms| {
         try self.setAttribute(c.VI_ATTR_TMO_VALUE, @as(ViAttrState, @intCast(timeout_ms)));
     }
     try self.applyReadTermination();
 }
 
-fn applyReadTermination(self: *Instrument) common.Error!void {
+fn applyReadTermination(self: *Instrument) bindings.Error!void {
     const read_termination = self.options.read_termination.constSlice();
     if (read_termination.len == 0) {
         return self.setAttribute(c.VI_ATTR_TERMCHAR_EN, 0);
@@ -207,82 +207,82 @@ fn applyReadTermination(self: *Instrument) common.Error!void {
 // ---------------------------------------------------------------------------
 
 /// Closes a VISA object handle (instrument session or event).
-pub fn close(self: *const Instrument, obj: c.ViObject) common.Error!void {
-    try common.checkStatus(self.vtable.viClose(obj));
+pub fn close(self: *const Instrument, obj: c.ViObject) bindings.Error!void {
+    try bindings.checkStatus(self.vtable.viClose(obj));
 }
 
 /// Writes a command buffer to the instrument.
-pub fn write(self: *const Instrument, buf: []const u8) common.Error!void {
+pub fn write(self: *const Instrument, buf: []const u8) bindings.Error!void {
     var ret_count: ViUInt32 = undefined;
-    try common.checkStatus(self.vtable.viWrite(self.instrument, buf.ptr, @intCast(buf.len), &ret_count));
+    try bindings.checkStatus(self.vtable.viWrite(self.instrument, buf.ptr, @intCast(buf.len), &ret_count));
 }
 
 /// Reads one chunk of bytes into a caller-provided buffer.
-pub fn read(self: *const Instrument, buf: []u8) common.Error!ReadResult {
+pub fn read(self: *const Instrument, buf: []u8) bindings.Error!ReadResult {
     var ret_count: ViUInt32 = undefined;
     const status = self.vtable.viRead(self.instrument, buf.ptr, @intCast(buf.len), &ret_count);
     return switch (status) {
         c.VI_SUCCESS, c.VI_SUCCESS_TERM_CHAR => .{ .data = buf[0..ret_count], .more = false },
         c.VI_SUCCESS_MAX_CNT => .{ .data = buf[0..ret_count], .more = true },
         else => {
-            try common.checkStatus(status);
+            try bindings.checkStatus(status);
             unreachable;
         },
     };
 }
 
-fn setAttribute(self: *const Instrument, attr: c.ViAttr, value: ViAttrState) common.Error!void {
-    try common.checkStatus(self.vtable.viSetAttribute(self.instrument, attr, value));
+fn setAttribute(self: *const Instrument, attr: c.ViAttr, value: ViAttrState) bindings.Error!void {
+    try bindings.checkStatus(self.vtable.viSetAttribute(self.instrument, attr, value));
 }
 
 fn getAttribute(self: *const Instrument, obj: c.ViObject, attr: c.ViAttr, out: ?*anyopaque) AsyncError!void {
     const f = self.vtable.viGetAttribute orelse return error.AsyncNotSupported;
-    try common.checkStatus(f(obj, attr, out));
+    try bindings.checkStatus(f(obj, attr, out));
 }
 
 /// Submits an asynchronous write. Returns the job ID for later polling.
-pub fn writeAsync(self: *const Instrument, buf: []const u8) AsyncError!common.ViJobId {
+pub fn writeAsync(self: *const Instrument, buf: []const u8) AsyncError!bindings.ViJobId {
     const f = self.vtable.viWriteAsync orelse return error.AsyncNotSupported;
-    var job_id: common.ViJobId = undefined;
-    try common.checkStatus(f(self.instrument, buf.ptr, @intCast(buf.len), &job_id));
+    var job_id: bindings.ViJobId = undefined;
+    try bindings.checkStatus(f(self.instrument, buf.ptr, @intCast(buf.len), &job_id));
     return job_id;
 }
 
 /// Submits an asynchronous read into a caller-provided buffer. Returns the job ID.
-pub fn readAsync(self: *const Instrument, buf: []u8) AsyncError!common.ViJobId {
+pub fn readAsync(self: *const Instrument, buf: []u8) AsyncError!bindings.ViJobId {
     const f = self.vtable.viReadAsync orelse return error.AsyncNotSupported;
-    var job_id: common.ViJobId = undefined;
-    try common.checkStatus(f(self.instrument, buf.ptr, @intCast(buf.len), &job_id));
+    var job_id: bindings.ViJobId = undefined;
+    try bindings.checkStatus(f(self.instrument, buf.ptr, @intCast(buf.len), &job_id));
     return job_id;
 }
 
 /// Enables event notification for the given event type and mechanism.
-pub fn enableEvent(self: *const Instrument, event_type: common.ViEventType, mechanism: c.ViUInt16) AsyncError!void {
+pub fn enableEvent(self: *const Instrument, event_type: bindings.ViEventType, mechanism: c.ViUInt16) AsyncError!void {
     const f = self.vtable.viEnableEvent orelse return error.AsyncNotSupported;
-    try common.checkStatus(f(self.instrument, event_type, mechanism, c.VI_NULL));
+    try bindings.checkStatus(f(self.instrument, event_type, mechanism, c.VI_NULL));
 }
 
 /// Disables event notification for the given event type and mechanism.
-pub fn disableEvent(self: *const Instrument, event_type: common.ViEventType, mechanism: c.ViUInt16) AsyncError!void {
+pub fn disableEvent(self: *const Instrument, event_type: bindings.ViEventType, mechanism: c.ViUInt16) AsyncError!void {
     const f = self.vtable.viDisableEvent orelse return error.AsyncNotSupported;
-    try common.checkStatus(f(self.instrument, event_type, mechanism));
+    try bindings.checkStatus(f(self.instrument, event_type, mechanism));
 }
 
 /// Waits for an event of the given type. Returns null on timeout.
-pub fn waitOnEvent(self: *const Instrument, event_type: common.ViEventType, timeout_ms: common.ViUInt32) AsyncError!?common.ViEvent {
+pub fn waitOnEvent(self: *const Instrument, event_type: bindings.ViEventType, timeout_ms: bindings.ViUInt32) AsyncError!?bindings.ViEvent {
     const f = self.vtable.viWaitOnEvent orelse return error.AsyncNotSupported;
-    var out_event_type: common.ViEventType = undefined;
-    var out_context: common.ViEvent = undefined;
+    var out_event_type: bindings.ViEventType = undefined;
+    var out_context: bindings.ViEvent = undefined;
     const status = f(self.instrument, event_type, timeout_ms, &out_event_type, &out_context);
     if (status == c.VI_ERROR_TMO) return null;
-    try common.checkStatus(status);
+    try bindings.checkStatus(status);
     return out_context;
 }
 
 /// Cancels an in-flight async I/O job.
-pub fn terminate(self: *const Instrument, job_id: common.ViJobId) AsyncError!void {
+pub fn terminate(self: *const Instrument, job_id: bindings.ViJobId) AsyncError!void {
     const f = self.vtable.viTerminate orelse return error.AsyncNotSupported;
-    try common.checkStatus(f(self.instrument, c.VI_NULL, job_id));
+    try bindings.checkStatus(f(self.instrument, c.VI_NULL, job_id));
 }
 
 fn trimReadTermination(out: *std.ArrayList(u8), read_termination: []const u8) void {

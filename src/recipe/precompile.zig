@@ -6,7 +6,7 @@ const parse_mod = @import("../adapter/parse.zig");
 const testing = @import("../testing.zig");
 const config = @import("config.zig");
 const diagnostic = @import("diagnostic.zig");
-const types = @import("types.zig");
+const recipe_ir = @import("compiled.zig");
 const expr = @import("../expr.zig");
 const visa = @import("../visa/root.zig");
 
@@ -20,7 +20,7 @@ pub fn precompilePath(
     recipe_path: []const u8,
     adapter_dir: std.Io.Dir,
     precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
-) !types.PrecompiledRecipe {
+) !recipe_ir.PrecompiledRecipe {
     var fallback_diag: diagnostic.PrecompileDiagnostic = .init(allocator);
     defer fallback_diag.deinit();
     const diag = precompile_diagnostic orelse &fallback_diag;
@@ -56,7 +56,7 @@ fn precompileInternal(
     recipe: *const config.RecipeConfig,
     adapter_dir: std.Io.Dir,
     precompile_diagnostic: *diagnostic.PrecompileDiagnostic,
-) !types.PrecompiledRecipe {
+) !recipe_ir.PrecompiledRecipe {
     // 1. Create the arena-owned result lifetime and a temporary adapter cache used only while validating the recipe.
     var arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer arena.deinit();
@@ -109,7 +109,7 @@ fn precompileInternal(
 
 const SlotMap = struct {
     slots: SlotTable,
-    initial_values: []const types.Value,
+    initial_values: []const recipe_ir.Value,
     const_count: usize,
     alloc: std.mem.Allocator,
 
@@ -199,7 +199,7 @@ const SlotMap = struct {
     /// or the const value if the name refers to a const.
     const ResolvedName = union(enum) {
         binding: expr.VariableBinding,
-        const_value: types.Value,
+        const_value: recipe_ir.Value,
     };
 
     fn resolveName(self: *const SlotMap, name: []const u8) ?ResolvedName {
@@ -210,7 +210,7 @@ const SlotMap = struct {
     }
 
     /// Returns only the var portion of initial_values (excluding consts).
-    fn varInitialValues(self: *const SlotMap) []const types.Value {
+    fn varInitialValues(self: *const SlotMap) []const recipe_ir.Value {
         return self.initial_values[self.const_count..];
     }
 
@@ -239,7 +239,7 @@ const SlotMap = struct {
         return .{ .ctx = @ptrCast(self), .resolve_fn = resolve };
     }
 
-    fn resolveConstValue(value: types.Value) expr.ResolvedValue {
+    fn resolveConstValue(value: recipe_ir.Value) expr.ResolvedValue {
         return switch (value) {
             .float => |f| .{ .float = f },
             .int => |i| .{ .int = i },
@@ -254,7 +254,7 @@ const SlotMap = struct {
     }
 
     fn constListAt(ctx: *const anyopaque, index: usize) ?expr.ResolvedValue {
-        const items: [*]const types.Value = @ptrCast(@alignCast(ctx));
+        const items: [*]const recipe_ir.Value = @ptrCast(@alignCast(ctx));
         return resolveConstValue(items[index]);
     }
 };
@@ -277,7 +277,7 @@ fn buildSlotMap(alloc: std.mem.Allocator, recipe: *const config.RecipeConfig) !S
     }
 
     // Build initial values array: consts first, then vars.
-    const initial_values = try alloc.alloc(types.Value, const_keys.len + var_keys.len);
+    const initial_values = try alloc.alloc(recipe_ir.Value, const_keys.len + var_keys.len);
     for (const_vals, 0..) |value, idx| {
         initial_values[idx] = try compileInitialValue(alloc, value);
     }
@@ -322,8 +322,8 @@ fn precompileInstruments(
     alloc: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
     loaded_adapters: *const std.StringHashMap(Adapter),
-) !std.StringArrayHashMapUnmanaged(types.PrecompiledInstrument) {
-    var precompiled_instruments: std.StringArrayHashMapUnmanaged(types.PrecompiledInstrument) = .empty;
+) !std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument) {
+    var precompiled_instruments: std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument) = .empty;
     try precompiled_instruments.ensureTotalCapacity(alloc, recipe.instruments.map.count());
 
     var instrument_it = recipe.instruments.map.iterator();
@@ -339,7 +339,7 @@ fn precompileInstruments(
         try precompiled_instruments.put(alloc, name_copy, .{
             .adapter_name = adapter_copy,
             .resource = resource_copy,
-            .commands = std.StringHashMap(*const types.PrecompiledCommand).init(alloc),
+            .commands = std.StringHashMap(*const recipe_ir.PrecompiledCommand).init(alloc),
             .write_termination = write_termination,
             .options = .{
                 .timeout_ms = adapter.options.timeout_ms,
@@ -357,11 +357,11 @@ fn precompileTasks(
     recipe: *const config.RecipeConfig,
     slot_map: *const SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
-    precompiled_instruments: *std.StringArrayHashMapUnmanaged(types.PrecompiledInstrument),
+    precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
     assign_set: *std.StringArrayHashMapUnmanaged(void),
     diag: *diagnostic.PrecompileDiagnostic,
-) ![]types.Task {
-    const tasks = try arena_alloc.alloc(types.Task, recipe.tasks.len);
+) ![]recipe_ir.Task {
+    const tasks = try arena_alloc.alloc(recipe_ir.Task, recipe.tasks.len);
     for (recipe.tasks, 0..) |*task_cfg, task_idx| {
         const steps = try precompileSteps(arena_alloc, task_cfg.steps, slot_map, loaded_adapters, precompiled_instruments, assign_set, task_idx, diag);
 
@@ -392,12 +392,12 @@ fn precompileSteps(
     step_cfgs: []config.StepConfig,
     slot_map: *const SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
-    precompiled_instruments: *std.StringArrayHashMapUnmanaged(types.PrecompiledInstrument),
+    precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
     assign_set: *std.StringArrayHashMapUnmanaged(void),
     task_idx: usize,
     diag: *diagnostic.PrecompileDiagnostic,
-) ![]types.Step {
-    const steps = try arena_alloc.alloc(types.Step, step_cfgs.len);
+) ![]recipe_ir.Step {
+    const steps = try arena_alloc.alloc(recipe_ir.Step, step_cfgs.len);
     for (step_cfgs, 0..) |*step_cfg, step_idx| {
         steps[step_idx] = switch (step_cfg.*) {
             .compute => |*cfg| try precompileComputeStep(
@@ -444,7 +444,7 @@ fn precompileComputeStep(
     task_idx: usize,
     step_idx: usize,
     diag: *diagnostic.PrecompileDiagnostic,
-) !types.Step {
+) !recipe_ir.Step {
     diag.* = .{ .allocator = diag.allocator, .task_idx = task_idx, .step_idx = step_idx };
 
     const if_expr = try precompileIf(slot_map, cfg.@"if");
@@ -466,13 +466,13 @@ fn precompileCallStep(
     arena_alloc: std.mem.Allocator,
     slot_map: *const SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
-    precompiled_instruments: *std.StringArrayHashMapUnmanaged(types.PrecompiledInstrument),
+    precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
     assign_set: *std.StringArrayHashMapUnmanaged(void),
     cfg: *const config.CallStepConfig,
     task_idx: usize,
     step_idx: usize,
     diag: *diagnostic.PrecompileDiagnostic,
-) !types.Step {
+) !recipe_ir.Step {
     const dot_pos = std.mem.findScalar(u8, cfg.call, '.') orelse return error.InvalidCallFormat;
     const instrument_name = cfg.call[0..dot_pos];
     const command_name = cfg.call[dot_pos + 1 ..];
@@ -531,7 +531,7 @@ fn precompileIf(
 fn precompileSleepStep(
     slot_map: *const SlotMap,
     cfg: *const config.SleepStepConfig,
-) !types.Step {
+) !recipe_ir.Step {
     return .{
         .action = .{ .sleep = .{ .duration_ms = cfg.sleep_ms } },
         .@"if" = try precompileIf(slot_map, cfg.@"if"),
@@ -542,12 +542,12 @@ fn precompileParallelStep(
     arena_alloc: std.mem.Allocator,
     slot_map: *const SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
-    precompiled_instruments: *std.StringArrayHashMapUnmanaged(types.PrecompiledInstrument),
+    precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
     assign_set: *std.StringArrayHashMapUnmanaged(void),
     cfg: *const config.ParallelStepConfig,
     task_idx: usize,
     diag: *diagnostic.PrecompileDiagnostic,
-) anyerror!types.Step {
+) anyerror!recipe_ir.Step {
     // Reject nested parallel steps.
     for (cfg.parallel) |*inner| {
         if (inner.* == .parallel) return error.NestedParallelStep;
@@ -575,7 +575,7 @@ fn resolvePipelineConfig(
     recipe: *const config.RecipeConfig,
     slot_map: *const SlotMap,
     assign_set: *const std.StringArrayHashMapUnmanaged(void),
-) !types.PipelineConfig {
+) !recipe_ir.PipelineConfig {
     const pipeline_cfg = recipe.pipeline orelse return error.MissingPipeline;
     if (pipeline_cfg.record == null) return error.MissingRecordConfig;
     var pipeline = try clonePipelineConfig(arena_alloc, pipeline_cfg);
@@ -597,7 +597,7 @@ fn resolvePipelineConfig(
     return pipeline;
 }
 
-fn assignSaveColumns(tasks: []types.Task, slot_map: *const SlotMap, columns: []const []const u8) void {
+fn assignSaveColumns(tasks: []recipe_ir.Task, slot_map: *const SlotMap, columns: []const []const u8) void {
     const var_keys = slot_map.slots.keys()[slot_map.const_count..];
     for (tasks) |*task| {
         for (task.steps()) |*step| {
@@ -606,7 +606,7 @@ fn assignSaveColumns(tasks: []types.Task, slot_map: *const SlotMap, columns: []c
     }
 }
 
-fn assignStepSaveColumn(step: *types.Step, var_keys: []const []const u8, columns: []const []const u8) void {
+fn assignStepSaveColumn(step: *recipe_ir.Step, var_keys: []const []const u8, columns: []const []const u8) void {
     switch (step.action) {
         .instrument_call => |*ic| {
             ic.save_column = if (ic.save_slot) |slot| slotToColumn(var_keys, slot, columns) else null;
@@ -656,17 +656,17 @@ fn getOrParseAdapter(
 
 fn getOrCompileCommand(
     allocator: std.mem.Allocator,
-    instrument: *types.PrecompiledInstrument,
+    instrument: *recipe_ir.PrecompiledInstrument,
     loaded_adapter: *const Adapter,
     call: []const u8,
-) !*const types.PrecompiledCommand {
+) !*const recipe_ir.PrecompiledCommand {
     if (instrument.commands.get(call)) |command| return command;
 
     const source = loaded_adapter.commands.get(call) orelse return error.CommandNotFound;
     const key = try allocator.dupe(u8, call);
     const compiled_value = try compileCommand(allocator, source, instrument);
 
-    const compiled = try allocator.create(types.PrecompiledCommand);
+    const compiled = try allocator.create(recipe_ir.PrecompiledCommand);
     compiled.* = compiled_value;
 
     try instrument.commands.put(key, compiled);
@@ -676,8 +676,8 @@ fn getOrCompileCommand(
 fn compileCommand(
     allocator: std.mem.Allocator,
     source: Adapter.Command,
-    instrument: *const types.PrecompiledInstrument,
-) !types.PrecompiledCommand {
+    instrument: *const recipe_ir.PrecompiledInstrument,
+) !recipe_ir.PrecompiledCommand {
     var arg_names = std.ArrayList([]const u8).empty;
     const segments = try compileSegments(allocator, source.template, &arg_names);
 
@@ -693,8 +693,8 @@ fn compileSegments(
     allocator: std.mem.Allocator,
     template_segments: []const template.Segment,
     arg_names: *std.ArrayList([]const u8),
-) ![]const types.CompiledSegment {
-    const segments = try allocator.alloc(types.CompiledSegment, template_segments.len);
+) ![]const recipe_ir.CompiledSegment {
+    const segments = try allocator.alloc(recipe_ir.CompiledSegment, template_segments.len);
 
     for (template_segments, 0..) |segment, idx| {
         segments[idx] = switch (segment) {
@@ -714,12 +714,12 @@ fn compileSegments(
 
 fn compileStepArgs(
     allocator: std.mem.Allocator,
-    command: *const types.PrecompiledCommand,
+    command: *const recipe_ir.PrecompiledCommand,
     doc_args: ?std.json.ArrayHashMap(config.ArgValueDoc),
     slot_map: *const SlotMap,
     diag: *diagnostic.PrecompileDiagnostic,
-) ![]types.StepArg {
-    const args = try allocator.alloc(types.StepArg, command.arg_names.len);
+) ![]recipe_ir.StepArg {
+    const args = try allocator.alloc(recipe_ir.StepArg, command.arg_names.len);
 
     for (command.arg_names, 0..) |arg_name, idx| {
         const doc_arg = if (doc_args) |wrapper|
@@ -747,11 +747,11 @@ fn compileStepArgs(
     return args;
 }
 
-fn compileInitialValue(allocator: std.mem.Allocator, value: config.ArgValueDoc) !types.Value {
+fn compileInitialValue(allocator: std.mem.Allocator, value: config.ArgValueDoc) !recipe_ir.Value {
     return switch (value) {
         .scalar => |scalar| compileScalarValue(allocator, scalar),
         .list => |items| blk: {
-            const compiled = try allocator.alloc(types.Value, items.len);
+            const compiled = try allocator.alloc(recipe_ir.Value, items.len);
             for (items, 0..) |item, idx| {
                 compiled[idx] = try compileScalarValue(allocator, item);
             }
@@ -760,7 +760,7 @@ fn compileInitialValue(allocator: std.mem.Allocator, value: config.ArgValueDoc) 
     };
 }
 
-fn compileScalarValue(allocator: std.mem.Allocator, value: config.ArgScalarDoc) !types.Value {
+fn compileScalarValue(allocator: std.mem.Allocator, value: config.ArgScalarDoc) !recipe_ir.Value {
     return switch (value) {
         .string => |text| .{ .string = try allocator.dupe(u8, text) },
         .int => |number| .{ .int = number },
@@ -769,7 +769,7 @@ fn compileScalarValue(allocator: std.mem.Allocator, value: config.ArgScalarDoc) 
     };
 }
 
-fn clonePipelineConfig(allocator: std.mem.Allocator, cfg: config.PipelineConfig) !types.PipelineConfig {
+fn clonePipelineConfig(allocator: std.mem.Allocator, cfg: config.PipelineConfig) !recipe_ir.PipelineConfig {
     if (cfg.buffer_size) |size| {
         if (size == 0) return error.InvalidPipelineConfig;
     }
@@ -783,7 +783,7 @@ fn clonePipelineConfig(allocator: std.mem.Allocator, cfg: config.PipelineConfig)
         if (port == 0) return error.InvalidPipelineConfig;
     }
 
-    const record_copy: ?types.RecordConfig = if (cfg.record) |record| switch (record) {
+    const record_copy: ?recipe_ir.RecordConfig = if (cfg.record) |record| switch (record) {
         .all => |value| .{ .all = try allocator.dupe(u8, value) },
         .explicit => |columns| blk: {
             const items = try allocator.alloc([]const u8, columns.len);
@@ -809,7 +809,7 @@ fn compileArg(
     allocator: std.mem.Allocator,
     doc_arg: config.ArgValueDoc,
     slot_map: *const SlotMap,
-) !types.StepArg {
+) !recipe_ir.StepArg {
     return switch (doc_arg) {
         .scalar => |scalar| .{ .scalar = try compileArgScalar(allocator, scalar, slot_map) },
         .list => |items| blk: {
@@ -1570,10 +1570,10 @@ test "precompiled command renders via helper" {
 
     const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null);
 
-    var instrument = types.PrecompiledInstrument{
+    var instrument = recipe_ir.PrecompiledInstrument{
         .adapter_name = "psu",
         .resource = "USB0::1::INSTR",
-        .commands = std.StringHashMap(*const types.PrecompiledCommand).init(alloc),
+        .commands = std.StringHashMap(*const recipe_ir.PrecompiledCommand).init(alloc),
         .write_termination = "\n",
         .options = .{},
     };
@@ -1586,7 +1586,7 @@ test "precompiled command renders via helper" {
     try std.testing.expectEqual(@as(usize, 1), compiled.arg_names.len);
     try std.testing.expectEqualStrings("voltage", compiled.arg_names[0]);
 
-    const args = [_]types.RenderValue{
+    const args = [_]recipe_ir.RenderValue{
         .{ .scalar = .{ .float = 3.3 } },
     };
 
@@ -1606,10 +1606,10 @@ test "precompiled command render falls back to heap when suffix leaves too littl
 
     const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null);
 
-    var instrument = types.PrecompiledInstrument{
+    var instrument = recipe_ir.PrecompiledInstrument{
         .adapter_name = "psu",
         .resource = "USB0::1::INSTR",
-        .commands = std.StringHashMap(*const types.PrecompiledCommand).init(alloc),
+        .commands = std.StringHashMap(*const recipe_ir.PrecompiledCommand).init(alloc),
         .write_termination = "\r\n",
         .options = .{},
     };
@@ -1618,7 +1618,7 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     const compiled = try compileCommand(gpa, source, &instrument);
     defer compiled.deinit(gpa);
 
-    const args = [_]types.RenderValue{
+    const args = [_]recipe_ir.RenderValue{
         .{ .scalar = .{ .string = "1234567890" } },
     };
 

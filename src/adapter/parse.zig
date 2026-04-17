@@ -1,15 +1,15 @@
 const std = @import("std");
 const Adapter = @import("Adapter.zig");
 const doc_parse = @import("../doc_parse.zig");
-const types = @import("types.zig");
-const visa = @import("../visa/root.zig");
+const schema = @import("schema.zig");
+const instrument = @import("../instrument.zig");
 
 const max_adapter_file_size: usize = 512 * 1024;
 
 /// Raw serialized shape of a adapter document.
 const AdapterDoc = struct {
-    metadata: types.AdapterMeta = .{},
-    instrument: types.InstrumentSpec = .{},
+    metadata: schema.AdapterMeta = .{},
+    instrument: schema.InstrumentSpec = .{},
     commands: std.json.ArrayHashMap(CommandDoc),
 };
 
@@ -18,7 +18,7 @@ const CommandDoc = struct {
     write: []const u8,
     read: ?[]const u8 = null,
     description: ?[]const u8 = null,
-    args: ?std.json.ArrayHashMap(types.ArgSpec) = null,
+    args: ?std.json.ArrayHashMap(schema.ArgSpec) = null,
 };
 
 /// Parses a adapter document from an already-open directory.
@@ -36,11 +36,11 @@ pub fn parseAdapterInDir(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.D
 fn buildAdapter(adapter_arena: *std.heap.ArenaAllocator, parsed: AdapterDoc, path: []const u8) !Adapter {
     const alloc = adapter_arena.allocator();
 
-    var commands: std.StringHashMap(types.Command) = .init(alloc);
+    var commands: std.StringHashMap(schema.Command) = .init(alloc);
     var it = parsed.commands.map.iterator();
     while (it.next()) |entry| {
         const cmd_doc = entry.value_ptr.*;
-        var cmd: types.Command = try .parse(alloc, cmd_doc.write, cmd_doc.read, cmd_doc.description);
+        var cmd: schema.Command = try .parse(alloc, cmd_doc.write, cmd_doc.read, cmd_doc.description);
         cmd.args = cmd_doc.args;
         try commands.put(entry.key_ptr.*, cmd);
     }
@@ -57,9 +57,9 @@ fn buildAdapter(adapter_arena: *std.heap.ArenaAllocator, parsed: AdapterDoc, pat
         .write_termination = write_termination,
         .options = .{
             .timeout_ms = inst.timeout_ms,
-            .read_termination = visa.Termination.fromSlice(inst.read_termination orelse ""),
+            .read_termination = instrument.Termination.fromSlice(inst.read_termination orelse ""),
             .query_delay_ms = inst.query_delay_ms orelse 0,
-            .chunk_size = inst.chunk_size orelse visa.default_chunk_size,
+            .chunk_size = inst.chunk_size orelse instrument.default_chunk_size,
         },
     };
 }
@@ -108,7 +108,7 @@ test "parse adapter response encoding" {
     defer adapter.deinit();
 
     const cmd = adapter.commands.get("measure_voltage") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(types.Encoding.float, cmd.response.?);
+    try std.testing.expectEqual(schema.Encoding.float, cmd.response.?);
     try std.testing.expectEqual(@as(usize, 1), cmd.template.len);
 }
 

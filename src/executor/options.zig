@@ -1,5 +1,5 @@
 const std = @import("std");
-const recipe_types = @import("../recipe/types.zig");
+const recipe_compiled = @import("../recipe/compiled.zig");
 const visa = @import("../visa/root.zig");
 pub const Context = @import("Context.zig");
 
@@ -16,7 +16,7 @@ pub const ExecOptions = struct {
     /// Optional runtime override for the ring buffer size.
     pipeline_buffer_size: ?usize = null,
     /// Optional runtime override for the pipeline mode preset.
-    pipeline_mode: ?recipe_types.PipelineMode = null,
+    pipeline_mode: ?recipe_compiled.PipelineMode = null,
     /// Optional runtime override for the buffer usage warning threshold.
     pipeline_warn_usage_percent: ?u8 = null,
     /// Writer for logs.

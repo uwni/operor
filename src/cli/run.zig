@@ -1,7 +1,7 @@
 const std = @import("std");
 const clap = @import("clap");
 const operor = @import("operor");
-const common = @import("common.zig");
+const args_mod = @import("args.zig");
 
 /// Parser table for the `run` command.
 const parsers = .{
@@ -38,7 +38,7 @@ pub fn handle(allocator: std.mem.Allocator, io: std.Io, iter: *std.process.Args.
     defer res.deinit();
 
     if (res.args.help != 0) {
-        try common.usageAndHelpToFile(io, .stdout(), common.exe_name ++ " run", clap.Help, &params);
+        try args_mod.usageAndHelpToFile(io, .stdout(), args_mod.exe_name ++ " run", clap.Help, &params);
         return;
     }
 
@@ -69,7 +69,7 @@ pub fn handle(allocator: std.mem.Allocator, io: std.Io, iter: *std.process.Args.
 test "main parses run command" {
     const gpa = std.testing.allocator;
 
-    var iter = common.SliceArgIter{ .items = &.{
+    var iter = args_mod.SliceArgIter{ .items = &.{
         "run",
         "--adapter-dir",
         "adapters",
@@ -77,7 +77,7 @@ test "main parses run command" {
         "--preview",
     } };
 
-    var root = try clap.parseEx(clap.Help, &common.root_params, common.root_parsers, &iter, .{
+    var root = try clap.parseEx(clap.Help, &args_mod.root_params, args_mod.root_parsers, &iter, .{
         .allocator = gpa,
         .terminating_positional = 0,
     });

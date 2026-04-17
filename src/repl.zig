@@ -62,7 +62,7 @@ const Setting = enum {
     }
 };
 
-const Termination = visa.Termination;
+const Termination = @import("instrument.zig").Termination;
 
 /// Tagged value for a parsed `set` command, ready for application.
 const SettingValue = union(Setting) {

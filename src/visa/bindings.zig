@@ -1,5 +1,5 @@
 const std = @import("std");
-const shared_types = @import("../types.zig");
+const instrument = @import("../instrument.zig");
 
 /// Raw VISA C bindings imported from `visa.h`.
 pub const c = @cImport({
@@ -8,7 +8,7 @@ pub const c = @cImport({
     @cInclude("visa.h");
 });
 
-pub const default_chunk_size = shared_types.default_chunk_size;
+pub const default_chunk_size = instrument.default_chunk_size;
 
 /// Opaque VISA session handle.
 pub const ViSession = c.ViSession;
@@ -39,8 +39,8 @@ pub const Error = error{
     ResourceNotFound,
 };
 
-pub const Termination = shared_types.Termination;
-pub const InstrumentOptions = shared_types.InstrumentOptions;
+pub const Termination = instrument.Termination;
+pub const InstrumentOptions = instrument.InstrumentOptions;
 
 /// Converts a raw VISA status code into a Zig error when the call failed.
 pub fn checkStatus(status: ViStatus) Error!void {

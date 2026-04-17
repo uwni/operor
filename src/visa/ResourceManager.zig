@@ -1,13 +1,13 @@
 const std = @import("std");
-const common = @import("common.zig");
+const bindings = @import("bindings.zig");
 const loader = @import("loader.zig");
 
-const c = common.c;
+const c = bindings.c;
 /// Default VISA resource manager session and discovery helpers.
 const ResourceManager = @This();
-const ViSession = common.ViSession;
-const ViUInt32 = common.ViUInt32;
-const ViFindList = common.ViFindList;
+const ViSession = bindings.ViSession;
+const ViUInt32 = bindings.ViUInt32;
+const ViFindList = bindings.ViFindList;
 const default_resource_query = "?*INSTR";
 
 /// Arena-owned list of VISA resource names.
@@ -27,19 +27,19 @@ session: ViSession,
 vtable: *const loader.Vtable,
 
 /// Opens the default VISA resource manager using the provided vtable.
-pub fn init(vtable: *const loader.Vtable) common.Error!ResourceManager {
+pub fn init(vtable: *const loader.Vtable) bindings.Error!ResourceManager {
     var session: ViSession = undefined;
-    try common.checkStatus(vtable.viOpenDefaultRM(&session));
+    try bindings.checkStatus(vtable.viOpenDefaultRM(&session));
     return .{ .session = session, .vtable = vtable };
 }
 
 /// Closes the resource manager session.
 pub fn deinit(self: *ResourceManager) void {
-    common.checkStatus(self.vtable.viClose(self.session)) catch {};
+    bindings.checkStatus(self.vtable.viClose(self.session)) catch {};
 }
 
 /// Enumerates VISA instrument resources that match the default query.
-pub fn listResources(self: *ResourceManager, allocator: std.mem.Allocator) common.Error!ResourceList {
+pub fn listResources(self: *ResourceManager, allocator: std.mem.Allocator) bindings.Error!ResourceList {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer arena.deinit();
     const alloc = arena.allocator();
@@ -50,7 +50,7 @@ pub fn listResources(self: *ResourceManager, allocator: std.mem.Allocator) commo
     var count: ViUInt32 = 0;
     var buffer: [c.VI_FIND_BUFLEN]u8 = undefined;
 
-    common.checkStatus(self.vtable.viFindRsrc(
+    bindings.checkStatus(self.vtable.viFindRsrc(
         self.session,
         query_z.ptr,
         &find_list,
@@ -63,14 +63,14 @@ pub fn listResources(self: *ResourceManager, allocator: std.mem.Allocator) commo
         }
         return err;
     };
-    defer common.checkStatus(self.vtable.viClose(find_list)) catch {};
+    defer bindings.checkStatus(self.vtable.viClose(find_list)) catch {};
 
     var resources: std.ArrayList([]const u8) = .empty;
 
     try resources.append(alloc, try copyBufferString(alloc, buffer[0..]));
     var index: usize = 1;
     while (index < count) : (index += 1) {
-        try common.checkStatus(self.vtable.viFindNext(find_list, @ptrCast(&buffer)));
+        try bindings.checkStatus(self.vtable.viFindNext(find_list, @ptrCast(&buffer)));
         try resources.append(alloc, try copyBufferString(alloc, buffer[0..]));
     }
 

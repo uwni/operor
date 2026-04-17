@@ -1,7 +1,7 @@
 const std = @import("std");
 const clap = @import("clap");
 const operor = @import("operor");
-const common = @import("common.zig");
+const args_mod = @import("args.zig");
 
 /// Parser table for the `repl` command.
 const parsers = .{
@@ -32,7 +32,7 @@ pub fn handle(allocator: std.mem.Allocator, io: std.Io, iter: *std.process.Args.
     defer res.deinit();
 
     if (res.args.help != 0) {
-        try common.usageAndHelpToFile(io, .stdout(), common.exe_name ++ " repl", clap.Help, &params);
+        try args_mod.usageAndHelpToFile(io, .stdout(), args_mod.exe_name ++ " repl", clap.Help, &params);
         return;
     }
 
@@ -49,13 +49,13 @@ pub fn handle(allocator: std.mem.Allocator, io: std.Io, iter: *std.process.Args.
 test "main parses repl command with resource flag" {
     const gpa = std.testing.allocator;
 
-    var iter = common.SliceArgIter{ .items = &.{
+    var iter = args_mod.SliceArgIter{ .items = &.{
         "repl",
         "--resource",
         "USB0::0x0957::0x1798::MY12345678::INSTR",
     } };
 
-    var root = try clap.parseEx(clap.Help, &common.root_params, common.root_parsers, &iter, .{
+    var root = try clap.parseEx(clap.Help, &args_mod.root_params, args_mod.root_parsers, &iter, .{
         .allocator = gpa,
         .terminating_positional = 0,
     });
@@ -79,11 +79,11 @@ test "main parses repl command with resource flag" {
 test "main parses repl command without resource" {
     const gpa = std.testing.allocator;
 
-    var iter = common.SliceArgIter{ .items = &.{
+    var iter = args_mod.SliceArgIter{ .items = &.{
         "repl",
     } };
 
-    var root = try clap.parseEx(clap.Help, &common.root_params, common.root_parsers, &iter, .{
+    var root = try clap.parseEx(clap.Help, &args_mod.root_params, args_mod.root_parsers, &iter, .{
         .allocator = gpa,
         .terminating_positional = 0,
     });

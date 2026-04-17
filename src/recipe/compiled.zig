@@ -1,5 +1,5 @@
 const std = @import("std");
-const shared_types = @import("../types.zig");
+const instrument = @import("../instrument.zig");
 const diagnostic = @import("diagnostic.zig");
 const expr = @import("../expr.zig");
 
@@ -94,7 +94,7 @@ pub const PrecompiledCommand = struct {
     /// Precompiled instrument that owns this command.
     instrument: *const PrecompiledInstrument,
     /// Response encoding declared by the source adapter command.
-    response: ?shared_types.Encoding,
+    response: ?instrument.Encoding,
     /// Allocator-owned compiled render segments used at execution time.
     segments: []const CompiledSegment,
     /// Unique placeholder names in render order.
@@ -167,7 +167,7 @@ pub const PrecompiledInstrument = struct {
     /// Empty string means no write termination. Owned by the recipe arena.
     write_termination: []const u8,
     /// Session options applied when the runtime opens the instrument.
-    options: shared_types.InstrumentOptions,
+    options: instrument.InstrumentOptions,
 };
 
 /// Parsed and validated recipe step ready for execution.

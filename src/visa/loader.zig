@@ -1,7 +1,7 @@
 const std = @import("std");
 const windows = std.os.windows;
 const builtin = @import("builtin");
-const c = @import("common.zig").c;
+const c = @import("bindings.zig").c;
 const tty = @import("../tty.zig");
 
 // ---------------------------------------------------------------------------

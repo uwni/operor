@@ -1,6 +1,6 @@
 const std = @import("std");
 const doc_parse = @import("../doc_parse.zig");
-const types = @import("types.zig");
+const recipe_ir = @import("compiled.zig");
 
 /// Scalar document value accepted in recipe argument objects.
 pub const ArgScalarDoc = union(enum) {
@@ -103,7 +103,7 @@ pub const TaskConfig = struct {
 };
 
 /// Parsed pipeline configuration before execution-time normalization.
-pub const PipelineConfig = types.PipelineConfig;
+pub const PipelineConfig = recipe_ir.PipelineConfig;
 
 /// Parsed top-level recipe document.
 pub const RecipeConfig = struct {

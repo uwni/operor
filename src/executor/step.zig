@@ -1,8 +1,8 @@
 const std = @import("std");
 const tty = @import("../tty.zig");
-const Adapter = @import("../adapter/Adapter.zig");
+const instrument_types = @import("../instrument.zig");
 const recipe_mod = @import("../recipe/root.zig");
-const common = @import("common.zig");
+const session = @import("session.zig");
 const expr = @import("../expr.zig");
 const parallel_mod = @import("parallel.zig");
 
@@ -11,7 +11,7 @@ const dry_run_tag = tty.styledText("[dry-run]", .{.fuchsia});
 
 const command_stack_bytes: usize = 512;
 /// Parsed response value in the native Zig type indicated by the command encoding.
-pub const ParsedValue = union(Adapter.Encoding) {
+pub const ParsedValue = union(instrument_types.Encoding) {
     raw: []const u8,
     float: f64,
     int: i64,
@@ -52,13 +52,13 @@ pub const StepScratch = struct {
 /// Supports both instrument call steps and local compute steps.
 pub fn executeStep(
     allocator: std.mem.Allocator,
-    instrument: ?*common.InstrumentRuntime,
+    instrument: ?*session.InstrumentRuntime,
     step: *const recipe_mod.Step,
-    ctx: *common.Context,
+    ctx: *session.Context,
     dry_run: bool,
-    log_sink: common.LogSink,
+    log_sink: session.LogSink,
     scratch: *StepScratch,
-    instruments: []common.InstrumentRuntime,
+    instruments: []session.InstrumentRuntime,
 ) !?SavedValue {
     // Evaluate optional `if` guard.
     if (step.@"if") |*if_expr| {
@@ -81,7 +81,7 @@ pub fn executeStep(
 pub fn executeCompute(
     allocator: std.mem.Allocator,
     comp: *const recipe_mod.Step.Compute,
-    ctx: *common.Context,
+    ctx: *session.Context,
 ) !?SavedValue {
     const eval_res = try comp.expression.eval(ctx.varResolver(), allocator);
     defer eval_res.deinit();
@@ -113,11 +113,11 @@ pub fn executeCompute(
 /// Sends an instrument command and optionally saves the parsed response.
 fn executeInstrumentCall(
     allocator: std.mem.Allocator,
-    instrument: *common.InstrumentRuntime,
+    instrument: *session.InstrumentRuntime,
     step: *const recipe_mod.Step.InstrumentCall,
-    ctx: *common.Context,
+    ctx: *session.Context,
     dry_run: bool,
-    log_sink: common.LogSink,
+    log_sink: session.LogSink,
     scratch: *StepScratch,
 ) !?SavedValue {
     const cmd = step.command;
@@ -125,7 +125,7 @@ fn executeInstrumentCall(
 
     scratch.reset();
     const alloc = scratch.tempAllocator();
-    const resolved_args = try alloc.alloc(common.RenderValue, step.args.len);
+    const resolved_args = try alloc.alloc(session.RenderValue, step.args.len);
     for (step.args, 0..) |arg, idx| {
         resolved_args[idx] = try resolveStepArg(ctx, arg, alloc);
     }
@@ -169,11 +169,11 @@ fn executeInstrumentCall(
             defer allocator.free(resp);
             const stored = try parseResponse(encoding, resp);
             const value = switch (stored) {
-                .raw => |v| common.Value{ .string = v },
-                .string => |v| common.Value{ .string = v },
-                .int => |v| common.Value{ .int = v },
-                .float => |v| common.Value{ .float = v },
-                .bool => |v| common.Value{ .bool = v },
+                .raw => |v| session.Value{ .string = v },
+                .string => |v| session.Value{ .string = v },
+                .int => |v| session.Value{ .int = v },
+                .float => |v| session.Value{ .float = v },
+                .bool => |v| session.Value{ .bool = v },
             };
             try ctx.setSlot(slot, value);
 
@@ -194,7 +194,7 @@ fn executeInstrumentCall(
 }
 
 /// Convert the raw response byte string into a ParsedValue according to the specified encoding.
-pub fn parseResponse(encoding: Adapter.Encoding, resp: []const u8) !ParsedValue {
+pub fn parseResponse(encoding: instrument_types.Encoding, resp: []const u8) !ParsedValue {
     const trimmed = std.mem.trim(u8, resp, &std.ascii.whitespace);
     return switch (encoding) {
         .raw => .{ .raw = resp },
@@ -207,9 +207,9 @@ pub fn parseResponse(encoding: Adapter.Encoding, resp: []const u8) !ParsedValue 
 
 fn evalToValue(
     e: *const expr.Expression,
-    ctx: *const common.Context,
+    ctx: *const session.Context,
     allocator: std.mem.Allocator,
-) !common.Value {
+) !session.Value {
     const result = try e.eval(ctx.varResolver(), allocator);
     // Owned strings (if any) live in `allocator` — caller manages lifetime.
     return switch (result.value) {
@@ -221,14 +221,14 @@ fn evalToValue(
 }
 
 pub fn resolveStepArg(
-    ctx: *const common.Context,
+    ctx: *const session.Context,
     value: recipe_mod.StepArg,
     allocator: std.mem.Allocator,
-) !common.RenderValue {
+) !session.RenderValue {
     return switch (value) {
         .scalar => |e| .{ .scalar = try evalToValue(&e, ctx, allocator) },
         .list => |items| blk: {
-            const resolved = try allocator.alloc(common.Value, items.len);
+            const resolved = try allocator.alloc(session.Value, items.len);
             for (items, 0..) |*item, idx| {
                 resolved[idx] = try evalToValue(item, ctx, allocator);
             }
@@ -237,13 +237,13 @@ pub fn resolveStepArg(
     };
 }
 
-fn logWarning(log_sink: common.LogSink, message: []const u8) void {
+fn logWarning(log_sink: session.LogSink, message: []const u8) void {
     var buf: [512]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, warn_tag ++ " {s}\n", .{message}) catch return;
     log_sink.writeAll(text);
 }
 
-fn logDryRun(log_sink: common.LogSink, adapter_name: []const u8, rendered: []const u8) void {
+fn logDryRun(log_sink: session.LogSink, adapter_name: []const u8, rendered: []const u8) void {
     var buf: [1024]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, dry_run_tag ++ " {s} -> {s}\n", .{ adapter_name, rendered }) catch return;
     log_sink.writeAll(text);
