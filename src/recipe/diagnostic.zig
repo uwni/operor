@@ -94,5 +94,4 @@ pub const PrecompileDiagnostic = struct {
         }
         try writer.writeByte('\n');
     }
-
 };
