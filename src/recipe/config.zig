@@ -114,6 +114,7 @@ pub const RecipeConfig = struct {
     consts: ?std.json.ArrayHashMap(ArgValueDoc) = null,
     vars: ?std.json.ArrayHashMap(ArgValueDoc) = null,
     expected_iterations: ?u64 = null,
+    float_precision: ?u8 = null,
 };
 
 test "parse recipe arg object values" {

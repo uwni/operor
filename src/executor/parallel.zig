@@ -46,6 +46,7 @@ pub fn executeParallel(
     dry_run: bool,
     log_sink: session.LogSink,
     scratch: *step_mod.StepScratch,
+    float_precision: ?u8,
 ) !?SavedValue {
     const steps = parallel.steps;
     if (steps.len == 0) return null;
@@ -67,7 +68,7 @@ pub fn executeParallel(
             if (instrumentIdx(s)) |idx| {
                 if (instruments[idx].handle) |*instr| {
                     if (!instr.hasAsyncSupport()) {
-                        return executeSequentialFallback(allocator, parallel, instruments, ctx, dry_run, log_sink, scratch);
+                        return executeSequentialFallback(allocator, parallel, instruments, ctx, dry_run, log_sink, scratch, float_precision);
                     }
                 }
                 break;
@@ -76,7 +77,7 @@ pub fn executeParallel(
     }
 
     if (dry_run) {
-        return executeSequentialFallback(allocator, parallel, instruments, ctx, dry_run, log_sink, scratch);
+        return executeSequentialFallback(allocator, parallel, instruments, ctx, dry_run, log_sink, scratch, float_precision);
     }
 
     // --- Cleanup registered before enabling so partial failures are covered ---
@@ -95,7 +96,7 @@ pub fn executeParallel(
         if (instrumentIdx(s)) |idx| {
             if (instruments[idx].handle) |*instr| {
                 instr.enableAsyncEvents() catch {
-                    return executeSequentialFallback(allocator, parallel, instruments, ctx, dry_run, log_sink, scratch);
+                    return executeSequentialFallback(allocator, parallel, instruments, ctx, dry_run, log_sink, scratch, float_precision);
                 };
             }
         }
@@ -132,7 +133,7 @@ pub fn executeParallel(
         for (states) |*st| {
             if (st.phase == .done) continue;
             all_done = false;
-            try advanceState(st, allocator, instruments, ctx, scratch);
+            try advanceState(st, allocator, instruments, ctx, scratch, float_precision);
         }
         if (!all_done) {
             // Yield to avoid busy-spinning.
@@ -170,6 +171,7 @@ fn advanceState(
     instruments: []session.InstrumentRuntime,
     ctx: *session.Context,
     scratch: *step_mod.StepScratch,
+    float_precision: ?u8,
 ) !void {
     switch (st.phase) {
         .write_pending => {
@@ -184,7 +186,7 @@ fn advanceState(
             }
 
             var render_stack_buf: [512]u8 = undefined;
-            const rendered = try ic.command.render(allocator, render_stack_buf[0..], resolved_args, ic.command.instrument.write_termination);
+            const rendered = try ic.command.render(allocator, render_stack_buf[0..], resolved_args, ic.command.instrument.write_termination, float_precision);
 
             st.rendered_command = rendered.owned orelse try allocator.dupe(u8, rendered.bytes);
 
@@ -312,6 +314,7 @@ fn executeSequentialFallback(
     dry_run: bool,
     log_sink: session.LogSink,
     scratch: *step_mod.StepScratch,
+    float_precision: ?u8,
 ) anyerror!?SavedValue {
     var first_result: ?SavedValue = null;
     for (parallel.steps) |*s| {
@@ -319,7 +322,7 @@ fn executeSequentialFallback(
             .instrument_call => |ic| &instruments[ic.instrument_idx],
             .compute, .sleep, .parallel => null,
         };
-        const result = try step_mod.executeStep(allocator, instrument, s, ctx, dry_run, log_sink, scratch, instruments);
+        const result = try step_mod.executeStep(allocator, instrument, s, ctx, dry_run, log_sink, scratch, instruments, float_precision);
         if (result != null and first_result == null) {
             first_result = result;
         }

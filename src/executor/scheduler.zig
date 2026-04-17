@@ -117,6 +117,7 @@ fn runTask(
             async_log.logSink(),
             scratch,
             instruments,
+            compiled_recipe.float_precision,
         );
         if (saved_value) |captured| {
             frame_builder.captureOwned(captured.column, captured.value_owned);

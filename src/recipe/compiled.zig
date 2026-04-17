@@ -3,6 +3,17 @@ const instrument = @import("../instrument.zig");
 const diagnostic = @import("diagnostic.zig");
 const expr = @import("../expr.zig");
 
+/// Writes a float with exactly `decimal_places` digits after the decimal point,
+/// using the standard library's Ryu-based decimal formatter.
+fn writeFloatFixed(writer: anytype, value: f64, decimal_places: u8) !void {
+    var buf: [std.fmt.float.bufferSize(.decimal, f64)]u8 = undefined;
+    const formatted = std.fmt.float.render(&buf, value, .{
+        .mode = .decimal,
+        .precision = decimal_places,
+    }) catch unreachable; // buffer is statically sized to fit any f64
+    try writer.writeAll(formatted);
+}
+
 pub const Value = union(enum) {
     float: f64,
     int: i64,
@@ -132,13 +143,14 @@ pub const PrecompiledCommand = struct {
         stack_buffer: []u8,
         args: []const RenderValue,
         suffix: []const u8,
+        float_precision: ?u8,
     ) RenderError!RenderedCommand {
         if (stack_buffer.len >= suffix.len) {
             const render_buffer = stack_buffer[0 .. stack_buffer.len - suffix.len];
             var w: std.Io.Writer = .fixed(render_buffer);
-            renderInternal(&w, self.segments, args) catch |err| switch (err) {
+            renderInternal(&w, self.segments, args, float_precision) catch |err| switch (err) {
                 error.WriteFailed => {
-                    const owned = try renderAllocWithSuffix(allocator, self.segments, args, suffix);
+                    const owned = try renderAllocWithSuffix(allocator, self.segments, args, suffix, float_precision);
                     return .{ .bytes = owned, .owned = owned };
                 },
                 else => unreachable,
@@ -150,7 +162,7 @@ pub const PrecompiledCommand = struct {
             return .{ .bytes = stack_buffer[0..combined_len] };
         }
 
-        const owned = try renderAllocWithSuffix(allocator, self.segments, args, suffix);
+        const owned = try renderAllocWithSuffix(allocator, self.segments, args, suffix, float_precision);
         return .{ .bytes = owned, .owned = owned };
     }
 };
@@ -311,6 +323,9 @@ pub const PrecompiledRecipe = struct {
     /// Estimated total number of task iterations across all tasks.
     /// Null when the recipe runs indefinitely or stop conditions are dynamic.
     expected_iterations: ?u64,
+    /// Maximum decimal places for float-to-string conversion in command templates.
+    /// Null preserves the full f64 shortest representation.
+    float_precision: ?u8,
     /// Default values for slot-based context variables at execution startup.
     initial_values: []const Value,
 
@@ -331,17 +346,26 @@ pub const PrecompiledRecipe = struct {
     }
 };
 
-fn renderInternal(writer: anytype, segments: []const CompiledSegment, args: []const RenderValue) !void {
+fn renderInternal(writer: anytype, segments: []const CompiledSegment, args: []const RenderValue, float_precision: ?u8) !void {
     for (segments) |segment| {
         switch (segment) {
             .literal => |literal| try writer.writeAll(literal),
-            .arg => |arg_idx| try writer.print("{f}", .{args[arg_idx]}),
+            .arg => |arg_idx| {
+                const rv = args[arg_idx];
+                if (float_precision) |precision| {
+                    if (rv == .scalar and rv.scalar == .float) {
+                        try writeFloatFixed(writer, rv.scalar.float, precision);
+                        continue;
+                    }
+                }
+                try writer.print("{f}", .{rv});
+            },
             .optional => |inner| {
                 const has_value = for (inner) |s| {
                     if (s == .arg and args[s.arg].isEmpty()) continue;
                     if (s == .arg) break true;
                 } else false;
-                if (has_value) try renderInternal(writer, inner, args);
+                if (has_value) try renderInternal(writer, inner, args, float_precision);
             },
         }
     }
@@ -361,11 +385,12 @@ fn renderAllocWithSuffix(
     segments: []const CompiledSegment,
     args: []const RenderValue,
     suffix: []const u8,
+    float_precision: ?u8,
 ) PrecompiledCommand.RenderError![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
 
-    renderInternal(&out.writer, segments, args) catch |err| switch (err) {
+    renderInternal(&out.writer, segments, args, float_precision) catch |err| switch (err) {
         error.WriteFailed => return error.OutOfMemory,
     };
 

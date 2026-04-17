@@ -8,7 +8,6 @@ const config = @import("config.zig");
 const diagnostic = @import("diagnostic.zig");
 const recipe_ir = @import("compiled.zig");
 const expr = @import("../expr.zig");
-const visa = @import("../visa/root.zig");
 
 const max_recipe_size: usize = 512 * 1024;
 
@@ -103,6 +102,7 @@ fn precompileInternal(
         .pipeline = pipeline,
         .stop_when = stop_when,
         .expected_iterations = recipe.expected_iterations,
+        .float_precision = recipe.float_precision,
         .initial_values = slot_map.varInitialValues(),
     };
 }
@@ -1592,7 +1592,7 @@ test "precompiled command renders via helper" {
     };
 
     var stack_buf: [32]u8 = undefined;
-    const rendered = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination);
+    const rendered = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, null);
     defer rendered.deinit(gpa);
 
     try std.testing.expectEqualStrings("VOLT 3.3\n", rendered.bytes);
@@ -1624,11 +1624,53 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     };
 
     var stack_buf: [8]u8 = undefined;
-    const rendered = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination);
+    const rendered = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, null);
     defer rendered.deinit(gpa);
 
     try std.testing.expect(rendered.owned != null);
     try std.testing.expectEqualStrings("VOLT 1234567890\r\n", rendered.bytes);
+}
+
+test "float_precision controls decimal places in rendered command" {
+    const gpa = std.testing.allocator;
+    var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
+    defer cmd_arena.deinit();
+    const alloc = cmd_arena.allocator();
+
+    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null);
+
+    var instrument = recipe_ir.PrecompiledInstrument{
+        .adapter_name = "psu",
+        .resource = "USB0::1::INSTR",
+        .commands = std.StringHashMap(*const recipe_ir.PrecompiledCommand).init(alloc),
+        .write_termination = "\n",
+        .options = .{},
+    };
+    defer instrument.commands.deinit();
+
+    const compiled = try compileCommand(gpa, source, &instrument);
+    defer compiled.deinit(gpa);
+
+    const args = [_]recipe_ir.RenderValue{
+        .{ .scalar = .{ .float = 3.14159265 } },
+    };
+
+    var stack_buf: [64]u8 = undefined;
+
+    // With precision 2: "VOLT 3.14\n"
+    const r2 = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, 2);
+    defer r2.deinit(gpa);
+    try std.testing.expectEqualStrings("VOLT 3.14\n", r2.bytes);
+
+    // With precision 0: "VOLT 3\n"
+    const r0 = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, 0);
+    defer r0.deinit(gpa);
+    try std.testing.expectEqualStrings("VOLT 3\n", r0.bytes);
+
+    // Without precision (null): shortest representation
+    const rn = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, null);
+    defer rn.deinit(gpa);
+    try std.testing.expectEqualStrings("VOLT 3.14159265\n", rn.bytes);
 }
 
 test "precompile diagnostic includes step context" {
