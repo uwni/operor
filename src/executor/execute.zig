@@ -1,5 +1,5 @@
 const std = @import("std");
-const tty = @import("../cli/tty.zig");
+const tty = @import("../tty.zig");
 const Adapter = @import("../adapter/Adapter.zig");
 const recipe_mod = @import("../recipe/root.zig");
 const testing = @import("../testing.zig");
@@ -22,9 +22,8 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
     if (!opts.dry_run) {
         var visa_diag: visa.loader.LoadDiagnostic = undefined;
         vtable = visa.loader.load(opts.visa_lib, &visa_diag) catch |err| {
-            try log.writeAll(tty.styledText("error: ", .{.red}));
             try visa_diag.write(log, err);
-            return err;
+            std.process.exit(1);
         };
         rm = try visa.ResourceManager.init(&vtable);
     }
@@ -33,15 +32,19 @@ pub fn execute(allocator: std.mem.Allocator, opts: common.ExecOptions) !void {
     defer precompile_diagnostic.deinit();
 
     var compiled = blk: {
-        var dir = if (std.fs.path.isAbsolute(opts.adapter_dir))
-            try std.Io.Dir.openDirAbsolute(opts.io, opts.adapter_dir, .{})
+        const dir = if (std.fs.path.isAbsolute(opts.adapter_dir))
+            std.Io.Dir.openDirAbsolute(opts.io, opts.adapter_dir, .{})
         else
-            try std.Io.Dir.cwd().openDir(opts.io, opts.adapter_dir, .{});
-        defer dir.close(opts.io);
-        break :blk recipe_mod.PrecompiledRecipe.precompilePath(allocator, opts.io, opts.recipe_path, dir, &precompile_diagnostic) catch |err| {
-            try log.writeAll(tty.styledText("precompile failed", .{.red}));
+            std.Io.Dir.cwd().openDir(opts.io, opts.adapter_dir, .{});
+        const opened = dir catch |err| {
+            try log.writeAll(tty.error_prefix);
+            try log.print("cannot open adapter directory '{s}': {s}\n", .{ opts.adapter_dir, @errorName(err) });
+            std.process.exit(1);
+        };
+        defer opened.close(opts.io);
+        break :blk recipe_mod.PrecompiledRecipe.precompilePath(allocator, opts.io, opts.recipe_path, opened, &precompile_diagnostic) catch |err| {
             try precompile_diagnostic.write(log, err);
-            return err;
+            std.process.exit(1);
         };
     };
     defer compiled.deinit();

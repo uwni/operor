@@ -1,6 +1,7 @@
 const std = @import("std");
 const doc_parse = @import("../doc_parse.zig");
 const Adapter = @import("../adapter/Adapter.zig");
+const template = @import("../adapter/template.zig");
 const parse_mod = @import("../adapter/parse.zig");
 const testing = @import("../testing.zig");
 const config = @import("config.zig");
@@ -678,9 +679,24 @@ fn compileCommand(
     instrument: *const types.PrecompiledInstrument,
 ) !types.PrecompiledCommand {
     var arg_names = std.ArrayList([]const u8).empty;
-    const segments = try allocator.alloc(types.CompiledSegment, source.template.len);
+    const segments = try compileSegments(allocator, source.template, &arg_names);
 
-    for (source.template, 0..) |segment, idx| {
+    return .{
+        .instrument = instrument,
+        .response = source.response,
+        .segments = segments,
+        .arg_names = try arg_names.toOwnedSlice(allocator),
+    };
+}
+
+fn compileSegments(
+    allocator: std.mem.Allocator,
+    template_segments: []const template.Segment,
+    arg_names: *std.ArrayList([]const u8),
+) ![]const types.CompiledSegment {
+    const segments = try allocator.alloc(types.CompiledSegment, template_segments.len);
+
+    for (template_segments, 0..) |segment, idx| {
         segments[idx] = switch (segment) {
             .literal => |literal| .{ .literal = try allocator.dupe(u8, literal) },
             .placeholder => |name| .{ .arg = blk: {
@@ -689,15 +705,11 @@ fn compileCommand(
                 try arg_names.append(allocator, name_copy);
                 break :blk arg_names.items.len - 1;
             } },
+            .optional => |inner| .{ .optional = try compileSegments(allocator, inner, arg_names) },
         };
     }
 
-    return .{
-        .instrument = instrument,
-        .response = source.response,
-        .segments = segments,
-        .arg_names = try arg_names.toOwnedSlice(allocator),
-    };
+    return segments;
 }
 
 fn compileStepArgs(

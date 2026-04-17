@@ -43,6 +43,9 @@ pub inline fn styledText(comptime text: []const u8, comptime attrs: anytype) []c
     }
 }
 
+/// Standard styled prefix for error messages, usable by any diagnostic.
+pub const error_prefix = styledText("error: ", .{.red});
+
 // ── Cursor movement ─────────────────────────────────────────────────────
 
 pub const cursor = struct {

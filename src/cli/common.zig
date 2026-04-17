@@ -1,6 +1,7 @@
 const std = @import("std");
 const clap = @import("clap");
 const build_options = @import("build_options");
+const tty = @import("operor").tty;
 
 /// The executable name as set in build.zig (e.g. "operor").
 pub const exe_name = build_options.exe_name;
@@ -32,33 +33,45 @@ pub fn usageAndHelpToFile(
     try w.interface.flush();
 }
 
-/// Writes a human-readable "unknown/missing command" message to stderr,
-/// then prints usage + help to stderr.
-///
-/// `name`  – e.g. "operor run"
-/// `arg`   – the unrecognised token typed by the user (empty string = nothing was typed)
-/// `valid` – comma-separated list of accepted values, e.g. "run, instrument, repl"
-pub fn reportUnknownPositional(
-    io: std.Io,
-    comptime Id: type,
-    comptime params: []const clap.Param(Id),
-    name: []const u8,
-    arg: []const u8,
-    valid: []const u8,
-) !void {
-    const stderr: std.Io.File = .stderr();
-    try usageAndHelpToFile(io, stderr, name, Id, params);
+/// Diagnostic for CLI argument validation errors.
+pub const CliDiagnostic = struct {
+    pub const Error = error{
+        MissingCommand,
+        UnknownCommand,
+        MissingAdapterDirectory,
+        MissingRecipePath,
+        MissingResourceAddress,
+    };
 
-    var buf: [256]u8 = undefined;
-    var w = stderr.writer(io, &buf);
-    if (arg.len > 0) {
-        try w.interface.print(
-            "\n\nUnknown command '{s}'. Valid commands: {s}.",
-            .{ arg, valid },
-        );
-        try w.interface.flush();
+    /// The unrecognised token typed by the user (set for `UnknownCommand`).
+    command: ?[]const u8 = null,
+
+    pub fn write(self: *const CliDiagnostic, writer: *std.Io.Writer, err: Error) !void {
+        try writer.writeAll(tty.error_prefix);
+        switch (err) {
+            error.MissingCommand => try writer.print(
+                "missing command. Run '{s} --help' for usage.\n",
+                .{exe_name},
+            ),
+            error.UnknownCommand => try writer.print(
+                "unknown command '{s}'. Run '{s} --help' for usage.\n",
+                .{ self.command orelse "<unknown>", exe_name },
+            ),
+            error.MissingAdapterDirectory => try writer.print(
+                "missing required option '--adapter-dir'. Run '{s} run --help' for usage.\n",
+                .{exe_name},
+            ),
+            error.MissingRecipePath => try writer.print(
+                "missing required argument '<recipe>'. Run '{s} run --help' for usage.\n",
+                .{exe_name},
+            ),
+            error.MissingResourceAddress => try writer.print(
+                "missing required option '--resource'. Run '{s} repl --help' for usage.\n",
+                .{exe_name},
+            ),
+        }
     }
-}
+};
 
 /// Parser table for the root command: the positional is parsed as a raw string
 /// so we can show the user what they typed before validating it.

@@ -11,6 +11,13 @@ pub const AdapterMeta = struct {
     author: ?[]const u8 = null,
 };
 
+/// Configurable string mapping for boolean write/read values.
+/// Both fields must be explicitly provided by the adapter author.
+pub const BoolFormat = struct {
+    true: []const u8,
+    false: []const u8,
+};
+
 /// Instrument-level defaults declared in a adapter document.
 /// These fields configure VISA session behaviour and identity matching.
 pub const InstrumentSpec = struct {
@@ -31,6 +38,9 @@ pub const InstrumentSpec = struct {
     models: ?[]const []const u8 = null,
     /// Optional firmware version or pattern for `*IDN?` validation.
     firmware: ?[]const u8 = null,
+    /// Default bool format for all commands in this adapter.
+    /// Must be set explicitly when any command uses bool args.
+    bool_format: ?BoolFormat = null,
 };
 
 /// Supported response encodings declared by adapter commands.
@@ -39,12 +49,14 @@ pub const Encoding = enum {
     float,
     int,
     string,
+    bool,
 
     const map = std.StaticStringMap(Encoding).initComptime(.{
         .{ "raw", .raw },
         .{ "float", .float },
         .{ "int", .int },
         .{ "string", .string },
+        .{ "bool", .bool },
     });
 
     fn parseFromString(tag: []const u8) !Encoding {
@@ -58,6 +70,23 @@ pub const Encoding = enum {
     }
 };
 
+/// Argument type specification declared in adapter command `args`.
+/// Deserialized directly from JSON; interpretation deferred to precompile.
+pub const ArgSpec = union(enum) {
+    /// Short form: `"bool"` or `"list"`.
+    string: []const u8,
+    /// Full form: `{"type": "bool", "true": "1", "false": "0"}`.
+    object: ArgSpecObject,
+};
+
+/// Object form of an argument type specification.
+pub const ArgSpecObject = struct {
+    type: []const u8,
+    true: ?[]const u8 = null,
+    false: ?[]const u8 = null,
+    separator: ?[]const u8 = null,
+};
+
 /// Parsed command entry from a adapter document.
 /// All owned data lives in the arena passed to `parse`; no individual `deinit` needed.
 pub const Command = struct {
@@ -67,6 +96,8 @@ pub const Command = struct {
     response: ?Encoding,
     /// Pre-parsed write template ready for precompilation.
     template: []const template.Segment,
+    /// Optional argument type specifications from the adapter document.
+    args: ?std.json.ArrayHashMap(ArgSpec) = null,
 
     /// Parses a command from a write template and optional read encoding spec.
     pub fn parse(

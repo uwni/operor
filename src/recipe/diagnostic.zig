@@ -1,4 +1,5 @@
 const std = @import("std");
+const tty = @import("../tty.zig");
 
 /// Context captured for the most recent precompile failure.
 pub const PrecompileDiagnostic = struct {
@@ -42,6 +43,7 @@ pub const PrecompileDiagnostic = struct {
 
     /// Writes a human-readable diagnostic line for a precompile error.
     pub fn write(self: *const PrecompileDiagnostic, writer: *std.Io.Writer, err: anyerror) !void {
+        try writer.writeAll(tty.error_prefix);
         if (self.task_idx) |task_idx| {
             if (self.step_idx) |step_idx| {
                 try writer.print(" at task {d} step {d}", .{ task_idx, step_idx });

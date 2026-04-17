@@ -294,6 +294,7 @@ fn processReadResult(
         .string => |v| .{ .string = v },
         .int => |v| .{ .int = v },
         .float => |v| .{ .float = v },
+        .bool => |v| .{ .bool = v },
     };
     try ctx.setSlot(slot, value);
 

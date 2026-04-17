@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const tty = @import("tty.zig");
 
 /// Document parsing helpers for adapter and recipe files.
 pub const doc_parse = @import("doc_parse.zig");
@@ -62,15 +63,19 @@ pub fn preview(
     defer precompile_diagnostic.deinit();
 
     var compiled = blk: {
-        var dir = if (std.fs.path.isAbsolute(adapter_dir))
-            try std.Io.Dir.openDirAbsolute(io, adapter_dir, .{})
+        const dir = if (std.fs.path.isAbsolute(adapter_dir))
+            std.Io.Dir.openDirAbsolute(io, adapter_dir, .{})
         else
-            try std.Io.Dir.cwd().openDir(io, adapter_dir, .{});
-        defer dir.close(io);
-        break :blk recipe.PrecompiledRecipe.precompilePath(allocator, io, recipe_path, dir, &precompile_diagnostic) catch |err| {
-            try log.writeAll("precompile failed");
+            std.Io.Dir.cwd().openDir(io, adapter_dir, .{});
+        const opened = dir catch |err| {
+            try log.writeAll(tty.error_prefix);
+            try log.print("cannot open adapter directory '{s}': {s}\n", .{ adapter_dir, @errorName(err) });
+            std.process.exit(1);
+        };
+        defer opened.close(io);
+        break :blk recipe.PrecompiledRecipe.precompilePath(allocator, io, recipe_path, opened, &precompile_diagnostic) catch |err| {
             try precompile_diagnostic.write(log, err);
-            return err;
+            std.process.exit(1);
         };
     };
     defer compiled.deinit();

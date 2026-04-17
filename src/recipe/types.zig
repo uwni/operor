@@ -42,6 +42,17 @@ pub const RenderValue = union(enum) {
     scalar: Value,
     list: []const Value,
 
+    /// Returns true when this value would produce no output when rendered.
+    pub fn isEmpty(self: RenderValue) bool {
+        return switch (self) {
+            .scalar => |v| switch (v) {
+                .string => |s| s.len == 0,
+                else => false,
+            },
+            .list => |items| items.len == 0,
+        };
+    }
+
     pub fn format(self: RenderValue, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self) {
             .scalar => |value| try value.format(writer),
@@ -71,6 +82,7 @@ pub const RenderedCommand = struct {
 pub const CompiledSegment = union(enum) {
     literal: []const u8,
     arg: usize,
+    optional: []const CompiledSegment,
 };
 
 pub const StepArg = union(enum) {
@@ -99,11 +111,7 @@ pub const PrecompiledCommand = struct {
     pub fn deinit(self: PrecompiledCommand, allocator: std.mem.Allocator) void {
         for (self.arg_names) |name| allocator.free(name);
         allocator.free(self.arg_names);
-        for (self.segments) |segment| switch (segment) {
-            .literal => |literal| allocator.free(literal),
-            .arg => {},
-        };
-        allocator.free(self.segments);
+        freeCompiledSegments(allocator, self.segments);
     }
 
     /// Returns whether the compiled template expects a given placeholder.
@@ -329,8 +337,24 @@ fn renderInternal(writer: anytype, segments: []const CompiledSegment, args: []co
         switch (segment) {
             .literal => |literal| try writer.writeAll(literal),
             .arg => |arg_idx| try writer.print("{f}", .{args[arg_idx]}),
+            .optional => |inner| {
+                const has_value = for (inner) |s| {
+                    if (s == .arg and args[s.arg].isEmpty()) continue;
+                    if (s == .arg) break true;
+                } else false;
+                if (has_value) try renderInternal(writer, inner, args);
+            },
         }
     }
+}
+
+fn freeCompiledSegments(allocator: std.mem.Allocator, segments: []const CompiledSegment) void {
+    for (segments) |segment| switch (segment) {
+        .literal => |literal| allocator.free(literal),
+        .arg => {},
+        .optional => |inner| freeCompiledSegments(allocator, inner),
+    };
+    allocator.free(segments);
 }
 
 fn renderAllocWithSuffix(

@@ -1,5 +1,5 @@
 const std = @import("std");
-const tty = @import("../../cli/tty.zig");
+const tty = @import("../../tty.zig");
 const config_mod = @import("config.zig");
 const sinks = @import("sinks.zig");
 const types = @import("types.zig");

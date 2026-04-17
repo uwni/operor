@@ -18,6 +18,7 @@ const CommandDoc = struct {
     write: []const u8,
     read: ?[]const u8 = null,
     description: ?[]const u8 = null,
+    args: ?std.json.ArrayHashMap(types.ArgSpec) = null,
 };
 
 /// Parses a adapter document from an already-open directory.
@@ -39,7 +40,8 @@ fn buildAdapter(adapter_arena: *std.heap.ArenaAllocator, parsed: AdapterDoc, pat
     var it = parsed.commands.map.iterator();
     while (it.next()) |entry| {
         const cmd_doc = entry.value_ptr.*;
-        const cmd: types.Command = try .parse(alloc, cmd_doc.write, cmd_doc.read, cmd_doc.description);
+        var cmd: types.Command = try .parse(alloc, cmd_doc.write, cmd_doc.read, cmd_doc.description);
+        cmd.args = cmd_doc.args;
         try commands.put(entry.key_ptr.*, cmd);
     }
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-const tty = @import("../cli/tty.zig");
+const tty = @import("../tty.zig");
 const Adapter = @import("../adapter/Adapter.zig");
 const recipe_mod = @import("../recipe/root.zig");
 const common = @import("common.zig");
@@ -16,6 +16,7 @@ pub const ParsedValue = union(Adapter.Encoding) {
     float: f64,
     int: i64,
     string: []const u8,
+    bool: bool,
 };
 
 pub const SavedValue = struct {
@@ -172,6 +173,7 @@ fn executeInstrumentCall(
                 .string => |v| common.Value{ .string = v },
                 .int => |v| common.Value{ .int = v },
                 .float => |v| common.Value{ .float = v },
+                .bool => |v| common.Value{ .bool = v },
             };
             try ctx.setSlot(slot, value);
 
@@ -199,6 +201,7 @@ pub fn parseResponse(encoding: Adapter.Encoding, resp: []const u8) !ParsedValue 
         .float => .{ .float = try std.fmt.parseFloat(f64, trimmed) },
         .int => .{ .int = try std.fmt.parseInt(i64, trimmed, 10) },
         .string => .{ .string = trimmed },
+        .bool => .{ .bool = trimmed.len > 0 and trimmed[0] == '1' },
     };
 }
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const windows = std.os.windows;
 const builtin = @import("builtin");
 const c = @import("common.zig").c;
+const tty = @import("../tty.zig");
 
 // ---------------------------------------------------------------------------
 // Vtable — resolved once at startup by `load()`.
@@ -37,6 +38,7 @@ pub const LoadDiagnostic = struct {
     symbol: ?[]const u8 = null,
 
     pub fn write(self: *const LoadDiagnostic, writer: *std.Io.Writer, err: Error) !void {
+        try writer.writeAll(tty.error_prefix);
         switch (err) {
             error.VisaLibraryNotFound => if (self.path) |p|
                 try writer.print("VISA library not found at '{s}'.\n", .{p})

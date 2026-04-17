@@ -9,7 +9,29 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
 
-    var iter = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    var cli_diag: common.CliDiagnostic = .{};
+    return dispatch(allocator, io, init.minimal.args, &cli_diag) catch |err| {
+        switch (err) {
+            error.MissingCommand,
+            error.UnknownCommand,
+            error.MissingAdapterDirectory,
+            error.MissingRecipePath,
+            error.MissingResourceAddress,
+            => |cli_err| {
+                var buf: [256]u8 = undefined;
+                var w = std.Io.File.stderr().writer(io, &buf);
+                cli_diag.write(&w.interface, cli_err) catch {};
+                w.interface.flush() catch {};
+                std.process.exit(1);
+            },
+            else => {},
+        }
+        return err;
+    };
+}
+
+fn dispatch(allocator: std.mem.Allocator, io: std.Io, args: anytype, cli_diag: *common.CliDiagnostic) !void {
+    var iter = try std.process.Args.Iterator.initAllocator(args, allocator);
     defer iter.deinit();
     _ = iter.next();
 
@@ -29,29 +51,9 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // The positional is a raw string; validate it manually so we can show the
-    // user what they actually typed instead of a cryptic error code.
-    const raw = res.positionals[0] orelse {
-        try common.reportUnknownPositional(
-            io,
-            clap.Help,
-            &common.root_params,
-            common.exe_name,
-            "",
-            "run, repl",
-        );
-        return error.MissingCommand;
-    };
-
+    const raw = res.positionals[0] orelse return error.MissingCommand;
     const command = std.meta.stringToEnum(common.Command, raw) orelse {
-        try common.reportUnknownPositional(
-            io,
-            clap.Help,
-            &common.root_params,
-            common.exe_name,
-            raw,
-            "run, repl",
-        );
+        cli_diag.command = raw;
         return error.UnknownCommand;
     };
 

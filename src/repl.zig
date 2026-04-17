@@ -1,5 +1,5 @@
 const std = @import("std");
-const tty = @import("cli/tty.zig");
+const tty = @import("tty.zig");
 const cursorctl = tty.cursor;
 const clearctl = tty.clear;
 const visa = @import("visa/root.zig");

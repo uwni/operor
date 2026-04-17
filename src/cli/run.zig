@@ -42,14 +42,8 @@ pub fn handle(allocator: std.mem.Allocator, io: std.Io, iter: *std.process.Args.
         return;
     }
 
-    const adapter_dir = res.args.@"adapter-dir" orelse {
-        try common.usageAndHelpToFile(io, .stderr(), common.exe_name ++ " run", clap.Help, &params);
-        return error.MissingAdapterDirectory;
-    };
-    const recipe_path = res.positionals[0] orelse {
-        try common.usageAndHelpToFile(io, .stderr(), common.exe_name ++ " run", clap.Help, &params);
-        return error.MissingRecipePath;
-    };
+    const adapter_dir = res.args.@"adapter-dir" orelse return error.MissingAdapterDirectory;
+    const recipe_path = res.positionals[0] orelse return error.MissingRecipePath;
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const out = &stdout_writer.interface;
