@@ -6,6 +6,12 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag to publish (e.g. v0.1.0). Leave empty for dev build."
+        required: false
+        default: ""
 
 env:
   # Opt-in to Node.js 24 for all JavaScript actions to avoid deprecation warnings
@@ -48,11 +54,11 @@ jobs:
             os: linux
             ext: ""
           - target: x86_64-windows
-            runner: windows-latest
+            runner: ubuntu-latest
             os: windows
             ext: ".exe"
           - target: aarch64-windows
-            runner: windows-latest
+            runner: ubuntu-latest
             os: windows
             ext: ".exe"
 
@@ -68,8 +74,10 @@ jobs:
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          # If not a tag push, use short sha
-          if [[ ! "${GITHUB_REF}" == refs/tags/* ]]; then
+          # If not a tag push, use short sha (unless manually specified)
+          if [[ -n "${{ github.event.inputs.release_tag }}" ]]; then
+            VERSION="${{ github.event.inputs.release_tag }}"
+          elif [[ ! "${GITHUB_REF}" == refs/tags/* ]]; then
             VERSION="dev-${GITHUB_SHA:0:7}"
           fi
 
@@ -92,7 +100,8 @@ jobs:
           name: operor-${{ matrix.target }}
           path: ${{ steps.package.outputs.archive_file }}
       - name: Upload to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
           files: ${{ steps.package.outputs.archive_file }}
