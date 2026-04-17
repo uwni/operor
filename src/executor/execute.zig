@@ -27,7 +27,7 @@ pub fn execute(allocator: std.mem.Allocator, opts: session.ExecOptions) !void {
         rm = try visa.ResourceManager.init(&vtable);
     }
 
-    var precompile_diagnostic: recipe_mod.PrecompileDiagnostic = .init(allocator);
+    var precompile_diagnostic: recipe_mod.PrecompileDiagnostic = .init(allocator, opts.recipe_path);
     defer precompile_diagnostic.deinit();
 
     var compiled = blk: {

@@ -59,7 +59,7 @@ pub fn preview(
     recipe_path: []const u8,
     log: *std.Io.Writer,
 ) !void {
-    var precompile_diagnostic: recipe.PrecompileDiagnostic = .init(allocator);
+    var precompile_diagnostic: recipe.PrecompileDiagnostic = .init(allocator, recipe_path);
     defer precompile_diagnostic.deinit();
 
     var compiled = blk: {

@@ -4,6 +4,7 @@ const tty = @import("../tty.zig");
 /// Context captured for the most recent precompile failure.
 pub const PrecompileDiagnostic = struct {
     allocator: std.mem.Allocator,
+    file_path: []const u8,
     task_idx: ?usize = null,
     step_idx: ?usize = null,
     instrument_name: ?[]const u8 = null,
@@ -14,36 +15,40 @@ pub const PrecompileDiagnostic = struct {
     owned: bool = false,
 
     /// Creates an empty diagnostic object owned by `allocator`.
-    pub fn init(allocator: std.mem.Allocator) PrecompileDiagnostic {
-        return .{ .allocator = allocator };
+    pub fn init(allocator: std.mem.Allocator, file_path: []const u8) PrecompileDiagnostic {
+        return .{ .allocator = allocator, .file_path = file_path };
     }
 
     /// Releases any captured diagnostic strings.
     pub fn deinit(self: *PrecompileDiagnostic) void {
-        self.release();
+        if (!self.owned) return;
+        inline for (.{ &self.instrument_name, &self.adapter_name, &self.command_name, &self.argument_name, &self.argument_spec }) |field| {
+            if (field.*) |s| self.allocator.free(@constCast(s));
+        }
     }
 
     /// Clears all currently captured diagnostic fields.
     pub fn reset(self: *PrecompileDiagnostic) void {
-        self.release();
-        self.* = .{ .allocator = self.allocator };
+        self.deinit();
+        self.* = .{ .allocator = self.allocator, .file_path = self.file_path };
     }
 
     /// Takes ownership of borrowed slices by duplicating them.
     /// Must be called before the source data is freed.
     pub fn snapshot(self: *PrecompileDiagnostic) void {
         if (self.owned) return;
-        self.instrument_name = self.dupeOrNull(self.instrument_name);
-        self.adapter_name = self.dupeOrNull(self.adapter_name);
-        self.command_name = self.dupeOrNull(self.command_name);
-        self.argument_name = self.dupeOrNull(self.argument_name);
-        self.argument_spec = self.dupeOrNull(self.argument_spec);
+        inline for (.{ &self.instrument_name, &self.adapter_name, &self.command_name, &self.argument_name, &self.argument_spec }) |field| {
+            if (field.*) |s| {
+                field.* = self.allocator.dupe(u8, s) catch null;
+            }
+        }
         self.owned = true;
     }
 
     /// Writes a human-readable diagnostic line for a precompile error.
     pub fn write(self: *const PrecompileDiagnostic, writer: *std.Io.Writer, err: anyerror) !void {
         try writer.writeAll(tty.error_prefix);
+        try writer.print("'{s}'", .{self.file_path});
         if (self.task_idx) |task_idx| {
             if (self.step_idx) |step_idx| {
                 try writer.print(" at task {d} step {d}", .{ task_idx, step_idx });
@@ -69,6 +74,8 @@ pub const PrecompileDiagnostic = struct {
         try writer.writeAll(": ");
 
         switch (err) {
+            error.FileNotFound => try writer.writeAll("file not found"),
+            error.SyntaxError => try writer.writeAll("invalid JSON syntax"),
             error.AdapterNotFound => try writer.writeAll("adapter not found"),
             error.InstrumentNotFound => try writer.writeAll("instrument not declared in recipe"),
             error.CommandNotFound => try writer.writeAll("command not found in adapter"),
@@ -88,14 +95,4 @@ pub const PrecompileDiagnostic = struct {
         try writer.writeByte('\n');
     }
 
-    fn release(self: *PrecompileDiagnostic) void {
-        if (!self.owned) return;
-        inline for (.{ &self.instrument_name, &self.adapter_name, &self.command_name, &self.argument_name, &self.argument_spec }) |field| {
-            if (field.*) |s| self.allocator.free(@constCast(s));
-        }
-    }
-
-    fn dupeOrNull(self: *PrecompileDiagnostic, value: ?[]const u8) ?[]const u8 {
-        return if (value) |s| self.allocator.dupe(u8, s) catch null else null;
-    }
 };

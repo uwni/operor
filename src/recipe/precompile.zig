@@ -21,7 +21,7 @@ pub fn precompilePath(
     adapter_dir: std.Io.Dir,
     precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
 ) !recipe_ir.PrecompiledRecipe {
-    var fallback_diag: diagnostic.PrecompileDiagnostic = .init(allocator);
+    var fallback_diag: diagnostic.PrecompileDiagnostic = .init(allocator, recipe_path);
     defer fallback_diag.deinit();
     const diag = precompile_diagnostic orelse &fallback_diag;
     diag.reset();
@@ -445,7 +445,7 @@ fn precompileComputeStep(
     step_idx: usize,
     diag: *diagnostic.PrecompileDiagnostic,
 ) !recipe_ir.Step {
-    diag.* = .{ .allocator = diag.allocator, .task_idx = task_idx, .step_idx = step_idx };
+    diag.* = .{ .allocator = diag.allocator, .file_path = diag.file_path, .task_idx = task_idx, .step_idx = step_idx };
 
     const if_expr = try precompileIf(slot_map, cfg.@"if");
 
@@ -480,6 +480,7 @@ fn precompileCallStep(
 
     diag.* = .{
         .allocator = diag.allocator,
+        .file_path = diag.file_path,
         .task_idx = task_idx,
         .step_idx = step_idx,
         .instrument_name = instrument_name,
@@ -1679,7 +1680,7 @@ test "precompile diagnostic includes step context" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    var precompile_diagnostic: diagnostic.PrecompileDiagnostic = .init(gpa);
+    var precompile_diagnostic: diagnostic.PrecompileDiagnostic = .init(gpa, recipe_path);
     defer precompile_diagnostic.deinit();
 
     _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &precompile_diagnostic) catch |err| {
@@ -2173,7 +2174,7 @@ test "precompile diagnostic for missing pipeline" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    var precompile_diagnostic: diagnostic.PrecompileDiagnostic = .init(gpa);
+    var precompile_diagnostic: diagnostic.PrecompileDiagnostic = .init(gpa, recipe_path);
     defer precompile_diagnostic.deinit();
 
     _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &precompile_diagnostic) catch |err| {
@@ -2242,7 +2243,7 @@ test "precompile diagnostic for missing record" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    var precompile_diagnostic: diagnostic.PrecompileDiagnostic = .init(gpa);
+    var precompile_diagnostic: diagnostic.PrecompileDiagnostic = .init(gpa, recipe_path);
     defer precompile_diagnostic.deinit();
 
     _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &precompile_diagnostic) catch |err| {
