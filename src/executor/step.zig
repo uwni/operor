@@ -59,6 +59,7 @@ pub fn executeStep(
     log_sink: session.LogSink,
     scratch: *StepScratch,
     instruments: []session.InstrumentRuntime,
+    float_precision: ?u8,
 ) !?SavedValue {
     // Evaluate optional `if` guard.
     if (step.@"if") |*if_expr| {
@@ -67,13 +68,13 @@ pub fn executeStep(
     }
 
     return switch (step.action) {
-        .instrument_call => |ic| executeInstrumentCall(allocator, instrument.?, &ic, ctx, dry_run, log_sink, scratch),
+        .instrument_call => |ic| executeInstrumentCall(allocator, instrument.?, &ic, ctx, dry_run, log_sink, scratch, float_precision),
         .compute => |comp| executeCompute(allocator, &comp, ctx),
         .sleep => |s| {
             ctx.io.sleep(.fromNanoseconds(@as(i96, s.duration_ms) * 1_000_000), .awake) catch {};
             return null;
         },
-        .parallel => |p| parallel_mod.executeParallel(allocator, &p, instruments, ctx, dry_run, log_sink, scratch),
+        .parallel => |p| parallel_mod.executeParallel(allocator, &p, instruments, ctx, dry_run, log_sink, scratch, float_precision),
     };
 }
 
@@ -119,6 +120,7 @@ fn executeInstrumentCall(
     dry_run: bool,
     log_sink: session.LogSink,
     scratch: *StepScratch,
+    float_precision: ?u8,
 ) !?SavedValue {
     const cmd = step.command;
     const adapter_name = cmd.instrument.adapter_name;
@@ -132,7 +134,7 @@ fn executeInstrumentCall(
 
     var render_stack_buf: [command_stack_bytes]u8 = undefined;
     const write_termination = step.command.instrument.write_termination;
-    const rendered = cmd.render(allocator, render_stack_buf[0..], resolved_args, write_termination) catch |err| switch (err) {
+    const rendered = cmd.render(allocator, render_stack_buf[0..], resolved_args, write_termination, float_precision) catch |err| switch (err) {
         error.MissingVariable => {
             var warning_buf: [160]u8 = undefined;
             const warning = try std.fmt.bufPrint(warning_buf[0..], "missing template variable for call {s}", .{step.call});
