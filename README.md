@@ -26,9 +26,9 @@ Operor loads instrument adapters and recipes from JSON, precompiles command temp
   
 - For **Microsoft Windows** users, Run
 
-```ps
-(command -v pwsh >/dev/null && pwsh || powershell) -ExecutionPolicy Bypass -NoProfile -Command "iwr https://raw.githubusercontent.com/uwni/operor/main/install.ps1 | iex"
-```
+ ```ps
+ powershell -ExecutionPolicy Bypass -NoProfile -Command "iwr https://raw.githubusercontent.com/uwni/operor/main/install.ps1 | iex"
+ ```
 
 ## Requirements
 
