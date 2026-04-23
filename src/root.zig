@@ -59,25 +59,7 @@ pub fn preview(
     recipe_path: []const u8,
     log: *std.Io.Writer,
 ) !void {
-    var precompile_diagnostic: recipe.PrecompileDiagnostic = .init(allocator, recipe_path);
-    defer precompile_diagnostic.deinit();
-
-    var compiled = blk: {
-        const dir = if (std.fs.path.isAbsolute(adapter_dir))
-            std.Io.Dir.openDirAbsolute(io, adapter_dir, .{})
-        else
-            std.Io.Dir.cwd().openDir(io, adapter_dir, .{});
-        const opened = dir catch |err| {
-            try log.writeAll(tty.error_prefix);
-            try log.print("cannot open adapter directory '{s}': {s}\n", .{ adapter_dir, @errorName(err) });
-            return error.Diagnosed;
-        };
-        defer opened.close(io);
-        break :blk recipe.PrecompiledRecipe.precompilePath(allocator, io, recipe_path, opened, &precompile_diagnostic) catch |err| {
-            try precompile_diagnostic.write(log, err);
-            return error.Diagnosed;
-        };
-    };
+    var compiled = try recipe.precompilePathFromAdapterDir(allocator, io, adapter_dir, recipe_path, log);
     defer compiled.deinit();
 
     try log.print("Instruments: {d}\n", .{compiled.instruments.count()});
