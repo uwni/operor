@@ -25,9 +25,13 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
+        .serde = .{
+            .url = "https://github.com/OrlovEvgeny/serde.zig/archive/refs/tags/v1.0.3.tar.gz",
+            .hash = "serde-1.0.1-1DszT9VLCwAjuQh0WSq-dIfZ-6Gq8edODuhwF9gfsxld",
+        },
         .clap = .{
-            .url = "git+https://github.com/Hejsil/zig-clap#fc1e5cc3f6d9d3001112385ee6256d694e959d2f",
-            .hash = "clap-0.11.0-oBajB7foAQC3Iyn4IVCkUdYaOVVng5IZkSncySTjNig1",
+            .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.12.0.tar.gz",
+            .hash = "clap-0.12.0-oBajB7foAQDqlSwaSG5g0yq7xGbQARUsBk5T64gAOqP5",
         },
     },
     .paths = .{

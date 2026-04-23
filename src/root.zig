@@ -152,16 +152,30 @@ test "preview output" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json",
-        \\{"metadata": {}, "commands": {"set_voltage": {"write": "VOLT {voltage},(@{channels})"}}}
+    try workspace.writeFile("adapters/psu0.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set_voltage:
+        \\    write: "VOLT {voltage},(@{channels})"
     );
-    try workspace.writeFile("recipes/r1_set_voltage.json",
-        \\{"instruments": {"d1": {"adapter": "psu0.json", "resource": "USB0::1::INSTR"}}, "pipeline": {"record": {"all": "all"}}, "tasks": [{"steps": [{"call": {"call": "d1.set_voltage", "args": {"voltage": {"scalar": {"int": 5}}, "channels": {"list": [{"int": 1}, {"int": 2}]}}}}]}]}
+    try workspace.writeFile("recipes/r1_set_voltage.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
+        \\        args:
+        \\          voltage: 5
+        \\          channels: [1, 2]
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.yaml");
     defer gpa.free(recipe_path);
 
     var out: std.Io.Writer.Allocating = .init(gpa);

@@ -11,6 +11,8 @@ pub const RenderedCommand = recipe_ir.RenderedCommand;
 pub const Step = recipe_ir.Step;
 /// Parsed representation of a step argument value.
 pub const StepArg = recipe_ir.StepArg;
+/// Optional adapter text mapping for boolean true/false values.
+pub const BoolTextMap = recipe_ir.BoolTextMap;
 /// Task variant describing when and how steps are executed.
 pub const Task = recipe_ir.Task;
 /// Runtime mode presets for the sampling pipeline.

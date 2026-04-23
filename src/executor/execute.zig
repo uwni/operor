@@ -151,7 +151,10 @@ fn prepareRuntime(
 }
 
 const vendor_psu_adapter =
-    \\{"metadata": {}, "commands": {"set_voltage": {"write": "VOLT {voltage},(@{channels})"}}}
+    \\metadata: {}
+    \\commands:
+    \\  set_voltage:
+    \\    write: "VOLT {voltage},(@{channels})"
 ;
 
 test "executor execute dry run" {
@@ -160,14 +163,25 @@ test "executor execute dry run" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
-    try workspace.writeFile("recipes/r1_set_voltage.json",
-        \\{"instruments": {"d1": {"adapter": "psu0.json", "resource": "USB0::1::INSTR"}}, "pipeline": {"record": {"all": "all"}}, "tasks": [{"steps": [{"call": {"call": "d1.set_voltage", "args": {"voltage": {"scalar": {"int": 5}}, "channels": {"list": [{"int": 1}, {"int": 2}]}}}}]}]}
+    try workspace.writeFile("adapters/psu0.yaml", vendor_psu_adapter);
+    try workspace.writeFile("recipes/r1_set_voltage.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
+        \\        args:
+        \\          voltage: 5
+        \\          channels: [1, 2]
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.yaml");
     defer gpa.free(recipe_path);
 
     var out: std.Io.Writer.Allocating = .init(gpa);
@@ -193,14 +207,30 @@ test "executor pipeline creates csv frame sink during dry run" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
-    try workspace.writeFile("recipes/pipeline.json",
-        \\{"instruments": {"d1": {"adapter": "psu0.json", "resource": "USB0::1::INSTR"}}, "pipeline": {"buffer_size": 64, "warn_usage_percent": 80, "mode": "safe", "file_path": "samples.csv", "record": {"all": "all"}}, "stop_when": {"string": "$ITER >= 2"}, "tasks": [{"steps": [{"call": {"call": "d1.set_voltage", "args": {"voltage": {"scalar": {"int": 5}}, "channels": {"list": [{"int": 1}, {"int": 2}]}}}}]}]}
+    try workspace.writeFile("adapters/psu0.yaml", vendor_psu_adapter);
+    try workspace.writeFile("recipes/pipeline.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  buffer_size: 64
+        \\  warn_usage_percent: 80
+        \\  mode: safe
+        \\  file_path: samples.csv
+        \\  record: all
+        \\stop_when: "$ITER >= 2"
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
+        \\        args:
+        \\          voltage: 5
+        \\          channels: [1, 2]
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/pipeline.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/pipeline.yaml");
     defer gpa.free(recipe_path);
 
     var out: std.Io.Writer.Allocating = .init(gpa);

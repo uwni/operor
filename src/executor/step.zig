@@ -169,7 +169,7 @@ fn executeInstrumentCall(
         errdefer allocator.free(resp);
         if (step.save_slot) |slot| {
             defer allocator.free(resp);
-            const stored = try parseResponse(encoding, resp);
+            const stored = try parseResponse(encoding, resp, cmd.instrument.bool_map);
             const value = switch (stored) {
                 .raw => |v| session.Value{ .string = v },
                 .string => |v| session.Value{ .string = v },
@@ -196,15 +196,30 @@ fn executeInstrumentCall(
 }
 
 /// Convert the raw response byte string into a ParsedValue according to the specified encoding.
-pub fn parseResponse(encoding: instrument_types.Encoding, resp: []const u8) !ParsedValue {
+pub fn parseResponse(
+    encoding: instrument_types.Encoding,
+    resp: []const u8,
+    bool_map: ?recipe_mod.BoolTextMap,
+) !ParsedValue {
     const trimmed = std.mem.trim(u8, resp, &std.ascii.whitespace);
     return switch (encoding) {
         .raw => .{ .raw = resp },
         .float => .{ .float = try std.fmt.parseFloat(f64, trimmed) },
         .int => .{ .int = try std.fmt.parseInt(i64, trimmed, 10) },
         .string => .{ .string = trimmed },
-        .bool => .{ .bool = trimmed.len > 0 and trimmed[0] == '1' },
+        .bool => .{ .bool = try parseBoolResponse(trimmed, bool_map) },
     };
+}
+
+fn parseBoolResponse(trimmed: []const u8, bool_map: ?recipe_mod.BoolTextMap) !bool {
+    if (bool_map) |map| {
+        if (std.ascii.eqlIgnoreCase(trimmed, map.true_text)) return true;
+        if (std.ascii.eqlIgnoreCase(trimmed, map.false_text)) return false;
+        return error.InvalidBoolResponse;
+    }
+
+    // No mapping configured: preserve legacy behavior.
+    return trimmed.len > 0 and trimmed[0] == '1';
 }
 
 fn evalToValue(
@@ -253,15 +268,35 @@ fn logDryRun(log_sink: session.LogSink, adapter_name: []const u8, rendered: []co
 
 test "executor parse response" {
     const raw = "  2.5 \n";
-    const parsed = try parseResponse(.float, raw);
+    const parsed = try parseResponse(.float, raw, null);
     switch (parsed) {
         .float => |value| try std.testing.expectApproxEqAbs(@as(f64, 2.5), value, 1e-9),
         else => return error.TestUnexpectedResult,
     }
 
-    const parsed_int = try parseResponse(.int, "7");
+    const parsed_int = try parseResponse(.int, "7", null);
     switch (parsed_int) {
         .int => |value| try std.testing.expectEqual(@as(i64, 7), value),
         else => return error.TestUnexpectedResult,
     }
+
+    const parsed_bool_legacy_true = try parseResponse(.bool, "1", null);
+    switch (parsed_bool_legacy_true) {
+        .bool => |value| try std.testing.expect(value),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const parsed_bool_legacy_false = try parseResponse(.bool, "ON", null);
+    switch (parsed_bool_legacy_false) {
+        .bool => |value| try std.testing.expect(!value),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const parsed_bool_custom = try parseResponse(.bool, "ENABLE", .{ .true_text = "ENABLE", .false_text = "DISABLE" });
+    switch (parsed_bool_custom) {
+        .bool => |value| try std.testing.expect(value),
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expectError(error.InvalidBoolResponse, parseResponse(.bool, "ON", .{ .true_text = "ENABLE", .false_text = "DISABLE" }));
 }

@@ -100,6 +100,18 @@ pub const StepArg = union(enum) {
     list: []const expr.Expression,
 };
 
+/// Optional text mapping for boolean values.
+pub const BoolTextMap = struct {
+    true_text: []const u8,
+    false_text: []const u8,
+};
+
+/// Per-placeholder formatting rules resolved from adapter defaults and command arg specs.
+pub const ArgFormat = struct {
+    bool_map: ?BoolTextMap = null,
+    list_separator: ?[]const u8 = null,
+};
+
 /// Executable command prepared during recipe precompilation.
 pub const PrecompiledCommand = struct {
     /// Precompiled instrument that owns this command.
@@ -110,6 +122,8 @@ pub const PrecompiledCommand = struct {
     segments: []const CompiledSegment,
     /// Unique placeholder names in render order.
     arg_names: []const []const u8,
+    /// Rendering format rules aligned to `arg_names`.
+    arg_formats: []const ArgFormat,
     /// Errors that can occur while rendering the precompiled template.
     pub const RenderError = error{
         MissingVariable,
@@ -121,6 +135,14 @@ pub const PrecompiledCommand = struct {
     pub fn deinit(self: PrecompiledCommand, allocator: std.mem.Allocator) void {
         for (self.arg_names) |name| allocator.free(name);
         allocator.free(self.arg_names);
+        for (self.arg_formats) |fmt| {
+            if (fmt.bool_map) |map| {
+                allocator.free(map.true_text);
+                allocator.free(map.false_text);
+            }
+            if (fmt.list_separator) |text| allocator.free(text);
+        }
+        allocator.free(self.arg_formats);
         freeCompiledSegments(allocator, self.segments);
     }
 
@@ -148,9 +170,9 @@ pub const PrecompiledCommand = struct {
         if (stack_buffer.len >= suffix.len) {
             const render_buffer = stack_buffer[0 .. stack_buffer.len - suffix.len];
             var w: std.Io.Writer = .fixed(render_buffer);
-            renderInternal(&w, self.segments, args, float_precision) catch |err| switch (err) {
+            renderInternal(&w, self.segments, args, self.arg_formats, float_precision) catch |err| switch (err) {
                 error.WriteFailed => {
-                    const owned = try renderAllocWithSuffix(allocator, self.segments, args, suffix, float_precision);
+                    const owned = try renderAllocWithSuffix(allocator, self.segments, args, self.arg_formats, suffix, float_precision);
                     return .{ .bytes = owned, .owned = owned };
                 },
                 else => unreachable,
@@ -162,7 +184,7 @@ pub const PrecompiledCommand = struct {
             return .{ .bytes = stack_buffer[0..combined_len] };
         }
 
-        const owned = try renderAllocWithSuffix(allocator, self.segments, args, suffix, float_precision);
+        const owned = try renderAllocWithSuffix(allocator, self.segments, args, self.arg_formats, suffix, float_precision);
         return .{ .bytes = owned, .owned = owned };
     }
 };
@@ -178,6 +200,8 @@ pub const PrecompiledInstrument = struct {
     /// Suffix appended to every write command (e.g. "\n", "\r\n").
     /// Empty string means no write termination. Owned by the recipe arena.
     write_termination: []const u8,
+    /// Optional adapter-level bool read/write mappings.
+    bool_map: ?BoolTextMap = null,
     /// Session options applied when the runtime opens the instrument.
     options: instrument.InstrumentOptions,
 };
@@ -303,12 +327,18 @@ pub const PipelineConfig = struct {
     record: ?RecordConfig = null,
 };
 
+const serde_lib = @import("serde");
+
 /// Controls which `assign` variables are persisted by pipeline sinks.
 pub const RecordConfig = union(enum) {
     /// Record every `assign` variable.
     all: []const u8,
     /// Record only the listed variable names.
     explicit: []const []const u8,
+
+    pub const serde = .{
+        .tag = serde_lib.UnionTag.untagged,
+    };
 };
 
 /// Fully validated recipe ready for preview or execution.
@@ -346,26 +376,64 @@ pub const PrecompiledRecipe = struct {
     }
 };
 
-fn renderInternal(writer: anytype, segments: []const CompiledSegment, args: []const RenderValue, float_precision: ?u8) !void {
+fn writeValueWithFormat(writer: anytype, value: Value, fmt: ArgFormat, float_precision: ?u8) !void {
+    switch (value) {
+        .bool => |b| {
+            if (fmt.bool_map) |map| {
+                try writer.writeAll(if (b) map.true_text else map.false_text);
+                return;
+            }
+            try writer.writeAll(if (b) "true" else "false");
+        },
+        .float => |f| {
+            if (float_precision) |precision| {
+                try writeFloatFixed(writer, f, precision);
+            } else {
+                try writer.print("{d}", .{f});
+            }
+        },
+        .int => |i| try writer.print("{d}", .{i}),
+        .string => |s| try writer.writeAll(s),
+        .list => |items| {
+            const sep = fmt.list_separator orelse ",";
+            for (items, 0..) |item, idx| {
+                if (idx > 0) try writer.writeAll(sep);
+                try writeValueWithFormat(writer, item, fmt, float_precision);
+            }
+        },
+    }
+}
+
+fn renderInternal(
+    writer: anytype,
+    segments: []const CompiledSegment,
+    args: []const RenderValue,
+    arg_formats: []const ArgFormat,
+    float_precision: ?u8,
+) !void {
     for (segments) |segment| {
         switch (segment) {
             .literal => |literal| try writer.writeAll(literal),
             .arg => |arg_idx| {
                 const rv = args[arg_idx];
-                if (float_precision) |precision| {
-                    if (rv == .scalar and rv.scalar == .float) {
-                        try writeFloatFixed(writer, rv.scalar.float, precision);
-                        continue;
-                    }
+                const fmt = arg_formats[arg_idx];
+                switch (rv) {
+                    .scalar => |value| try writeValueWithFormat(writer, value, fmt, float_precision),
+                    .list => |items| {
+                        const sep = fmt.list_separator orelse ",";
+                        for (items, 0..) |item, idx| {
+                            if (idx > 0) try writer.writeAll(sep);
+                            try writeValueWithFormat(writer, item, fmt, float_precision);
+                        }
+                    },
                 }
-                try writer.print("{f}", .{rv});
             },
             .optional => |inner| {
                 const has_value = for (inner) |s| {
                     if (s == .arg and args[s.arg].isEmpty()) continue;
                     if (s == .arg) break true;
                 } else false;
-                if (has_value) try renderInternal(writer, inner, args, float_precision);
+                if (has_value) try renderInternal(writer, inner, args, arg_formats, float_precision);
             },
         }
     }
@@ -384,13 +452,14 @@ fn renderAllocWithSuffix(
     allocator: std.mem.Allocator,
     segments: []const CompiledSegment,
     args: []const RenderValue,
+    arg_formats: []const ArgFormat,
     suffix: []const u8,
     float_precision: ?u8,
 ) PrecompiledCommand.RenderError![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
 
-    renderInternal(&out.writer, segments, args, float_precision) catch |err| switch (err) {
+    renderInternal(&out.writer, segments, args, arg_formats, float_precision) catch |err| switch (err) {
         error.WriteFailed => return error.OutOfMemory,
     };
 

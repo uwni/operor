@@ -2,6 +2,7 @@ const std = @import("std");
 const doc_parse = @import("../doc_parse.zig");
 const Adapter = @import("../adapter/Adapter.zig");
 const template = @import("../adapter/template.zig");
+const adapter_schema = @import("../adapter/schema.zig");
 const parse_mod = @import("../adapter/parse.zig");
 const testing = @import("../testing.zig");
 const config = @import("config.zig");
@@ -262,10 +263,10 @@ const SlotMap = struct {
 /// Validate consts/vars, build the merged slot map (consts first, then vars),
 /// compile initial values, and create the compile-time const resolver.
 fn buildSlotMap(alloc: std.mem.Allocator, recipe: *const config.RecipeConfig) !SlotMap {
-    const const_keys = if (recipe.consts) |c| c.map.keys() else &.{};
-    const const_vals = if (recipe.consts) |c| c.map.values() else &.{};
-    const var_keys = if (recipe.vars) |v| v.map.keys() else &.{};
-    const var_vals = if (recipe.vars) |v| v.map.values() else &.{};
+    const const_keys = if (recipe.consts) |c| c.keys() else &.{};
+    const const_vals = if (recipe.consts) |c| c.values() else &.{};
+    const var_keys = if (recipe.vars) |v| v.keys() else &.{};
+    const var_vals = if (recipe.vars) |v| v.values() else &.{};
 
     // Validate: no name conflicts between consts, vars, and builtins.
     for (const_keys) |name| {
@@ -273,7 +274,7 @@ fn buildSlotMap(alloc: std.mem.Allocator, recipe: *const config.RecipeConfig) !S
     }
     for (var_keys) |name| {
         if (expr.resolveBuiltin(name) != null) return error.BuiltinVariableConflict;
-        if (recipe.consts != null and recipe.consts.?.map.contains(name)) return error.DuplicateVariable;
+        if (recipe.consts != null and recipe.consts.?.contains(name)) return error.DuplicateVariable;
     }
 
     // Build initial values array: consts first, then vars.
@@ -306,7 +307,7 @@ fn loadAdapters(
     diag: *diagnostic.PrecompileDiagnostic,
 ) !std.StringHashMap(Adapter) {
     var map: std.StringHashMap(Adapter) = .init(allocator);
-    var instrument_it = recipe.instruments.map.iterator();
+    var instrument_it = recipe.instruments.iterator();
     while (instrument_it.next()) |entry| {
         const cfg = entry.value_ptr.*;
         _ = getOrParseAdapter(allocator, io, &map, adapter_dir, cfg.adapter) catch |err| {
@@ -324,32 +325,39 @@ fn precompileInstruments(
     loaded_adapters: *const std.StringHashMap(Adapter),
 ) !std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument) {
     var precompiled_instruments: std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument) = .empty;
-    try precompiled_instruments.ensureTotalCapacity(alloc, recipe.instruments.map.count());
+    try precompiled_instruments.ensureTotalCapacity(alloc, recipe.instruments.count());
 
-    var instrument_it = recipe.instruments.map.iterator();
+    var instrument_it = recipe.instruments.iterator();
     while (instrument_it.next()) |entry| {
         const instrument_name = entry.key_ptr.*;
-        const instrument_cfg = entry.value_ptr.*;
+        const instrument_cfg = entry.value_ptr;
         const adapter = loaded_adapters.getPtr(instrument_cfg.adapter).?;
 
         const name_copy = try alloc.dupe(u8, instrument_name);
-        const adapter_copy = try alloc.dupe(u8, instrument_cfg.adapter);
-        const resource_copy = try alloc.dupe(u8, instrument_cfg.resource);
-        const write_termination = try cloneOptionalBytes(alloc, adapter.write_termination);
-        try precompiled_instruments.put(alloc, name_copy, .{
-            .adapter_name = adapter_copy,
-            .resource = resource_copy,
-            .commands = std.StringHashMap(*const recipe_ir.PrecompiledCommand).init(alloc),
-            .write_termination = write_termination,
-            .options = .{
-                .timeout_ms = adapter.options.timeout_ms,
-                .read_termination = adapter.options.read_termination,
-                .query_delay_ms = adapter.options.query_delay_ms,
-                .chunk_size = adapter.options.chunk_size,
-            },
-        });
+        const precompiled_instrument = try precompileOwnedInstrument(alloc, instrument_cfg, adapter);
+        try precompiled_instruments.put(alloc, name_copy, precompiled_instrument);
     }
     return precompiled_instruments;
+}
+
+fn precompileOwnedInstrument(alloc: std.mem.Allocator, instrument_cfg: *const config.InstrumentConfig, adapter: *const Adapter) !recipe_ir.PrecompiledInstrument {
+    const adapter_copy = try alloc.dupe(u8, instrument_cfg.adapter);
+    const resource_copy = try alloc.dupe(u8, instrument_cfg.resource);
+    const write_termination = try cloneOptionalBytes(alloc, adapter.write_termination);
+    const bool_map = try cloneBoolTextMap(alloc, adapter.instrument.bool_format);
+    return .{
+        .adapter_name = adapter_copy,
+        .resource = resource_copy,
+        .commands = std.StringHashMap(*const recipe_ir.PrecompiledCommand).init(alloc),
+        .write_termination = write_termination,
+        .bool_map = bool_map,
+        .options = .{
+            .timeout_ms = adapter.options.timeout_ms,
+            .read_termination = adapter.options.read_termination,
+            .query_delay_ms = adapter.options.query_delay_ms,
+            .chunk_size = adapter.options.chunk_size,
+        },
+    };
 }
 
 fn precompileTasks(
@@ -637,6 +645,17 @@ fn cloneOptionalBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]const 
     return allocator.dupe(u8, bytes);
 }
 
+fn cloneBoolTextMap(
+    allocator: std.mem.Allocator,
+    source: ?adapter_schema.BoolFormat,
+) !?recipe_ir.BoolTextMap {
+    const src = source orelse return null;
+    return .{
+        .true_text = try allocator.dupe(u8, src.true),
+        .false_text = try allocator.dupe(u8, src.false),
+    };
+}
+
 fn getOrParseAdapter(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -665,7 +684,7 @@ fn getOrCompileCommand(
 
     const source = loaded_adapter.commands.get(call) orelse return error.CommandNotFound;
     const key = try allocator.dupe(u8, call);
-    const compiled_value = try compileCommand(allocator, source, instrument);
+    const compiled_value = try compileCommand(allocator, source, instrument, loaded_adapter.instrument.bool_format);
 
     const compiled = try allocator.create(recipe_ir.PrecompiledCommand);
     compiled.* = compiled_value;
@@ -678,16 +697,72 @@ fn compileCommand(
     allocator: std.mem.Allocator,
     source: Adapter.Command,
     instrument: *const recipe_ir.PrecompiledInstrument,
+    adapter_bool_format: ?adapter_schema.BoolFormat,
 ) !recipe_ir.PrecompiledCommand {
     var arg_names = std.ArrayList([]const u8).empty;
     const segments = try compileSegments(allocator, source.template, &arg_names);
+    const owned_arg_names = try arg_names.toOwnedSlice(allocator);
+    const arg_formats = try compileArgFormats(allocator, source.args, owned_arg_names, adapter_bool_format);
 
     return .{
         .instrument = instrument,
         .response = source.response,
         .segments = segments,
-        .arg_names = try arg_names.toOwnedSlice(allocator),
+        .arg_names = owned_arg_names,
+        .arg_formats = arg_formats,
     };
+}
+
+fn compileArgFormats(
+    allocator: std.mem.Allocator,
+    source_args: ?std.StringHashMap(adapter_schema.ArgSpec),
+    arg_names: []const []const u8,
+    adapter_bool_format: ?adapter_schema.BoolFormat,
+) ![]const recipe_ir.ArgFormat {
+    const formats = try allocator.alloc(recipe_ir.ArgFormat, arg_names.len);
+
+    for (arg_names, 0..) |arg_name, idx| {
+        var format: recipe_ir.ArgFormat = .{};
+
+        if (adapter_bool_format) |bf| {
+            format.bool_map = .{
+                .true_text = try allocator.dupe(u8, bf.true),
+                .false_text = try allocator.dupe(u8, bf.false),
+            };
+        }
+
+        if (source_args) |args_map| {
+            if (args_map.get(arg_name)) |spec| {
+                switch (spec) {
+                    .string => {},
+                    .object => |obj| {
+                        if (std.mem.eql(u8, obj.type, "bool")) {
+                            if ((obj.true == null) != (obj.false == null)) {
+                                return error.PartialBoolMap;
+                            }
+                            if (obj.true) |t| {
+                                if (format.bool_map) |old| {
+                                    allocator.free(old.true_text);
+                                    allocator.free(old.false_text);
+                                }
+                                format.bool_map = .{
+                                    .true_text = try allocator.dupe(u8, t),
+                                    .false_text = try allocator.dupe(u8, obj.false.?),
+                                };
+                            }
+                        }
+                        if (obj.separator) |sep| {
+                            format.list_separator = try allocator.dupe(u8, sep);
+                        }
+                    },
+                }
+            }
+        }
+
+        formats[idx] = format;
+    }
+
+    return formats;
 }
 
 fn compileSegments(
@@ -716,7 +791,7 @@ fn compileSegments(
 fn compileStepArgs(
     allocator: std.mem.Allocator,
     command: *const recipe_ir.PrecompiledCommand,
-    doc_args: ?std.json.ArrayHashMap(config.ArgValueDoc),
+    doc_args: ?std.StringHashMap(config.ArgValueDoc),
     slot_map: *const SlotMap,
     diag: *diagnostic.PrecompileDiagnostic,
 ) ![]recipe_ir.StepArg {
@@ -724,7 +799,7 @@ fn compileStepArgs(
 
     for (command.arg_names, 0..) |arg_name, idx| {
         const doc_arg = if (doc_args) |wrapper|
-            wrapper.map.get(arg_name) orelse {
+            wrapper.get(arg_name) orelse {
                 diag.argument_name = arg_name;
                 return error.MissingCommandArgument;
             }
@@ -736,7 +811,7 @@ fn compileStepArgs(
     }
 
     if (doc_args) |wrapper| {
-        var it = wrapper.map.iterator();
+        var it = wrapper.iterator();
         while (it.next()) |entry| {
             if (!command.hasPlaceholder(entry.key_ptr.*)) {
                 diag.argument_name = entry.key_ptr.*;
@@ -860,60 +935,31 @@ test "load recipe and adapters" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu.json",
-        \\{
-        \\  "metadata": {},
-        \\  "commands": {
-        \\    "set": {
-        \\      "write": "VOLT {voltage}"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("adapters/psu.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set:
+        \\    write: "VOLT {voltage}"
     );
-    try workspace.writeFile("recipes/r1_set.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "voltage": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "5"
-        \\                }
-        \\              }
-        \\            }
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/r1_set.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  voltage: 0
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args:
+        \\          voltage: "5"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/r1_set.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/r1_set.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -924,7 +970,7 @@ test "load recipe and adapters" {
 
     const instrument = compiled.instruments.getPtr("d1") orelse return error.TestUnexpectedResult;
     try std.testing.expect(std.mem.eql(u8, instrument.resource, "USB0::1::INSTR"));
-    try std.testing.expect(std.mem.eql(u8, instrument.adapter_name, "psu.json"));
+    try std.testing.expect(std.mem.eql(u8, instrument.adapter_name, "psu.yaml"));
     try std.testing.expectEqual(@as(usize, 1), instrument.commands.count());
 
     const command = instrument.commands.get("set") orelse return error.TestUnexpectedResult;
@@ -959,56 +1005,30 @@ test "parse durations and stop conditions" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu.json",
-        \\{
-        \\  "metadata": {},
-        \\  "commands": {
-        \\    "set": {
-        \\      "write": "VOLT {voltage}"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("adapters/psu.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set:
+        \\    write: "VOLT {voltage}"
     );
-    try workspace.writeFile("recipes/r2_stop_when.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "stop_when": {
-        \\    "string": "$ELAPSED_MS >= 2000 || $ITER >= 3"
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "5"
-        \\                }
-        \\              }
-        \\            }
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/r2_stop_when.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\stop_when: "$ELAPSED_MS >= 2000 || $ITER >= 3"
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args:
+        \\          voltage: "5"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/r2_stop_when.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/r2_stop_when.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -1040,33 +1060,19 @@ test "precompile preserves initial variables" {
     defer workspace.deinit();
 
     try workspace.makePath("adapters");
-    try workspace.writeFile("recipes/initial_vars.json",
-        \\{
-        \\  "instruments": {},
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "v_set": {
-        \\      "scalar": {
-        \\        "float": 1.0
-        \\      }
-        \\    },
-        \\    "name": {
-        \\      "scalar": {
-        \\        "string": "scan"
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": []
-        \\}
+    try workspace.writeFile("recipes/initial_vars.yaml",
+        \\instruments: {}
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  v_set: 1.0
+        \\  name: scan
+        \\tasks: []
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/initial_vars.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/initial_vars.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -1101,58 +1107,32 @@ test "precompile estimates iterations for run-once recipes" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu.json",
-        \\{
-        \\  "metadata": {},
-        \\  "commands": {
-        \\    "set": {
-        \\      "write": "V"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("adapters/psu.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set:
+        \\    write: V
     );
-    try workspace.writeFile("recipes/run_once.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu.json",
-        \\      "resource": "R"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {},
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set",
-        \\            "args": {}
-        \\          }
-        \\        }
-        \\      ]
-        \\    },
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set",
-        \\            "args": {}
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/run_once.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.yaml
+        \\    resource: R
+        \\pipeline:
+        \\  record: all
+        \\vars: {}
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args: {}
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args: {}
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/run_once.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/run_once.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -1171,85 +1151,35 @@ test "precompile preserves typed literal step arguments" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/cfg.json",
-        \\{
-        \\  "metadata": {},
-        \\  "commands": {
-        \\    "configure": {
-        \\      "write": "CONF {count} {voltage} {enabled} {channels} {mirror}"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("adapters/cfg.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  configure:
+        \\    write: "CONF {count} {voltage} {enabled} {channels} {mirror}"
     );
-    try workspace.writeFile("recipes/typed_args.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "cfg.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "target": {
-        \\      "scalar": {
-        \\        "string": "mir"
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.configure",
-        \\            "args": {
-        \\              "count": {
-        \\                "scalar": {
-        \\                  "int": 5
-        \\                }
-        \\              },
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "float": 1.25
-        \\                }
-        \\              },
-        \\              "enabled": {
-        \\                "scalar": {
-        \\                  "bool": true
-        \\                }
-        \\              },
-        \\              "channels": {
-        \\                "list": [
-        \\                  {
-        \\                    "int": 1
-        \\                  },
-        \\                  {
-        \\                    "int": 2
-        \\                  }
-        \\                ]
-        \\              },
-        \\              "mirror": {
-        \\                "scalar": {
-        \\                  "string": "${target}"
-        \\                }
-        \\              }
-        \\            }
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/typed_args.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: cfg.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  target: mir
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.configure
+        \\        args:
+        \\          count: 5
+        \\          voltage: 1.25
+        \\          enabled: true
+        \\          channels: [1, 2]
+        \\          mirror: "${target}"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/typed_args.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/typed_args.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -1336,14 +1266,10 @@ test "precompile preserves typed literal step arguments" {
 }
 
 const vendor_psu_adapter =
-    \\{
-    \\  "metadata": {},
-    \\  "commands": {
-    \\    "set_voltage": {
-    \\      "write": "VOLT {voltage},(@{channels})"
-    \\    }
-    \\  }
-    \\}
+    \\metadata: {}
+    \\commands:
+    \\  set_voltage:
+    \\    write: "VOLT {voltage},(@{channels})"
 ;
 
 test "precompile stores only referenced commands" {
@@ -1352,57 +1278,32 @@ test "precompile stores only referenced commands" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json",
-        \\{
-        \\  "metadata": {},
-        \\  "commands": {
-        \\    "set_voltage": {
-        \\      "write": "VOLT {voltage}"
-        \\    },
-        \\    "output_on": {
-        \\      "write": "OUTP ON"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("adapters/psu0.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set_voltage:
+        \\    write: "VOLT {voltage}"
+        \\  output_on:
+        \\    write: "OUTP ON"
     );
-    try workspace.writeFile("recipes/r1_set_voltage.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu0.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {},
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set_voltage",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "1.0"
-        \\                }
-        \\              }
-        \\            }
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/r1_set_voltage.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\vars: {}
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
+        \\        args:
+        \\          voltage: "1.0"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/r1_set_voltage.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -1423,45 +1324,25 @@ test "precompile rejects missing instrument references" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
-    try workspace.writeFile("recipes/missing_instrument.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu0.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {},
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "missing.set_voltage",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "1.0"
-        \\                }
-        \\              }
-        \\            }
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("adapters/psu0.yaml", vendor_psu_adapter);
+    try workspace.writeFile("recipes/missing_instrument.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\vars: {}
+        \\tasks:
+        \\  - steps:
+        \\      - call: missing.set_voltage
+        \\        args:
+        \\          voltage: "1.0"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/missing_instrument.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/missing_instrument.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -1476,84 +1357,39 @@ test "precompile validates command arguments" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
-    try workspace.writeFile("recipes/missing_argument.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu0.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set_voltage"
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("adapters/psu0.yaml", vendor_psu_adapter);
+    try workspace.writeFile("recipes/missing_argument.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
     );
-    try workspace.writeFile("recipes/unexpected_argument.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu0.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set_voltage",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "1.0"
-        \\                }
-        \\              },
-        \\              "channels": {
-        \\                "list": [
-        \\                  {
-        \\                    "int": 1
-        \\                  }
-        \\                ]
-        \\              },
-        \\              "channel": {
-        \\                "scalar": {
-        \\                  "int": 1
-        \\                }
-        \\              }
-        \\            }
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/unexpected_argument.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
+        \\        args:
+        \\          voltage: "1.0"
+        \\          channels: [1]
+        \\          channel: 1
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const missing_argument_path = try workspace.realpathAlloc("recipes/missing_argument.json");
+    const missing_argument_path = try workspace.realpathAlloc("recipes/missing_argument.yaml");
     defer gpa.free(missing_argument_path);
-    const unexpected_argument_path = try workspace.realpathAlloc("recipes/unexpected_argument.json");
+    const unexpected_argument_path = try workspace.realpathAlloc("recipes/unexpected_argument.yaml");
     defer gpa.free(unexpected_argument_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -1580,7 +1416,7 @@ test "precompiled command renders via helper" {
     };
     defer instrument.commands.deinit();
 
-    const compiled = try compileCommand(gpa, source, &instrument);
+    const compiled = try compileCommand(gpa, source, &instrument, null);
     defer compiled.deinit(gpa);
 
     try std.testing.expect(compiled.instrument == &instrument);
@@ -1616,7 +1452,7 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     };
     defer instrument.commands.deinit();
 
-    const compiled = try compileCommand(gpa, source, &instrument);
+    const compiled = try compileCommand(gpa, source, &instrument, null);
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
@@ -1648,7 +1484,7 @@ test "float_precision controls decimal places in rendered command" {
     };
     defer instrument.commands.deinit();
 
-    const compiled = try compileCommand(gpa, source, &instrument);
+    const compiled = try compileCommand(gpa, source, &instrument, null);
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
@@ -1673,50 +1509,103 @@ test "float_precision controls decimal places in rendered command" {
     try std.testing.expectEqualStrings("VOLT 3.14159265\n", rn.bytes);
 }
 
+test "precompiled command applies bool format from adapter defaults" {
+    const gpa = std.testing.allocator;
+    var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
+    defer cmd_arena.deinit();
+    const alloc = cmd_arena.allocator();
+
+    const source = try Adapter.Command.parse(alloc, "OUTP {state}", null, null);
+
+    var instrument = recipe_ir.PrecompiledInstrument{
+        .adapter_name = "psu",
+        .resource = "USB0::1::INSTR",
+        .commands = std.StringHashMap(*const recipe_ir.PrecompiledCommand).init(alloc),
+        .write_termination = "\n",
+        .options = .{},
+    };
+    defer instrument.commands.deinit();
+
+    const compiled = try compileCommand(gpa, source, &instrument, .{ .true = "ON", .false = "OFF" });
+    defer compiled.deinit(gpa);
+
+    const args = [_]recipe_ir.RenderValue{
+        .{ .scalar = .{ .bool = true } },
+    };
+
+    var stack_buf: [32]u8 = undefined;
+    const rendered = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, null);
+    defer rendered.deinit(gpa);
+
+    try std.testing.expectEqualStrings("OUTP ON\n", rendered.bytes);
+}
+
+test "precompile rejects partial bool arg map" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/psu0.yaml",
+        \\instrument: {}
+        \\commands:
+        \\  output:
+        \\    write: "OUTP {state}"
+        \\    args:
+        \\      state:
+        \\        type: bool
+        \\        true: "ON"
+    );
+
+    try workspace.writeFile("recipes/r.yaml",
+        \\instruments:
+        \\  psu:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\tasks:
+        \\  - steps:
+        \\      - call: psu.output
+        \\        args:
+        \\          state: true
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/r.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
+    defer dir.close(std.testing.io);
+
+    try std.testing.expectError(error.PartialBoolMap, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+}
+
 test "precompile diagnostic includes step context" {
     const gpa = std.testing.allocator;
 
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
-    try workspace.writeFile("recipes/missing_command.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu0.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.missing",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "1.0"
-        \\                }
-        \\              }
-        \\            }
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("adapters/psu0.yaml", vendor_psu_adapter);
+    try workspace.writeFile("recipes/missing_command.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.missing
+        \\        args:
+        \\          voltage: "1.0"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/missing_command.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/missing_command.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -1748,68 +1637,31 @@ test "precompile compute step" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
-    try workspace.writeFile("recipes/compute.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu0.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "v": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    },
-        \\    "doubled": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set_voltage",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "5"
-        \\                }
-        \\              },
-        \\              "channels": {
-        \\                "scalar": {
-        \\                  "string": "1"
-        \\                }
-        \\              }
-        \\            },
-        \\            "assign": "v"
-        \\          }
-        \\        },
-        \\        {
-        \\          "compute": {
-        \\            "compute": "${v} * 2",
-        \\            "assign": "doubled"
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("adapters/psu0.yaml", vendor_psu_adapter);
+    try workspace.writeFile("recipes/compute.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  v: 0
+        \\  doubled: 0
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
+        \\        args:
+        \\          voltage: "5"
+        \\          channels: "1"
+        \\        assign: v
+        \\      - compute: "${v} * 2"
+        \\        assign: doubled
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/compute.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/compute.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -1841,44 +1693,29 @@ test "precompile compute step rejects missing assign" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
-    try workspace.writeFile("recipes/compute_no_save.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu0.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "compute": {
-        \\            "compute": "1 + 2"
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("adapters/psu0.yaml", vendor_psu_adapter);
+    try workspace.writeFile("recipes/compute_no_save.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\tasks:
+        \\  - steps:
+        \\      - compute: "1 + 2"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/compute_no_save.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/compute_no_save.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    // With the union-based StepConfig, missing required fields (assign) results in a parse error.
-    try std.testing.expectError(error.MissingField, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    // Untagged StepConfig parsing collapses variant mismatches to a generic type error.
+    try std.testing.expectError(error.WrongType, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile step with if guard" {
@@ -1887,59 +1724,28 @@ test "precompile step with if guard" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
-    try workspace.writeFile("recipes/if_guard.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu0.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "power": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set_voltage",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "5"
-        \\                }
-        \\              },
-        \\              "channels": {
-        \\                "scalar": {
-        \\                  "string": "1"
-        \\                }
-        \\              }
-        \\            },
-        \\            "if": {
-        \\              "string": "${power} > 100"
-        \\            }
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("adapters/psu0.yaml", vendor_psu_adapter);
+    try workspace.writeFile("recipes/if_guard.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  power: 0
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
+        \\        args:
+        \\          voltage: "5"
+        \\          channels: "1"
+        \\        if: "${power} > 100"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/if_guard.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/if_guard.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -1957,42 +1763,29 @@ test "precompile rejects invalid step (neither call nor compute)" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
-    try workspace.writeFile("recipes/invalid_step.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu0.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "assign": "orphan"
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("adapters/psu0.yaml", vendor_psu_adapter);
+    try workspace.writeFile("recipes/invalid_step.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\tasks:
+        \\  - steps:
+        \\      - assign: orphan
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/invalid_step.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/invalid_step.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    // With the union-based StepConfig, an object matching neither variant results in a parse error.
-    try std.testing.expectError(error.UnknownField, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    // Untagged StepConfig parsing collapses variant mismatches to a generic type error.
+    try std.testing.expectError(error.WrongType, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile rejects record with unknown assign variable" {
@@ -2001,70 +1794,29 @@ test "precompile rejects record with unknown assign variable" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
-    try workspace.writeFile("recipes/bad_record.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu0.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "explicit": [
-        \\        "voltage",
-        \\        "nonexistent"
-        \\      ]
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "voltage": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    },
-        \\    "nonexistent": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set_voltage",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "1.0"
-        \\                }
-        \\              },
-        \\              "channels": {
-        \\                "list": [
-        \\                  {
-        \\                    "int": 1
-        \\                  },
-        \\                  {
-        \\                    "int": 2
-        \\                  }
-        \\                ]
-        \\              }
-        \\            },
-        \\            "assign": "voltage"
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("adapters/psu0.yaml", vendor_psu_adapter);
+    try workspace.writeFile("recipes/bad_record.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: [voltage, nonexistent]
+        \\vars:
+        \\  voltage: 0
+        \\  nonexistent: 0
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
+        \\        args:
+        \\          voltage: "1.0"
+        \\          channels: [1, 2]
+        \\        assign: voltage
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/bad_record.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/bad_record.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -2079,75 +1831,31 @@ test "precompile accepts valid record subset" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
-    try workspace.writeFile("recipes/record_ok.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu0.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "explicit": [
-        \\        "voltage"
-        \\      ]
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "voltage": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    },
-        \\    "doubled": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set_voltage",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "1.0"
-        \\                }
-        \\              },
-        \\              "channels": {
-        \\                "list": [
-        \\                  {
-        \\                    "int": 1
-        \\                  },
-        \\                  {
-        \\                    "int": 2
-        \\                  }
-        \\                ]
-        \\              }
-        \\            },
-        \\            "assign": "voltage"
-        \\          }
-        \\        },
-        \\        {
-        \\          "compute": {
-        \\            "compute": "${voltage} * 2",
-        \\            "assign": "doubled"
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("adapters/psu0.yaml", vendor_psu_adapter);
+    try workspace.writeFile("recipes/record_ok.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: [voltage]
+        \\vars:
+        \\  voltage: 0
+        \\  doubled: 0
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
+        \\        args:
+        \\          voltage: "1.0"
+        \\          channels: [1, 2]
+        \\        assign: voltage
+        \\      - compute: "${voltage} * 2"
+        \\        assign: doubled
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/record_ok.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/record_ok.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -2171,46 +1879,23 @@ test "precompile diagnostic for missing pipeline" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
-    try workspace.writeFile("recipes/no_pipeline.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu0.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set_voltage",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "float": 1.0
-        \\                }
-        \\              },
-        \\              "channels": {
-        \\                "list": [
-        \\                  {
-        \\                    "int": 1
-        \\                  }
-        \\                ]
-        \\              }
-        \\            }
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("adapters/psu0.yaml", vendor_psu_adapter);
+    try workspace.writeFile("recipes/no_pipeline.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
+        \\        args:
+        \\          voltage: 1.0
+        \\          channels: [1]
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/no_pipeline.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/no_pipeline.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -2239,47 +1924,24 @@ test "precompile diagnostic for missing record" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
-    try workspace.writeFile("recipes/no_record.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu0.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {},
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set_voltage",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "float": 1.0
-        \\                }
-        \\              },
-        \\              "channels": {
-        \\                "list": [
-        \\                  {
-        \\                    "int": 1
-        \\                  }
-        \\                ]
-        \\              }
-        \\            }
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("adapters/psu0.yaml", vendor_psu_adapter);
+    try workspace.writeFile("recipes/no_record.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline: {}
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
+        \\        args:
+        \\          voltage: 1.0
+        \\          channels: [1]
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/no_record.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/no_record.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -2308,70 +1970,31 @@ test "precompile expands record all into explicit assign list" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu0.json", vendor_psu_adapter);
-    try workspace.writeFile("recipes/record_all.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu0.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "voltage": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    },
-        \\    "doubled": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set_voltage",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "int": 5
-        \\                }
-        \\              },
-        \\              "channels": {
-        \\                "list": [
-        \\                  {
-        \\                    "int": 1
-        \\                  }
-        \\                ]
-        \\              }
-        \\            },
-        \\            "assign": "voltage"
-        \\          }
-        \\        },
-        \\        {
-        \\          "compute": {
-        \\            "compute": "${voltage} * 2",
-        \\            "assign": "doubled"
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("adapters/psu0.yaml", vendor_psu_adapter);
+    try workspace.writeFile("recipes/record_all.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  voltage: 0
+        \\  doubled: 0
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
+        \\        args:
+        \\          voltage: 5
+        \\          channels: [1]
+        \\        assign: voltage
+        \\      - compute: "${voltage} * 2"
+        \\        assign: doubled
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/record_all.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/record_all.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -2397,61 +2020,32 @@ test "precompile rejects undeclared variable use" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu.json",
-        \\{
-        \\  "metadata": {},
-        \\  "commands": {
-        \\    "set": {
-        \\      "write": "V {voltage}"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("adapters/psu.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set:
+        \\    write: "V {voltage}"
     );
-    try workspace.writeFile("recipes/undeclared.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu.json",
-        \\      "resource": "R"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "voltage": {
-        \\      "scalar": {
-        \\        "int": 1
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "5"
-        \\                }
-        \\              }
-        \\            },
-        \\            "assign": "undeclared_var"
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/undeclared.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.yaml
+        \\    resource: R
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  voltage: 1
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args:
+        \\          voltage: "5"
+        \\        assign: undeclared_var
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/undeclared.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/undeclared.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -2467,39 +2061,21 @@ test "precompile rejects undeclared variable in expression" {
     defer workspace.deinit();
 
     try workspace.makePath("adapters");
-    try workspace.writeFile("recipes/undeclared_expr.json",
-        \\{
-        \\  "instruments": {},
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "v": {
-        \\      "scalar": {
-        \\        "int": 1
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "compute": {
-        \\            "compute": "${v} + ${x}",
-        \\            "assign": "v"
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/undeclared_expr.yaml",
+        \\instruments: {}
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  v: 1
+        \\tasks:
+        \\  - steps:
+        \\      - compute: "${v} + ${x}"
+        \\        assign: v
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/undeclared_expr.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/undeclared_expr.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -2515,39 +2091,21 @@ test "precompile rejects variable shadowing builtin" {
     defer workspace.deinit();
 
     try workspace.makePath("adapters");
-    try workspace.writeFile("recipes/shadow_builtin.json",
-        \\{
-        \\  "instruments": {},
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "$ITER": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "compute": {
-        \\            "compute": "1 + 1",
-        \\            "assign": "$ITER"
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/shadow_builtin.yaml",
+        \\instruments: {}
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  $ITER: 0
+        \\tasks:
+        \\  - steps:
+        \\      - compute: "1 + 1"
+        \\        assign: $ITER
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/shadow_builtin.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/shadow_builtin.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -2562,60 +2120,31 @@ test "precompile sequential task" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu.json",
-        \\{
-        \\  "metadata": {},
-        \\  "commands": {
-        \\    "set": {
-        \\      "write": "VOLT {voltage}"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("adapters/psu.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set:
+        \\    write: "VOLT {voltage}"
     );
-    try workspace.writeFile("recipes/sequential.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "voltage": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "5"
-        \\                }
-        \\              }
-        \\            }
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/sequential.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  voltage: 0
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args:
+        \\          voltage: "5"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/sequential.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/sequential.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -2635,63 +2164,32 @@ test "precompile loop task with while" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu.json",
-        \\{
-        \\  "metadata": {},
-        \\  "commands": {
-        \\    "set": {
-        \\      "write": "VOLT {voltage}"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("adapters/psu.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set:
+        \\    write: "VOLT {voltage}"
     );
-    try workspace.writeFile("recipes/loop_task.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "voltage": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "5"
-        \\                }
-        \\              }
-        \\            }
-        \\          }
-        \\        }
-        \\      ],
-        \\      "while": {
-        \\        "string": "$ITER < 10"
-        \\      }
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/loop_task.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  voltage: 0
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args:
+        \\          voltage: "5"
+        \\    while: "$ITER < 10"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/loop_task.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/loop_task.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -2711,63 +2209,32 @@ test "precompile conditional task with if" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu.json",
-        \\{
-        \\  "metadata": {},
-        \\  "commands": {
-        \\    "set": {
-        \\      "write": "VOLT {voltage}"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("adapters/psu.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set:
+        \\    write: "VOLT {voltage}"
     );
-    try workspace.writeFile("recipes/conditional_task.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "voltage": {
-        \\      "scalar": {
-        \\        "int": 5
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "5"
-        \\                }
-        \\              }
-        \\            }
-        \\          }
-        \\        }
-        \\      ],
-        \\      "if": {
-        \\        "string": "${voltage} > 0"
-        \\      }
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/conditional_task.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  voltage: 5
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args:
+        \\          voltage: "5"
+        \\    if: "${voltage} > 0"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/conditional_task.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/conditional_task.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -2788,44 +2255,22 @@ test "precompile sleep step" {
     defer workspace.deinit();
 
     try workspace.makePath("adapters");
-    try workspace.writeFile("recipes/sleep_step.json",
-        \\{
-        \\  "instruments": {},
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "v": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "compute": {
-        \\            "compute": "1 + 2",
-        \\            "assign": "v"
-        \\          }
-        \\        },
-        \\        {
-        \\          "sleep_ms": {
-        \\            "sleep_ms": 100
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/sleep_step.yaml",
+        \\instruments: {}
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  v: 0
+        \\tasks:
+        \\  - steps:
+        \\      - compute: "1 + 2"
+        \\        assign: v
+        \\      - sleep_ms: 100
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/sleep_step.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/sleep_step.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -2848,67 +2293,34 @@ test "precompile recipe with list variable" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu.json",
-        \\{
-        \\  "metadata": {},
-        \\  "commands": {
-        \\    "set": {
-        \\      "write": "VOLT {voltage}"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("adapters/psu.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set:
+        \\    write: "VOLT {voltage}"
     );
-    try workspace.writeFile("recipes/list_vars.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "idx": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    },
-        \\    "voltages": {
-        \\      "list": [
-        \\        {
-        \\          "float": 1.5
-        \\        },
-        \\        {
-        \\          "float": 3.0
-        \\        },
-        \\        {
-        \\          "float": 4.5
-        \\        }
-        \\      ]
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "compute": {
-        \\            "compute": "${voltages}[${idx}]",
-        \\            "assign": "idx"
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/list_vars.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  idx: 0
+        \\  voltages:
+        \\    - 1.5
+        \\    - 3.0
+        \\    - 4.5
+        \\tasks:
+        \\  - steps:
+        \\      - compute: "${voltages}[${idx}]"
+        \\        assign: idx
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/list_vars.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/list_vars.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -2954,73 +2366,35 @@ test "precompile const-folds join() in step args" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu.json",
-        \\{
-        \\  "metadata": {},
-        \\  "commands": {
-        \\    "set_voltage": {
-        \\      "write": "VOLT {voltage},(@{channels})"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("adapters/psu.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set_voltage:
+        \\    write: "VOLT {voltage},(@{channels})"
     );
-    try workspace.writeFile("recipes/const_join.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "consts": {
-        \\    "channels": {
-        \\      "list": [
-        \\        {
-        \\          "int": 1
-        \\        },
-        \\        {
-        \\          "int": 2
-        \\        },
-        \\        {
-        \\          "int": 3
-        \\        }
-        \\      ]
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set_voltage",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "5.0"
-        \\                }
-        \\              },
-        \\              "channels": {
-        \\                "scalar": {
-        \\                  "string": "join(${channels}, \",\")"
-        \\                }
-        \\              }
-        \\            }
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/const_join.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\consts:
+        \\  channels:
+        \\    - 1
+        \\    - 2
+        \\    - 3
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
+        \\        args:
+        \\          voltage: "5.0"
+        \\          channels: 'join(${channels}, ",")'
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/const_join.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/const_join.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -3050,60 +2424,31 @@ test "precompile const scalar expression folding" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu.json",
-        \\{
-        \\  "metadata": {},
-        \\  "commands": {
-        \\    "set": {
-        \\      "write": "V {voltage}"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("adapters/psu.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set:
+        \\    write: "V {voltage}"
     );
-    try workspace.writeFile("recipes/const_arith.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "consts": {
-        \\    "base_v": {
-        \\      "scalar": {
-        \\        "float": 3.0
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "${base_v} * 2"
-        \\                }
-        \\              }
-        \\            }
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/const_arith.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\consts:
+        \\  base_v: 3.0
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args:
+        \\          voltage: "${base_v} * 2"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/const_arith.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/const_arith.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -3132,69 +2477,35 @@ test "precompile rejects assign to const" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu.json",
-        \\{
-        \\  "metadata": {},
-        \\  "commands": {
-        \\    "set": {
-        \\      "write": "V {voltage}",
-        \\      "response": "float"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("adapters/psu.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set:
+        \\    write: "V {voltage}"
+        \\    response: float
     );
-    try workspace.writeFile("recipes/assign_const.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "consts": {
-        \\    "fixed": {
-        \\      "scalar": {
-        \\        "float": 5.0
-        \\      }
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "result": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "1.0"
-        \\                }
-        \\              }
-        \\            },
-        \\            "assign": "fixed"
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/assign_const.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\consts:
+        \\  fixed: 5.0
+        \\vars:
+        \\  result: 0
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args:
+        \\          voltage: "1.0"
+        \\        assign: fixed
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/assign_const.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/assign_const.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -3210,35 +2521,20 @@ test "precompile rejects duplicate const and var names" {
     defer workspace.deinit();
 
     try workspace.makePath("adapters");
-    try workspace.writeFile("recipes/dup.json",
-        \\{
-        \\  "instruments": {},
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "consts": {
-        \\    "x": {
-        \\      "scalar": {
-        \\        "int": 1
-        \\      }
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "x": {
-        \\      "scalar": {
-        \\        "int": 0
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": []
-        \\}
+    try workspace.writeFile("recipes/dup.yaml",
+        \\instruments: {}
+        \\pipeline:
+        \\  record: all
+        \\consts:
+        \\  x: 1
+        \\vars:
+        \\  x: 0
+        \\tasks: []
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/dup.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/dup.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
@@ -3253,60 +2549,31 @@ test "precompile does not fold expressions referencing runtime vars" {
     var workspace: testing.TestWorkspace = .init(gpa);
     defer workspace.deinit();
 
-    try workspace.writeFile("adapters/psu.json",
-        \\{
-        \\  "metadata": {},
-        \\  "commands": {
-        \\    "set": {
-        \\      "write": "V {voltage}"
-        \\    }
-        \\  }
-        \\}
+    try workspace.writeFile("adapters/psu.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set:
+        \\    write: "V {voltage}"
     );
-    try workspace.writeFile("recipes/no_fold.json",
-        \\{
-        \\  "instruments": {
-        \\    "d1": {
-        \\      "adapter": "psu.json",
-        \\      "resource": "USB0::1::INSTR"
-        \\    }
-        \\  },
-        \\  "pipeline": {
-        \\    "record": {
-        \\      "all": "all"
-        \\    }
-        \\  },
-        \\  "vars": {
-        \\    "v": {
-        \\      "scalar": {
-        \\        "float": 1.0
-        \\      }
-        \\    }
-        \\  },
-        \\  "tasks": [
-        \\    {
-        \\      "steps": [
-        \\        {
-        \\          "call": {
-        \\            "call": "d1.set",
-        \\            "args": {
-        \\              "voltage": {
-        \\                "scalar": {
-        \\                  "string": "${v} * 2"
-        \\                }
-        \\              }
-        \\            }
-        \\          }
-        \\        }
-        \\      ]
-        \\    }
-        \\  ]
-        \\}
+    try workspace.writeFile("recipes/no_fold.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  v: 1.0
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args:
+        \\          voltage: "${v} * 2"
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
-    const recipe_path = try workspace.realpathAlloc("recipes/no_fold.json");
+    const recipe_path = try workspace.realpathAlloc("recipes/no_fold.yaml");
     defer gpa.free(recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});

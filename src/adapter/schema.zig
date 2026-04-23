@@ -1,4 +1,5 @@
 const std = @import("std");
+const serde_lib = @import("serde");
 const template = @import("template.zig");
 const instrument = @import("../instrument.zig");
 
@@ -47,12 +48,16 @@ pub const InstrumentSpec = struct {
 };
 
 /// Argument type specification declared in adapter command `args`.
-/// Deserialized directly from JSON; interpretation deferred to precompile.
+/// Deserialized directly from YAML/TOML; interpretation deferred to precompile.
 pub const ArgSpec = union(enum) {
     /// Short form: `"bool"` or `"list"`.
     string: []const u8,
-    /// Full form: `{"type": "bool", "true": "1", "false": "0"}`.
+    /// Full form: `{type: bool, true: "1", false: "0"}`.
     object: ArgSpecObject,
+
+    pub const serde = .{
+        .tag = serde_lib.UnionTag.untagged,
+    };
 };
 
 /// Object form of an argument type specification.
@@ -73,7 +78,7 @@ pub const Command = struct {
     /// Pre-parsed write template ready for precompilation.
     template: []const template.Segment,
     /// Optional argument type specifications from the adapter document.
-    args: ?std.json.ArrayHashMap(ArgSpec) = null,
+    args: ?std.StringHashMap(ArgSpec) = null,
 
     /// Parses a command from a write template and optional read encoding spec.
     pub fn parse(

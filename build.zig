@@ -14,6 +14,12 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
     operor_mod.addIncludePath(b.path("include/"));
+    const serde_dep = b.dependency("serde", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    operor_mod.addImport("serde", serde_dep.module("serde"));
 
     const semver = std.SemanticVersion.parse(pkg.version) catch unreachable;
 

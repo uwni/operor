@@ -290,7 +290,11 @@ fn processReadResult(
     const read_data = st.read_accum.items;
     const slot = ic.save_slot orelse return;
     const encoding = ic.command.response orelse return;
-    const stored = try step_mod.parseResponse(encoding, read_data);
+    const stored = try step_mod.parseResponse(
+        encoding,
+        read_data,
+        ic.command.instrument.bool_map,
+    );
     const value: session.Value = switch (stored) {
         .raw => |v| .{ .string = v },
         .string => |v| .{ .string = v },

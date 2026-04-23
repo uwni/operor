@@ -1,4 +1,5 @@
 const std = @import("std");
+const serde_lib = @import("serde");
 const doc_parse = @import("../doc_parse.zig");
 const recipe_ir = @import("compiled.zig");
 
@@ -12,6 +13,10 @@ pub const ArgScalarDoc = union(enum) {
     float: f64,
     /// Boolean literal formatted as `true` or `false`.
     bool: bool,
+
+    pub const serde = .{
+        .tag = serde_lib.UnionTag.untagged,
+    };
 };
 
 /// Recipe argument document value that may be a scalar or a list of scalars.
@@ -20,6 +25,10 @@ pub const ArgValueDoc = union(enum) {
     scalar: ArgScalarDoc,
     /// Ordered list argument value.
     list: []const ArgScalarDoc,
+
+    pub const serde = .{
+        .tag = serde_lib.UnionTag.untagged,
+    };
 };
 
 /// Parsed instrument object straight from the recipe document.
@@ -34,6 +43,10 @@ pub const InstrumentConfig = struct {
 pub const BooleanExpr = union(enum) {
     string: []const u8,
     bool: bool,
+
+    pub const serde = .{
+        .tag = serde_lib.UnionTag.untagged,
+    };
 
     /// Returns the expression string, or a fixed literal for booleans.
     pub fn source(self: BooleanExpr) []const u8 {
@@ -54,13 +67,17 @@ pub const StepConfig = union(enum) {
     compute: ComputeStepConfig,
     sleep_ms: SleepStepConfig,
     parallel: ParallelStepConfig,
+
+    pub const serde = .{
+        .tag = serde_lib.UnionTag.untagged,
+    };
 };
 
 pub const CallStepConfig = struct {
     /// Qualified command reference in `instrument.command` format.
     call: []const u8,
     /// Arguments forwarded to the adapter command template.
-    args: ?std.json.ArrayHashMap(ArgValueDoc) = null,
+    args: ?std.StringHashMap(ArgValueDoc) = null,
     /// Context key that receives the step result (response or computed value).
     assign: ?[]const u8 = null,
     /// Guard expression; step is skipped when the result is falsy (0.0).
@@ -107,38 +124,37 @@ pub const PipelineConfig = recipe_ir.PipelineConfig;
 
 /// Parsed top-level recipe document.
 pub const RecipeConfig = struct {
-    instruments: std.json.ArrayHashMap(InstrumentConfig),
+    instruments: std.array_hash_map.String(InstrumentConfig),
     tasks: []TaskConfig,
     pipeline: ?PipelineConfig = null,
     stop_when: ?BooleanExpr = null,
-    consts: ?std.json.ArrayHashMap(ArgValueDoc) = null,
-    vars: ?std.json.ArrayHashMap(ArgValueDoc) = null,
+    consts: ?std.array_hash_map.String(ArgValueDoc) = null,
+    vars: ?std.array_hash_map.String(ArgValueDoc) = null,
     expected_iterations: ?u64 = null,
     float_precision: ?u8 = null,
 };
 
 test "parse recipe arg object values" {
     const Parsed = struct {
-        args: std.json.ArrayHashMap(ArgValueDoc),
+        args: std.StringHashMap(ArgValueDoc),
     };
 
     const gpa = std.testing.allocator;
-    const content =
-        \\{
-        \\  "args": {
-        \\    "voltage": {"scalar": {"string": "5"}},
-        \\    "channels": {"list": [{"int": 1}, {"int": 2}]},
-        \\    "enabled": {"scalar": {"bool": true}}
-        \\  }
-        \\}
-    ;
-
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
-    const parsed = try doc_parse.parseFromSlice(Parsed, arena.allocator(), content);
+    const content =
+        \\args:
+        \\  voltage: "5"
+        \\  channels:
+        \\    - 1
+        \\    - 2
+        \\  enabled: true
+    ;
 
-    const voltage = parsed.args.map.get("voltage") orelse return error.TestUnexpectedResult;
+    const parsed = try doc_parse.parseByFormat(Parsed, .yaml, arena.allocator(), content);
+
+    const voltage = parsed.args.get("voltage") orelse return error.TestUnexpectedResult;
     switch (voltage) {
         .scalar => |scalar| switch (scalar) {
             .string => |value| try std.testing.expectEqualStrings("5", value),
@@ -147,7 +163,7 @@ test "parse recipe arg object values" {
         .list => return error.TestUnexpectedResult,
     }
 
-    const channels = parsed.args.map.get("channels") orelse return error.TestUnexpectedResult;
+    const channels = parsed.args.get("channels") orelse return error.TestUnexpectedResult;
     switch (channels) {
         .scalar => return error.TestUnexpectedResult,
         .list => |items| {
@@ -163,7 +179,7 @@ test "parse recipe arg object values" {
         },
     }
 
-    const enabled = parsed.args.map.get("enabled") orelse return error.TestUnexpectedResult;
+    const enabled = parsed.args.get("enabled") orelse return error.TestUnexpectedResult;
     switch (enabled) {
         .scalar => |scalar| switch (scalar) {
             .bool => |value| try std.testing.expect(value),
