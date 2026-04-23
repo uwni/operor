@@ -10,7 +10,7 @@ const step = @import("step.zig");
 pub const ExecOptions = session.ExecOptions;
 
 /// Executes a recipe against its referenced instruments.
-pub fn execute(allocator: @import("std").mem.Allocator, opts: ExecOptions) !void {
+pub fn execute(allocator: std.mem.Allocator, opts: ExecOptions) !void {
     try execute_mod.execute(allocator, opts);
 }
 

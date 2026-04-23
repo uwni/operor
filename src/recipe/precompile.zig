@@ -699,76 +699,84 @@ fn compileCommand(
     instrument: *const recipe_ir.PrecompiledInstrument,
     adapter_bool_format: ?adapter_schema.BoolFormat,
 ) !recipe_ir.PrecompiledCommand {
-    var arg_names = std.ArrayList([]const u8).empty;
-    const segments = try compileSegments(allocator, source.template, &arg_names);
-    const owned_arg_names = try arg_names.toOwnedSlice(allocator);
-    const arg_formats = try compileArgFormats(allocator, source.args, owned_arg_names, adapter_bool_format);
+    var arg_entries: std.ArrayList(ArgBuildEntry) = .empty;
+    const segments = try compileSegments(allocator, source.template, &arg_entries, false);
+
+    const args = try allocator.alloc(recipe_ir.CommandArg, arg_entries.items.len);
+    for (arg_entries.items, 0..) |entry, idx| {
+        args[idx] = .{
+            .name = entry.name,
+            .is_optional = !entry.required,
+            .default = try compileArgDefault(allocator, source.args, entry.name),
+            .format = try compileArgFormat(allocator, source.args, entry.name, adapter_bool_format),
+        };
+    }
+    arg_entries.deinit(allocator);
 
     return .{
         .instrument = instrument,
         .response = source.response,
         .segments = segments,
-        .arg_names = owned_arg_names,
-        .arg_formats = arg_formats,
+        .args = args,
     };
 }
 
-fn compileArgFormats(
+const ArgBuildEntry = struct {
+    name: []const u8,
+    required: bool,
+};
+
+fn compileArgFormat(
     allocator: std.mem.Allocator,
     source_args: ?std.StringHashMap(adapter_schema.ArgSpec),
-    arg_names: []const []const u8,
+    arg_name: []const u8,
     adapter_bool_format: ?adapter_schema.BoolFormat,
-) ![]const recipe_ir.ArgFormat {
-    const formats = try allocator.alloc(recipe_ir.ArgFormat, arg_names.len);
+) !recipe_ir.ArgFormat {
+    var format: recipe_ir.ArgFormat = .{};
 
-    for (arg_names, 0..) |arg_name, idx| {
-        var format: recipe_ir.ArgFormat = .{};
-
-        if (adapter_bool_format) |bf| {
-            format.bool_map = .{
-                .true_text = try allocator.dupe(u8, bf.true),
-                .false_text = try allocator.dupe(u8, bf.false),
-            };
-        }
-
-        if (source_args) |args_map| {
-            if (args_map.get(arg_name)) |spec| {
-                switch (spec) {
-                    .string => {},
-                    .object => |obj| {
-                        if (std.mem.eql(u8, obj.type, "bool")) {
-                            if ((obj.true == null) != (obj.false == null)) {
-                                return error.PartialBoolMap;
-                            }
-                            if (obj.true) |t| {
-                                if (format.bool_map) |old| {
-                                    allocator.free(old.true_text);
-                                    allocator.free(old.false_text);
-                                }
-                                format.bool_map = .{
-                                    .true_text = try allocator.dupe(u8, t),
-                                    .false_text = try allocator.dupe(u8, obj.false.?),
-                                };
-                            }
-                        }
-                        if (obj.separator) |sep| {
-                            format.list_separator = try allocator.dupe(u8, sep);
-                        }
-                    },
-                }
-            }
-        }
-
-        formats[idx] = format;
+    if (adapter_bool_format) |bf| {
+        format.bool_map = .{
+            .true_text = try allocator.dupe(u8, bf.true),
+            .false_text = try allocator.dupe(u8, bf.false),
+        };
     }
 
-    return formats;
+    if (source_args) |args_map| {
+        if (args_map.get(arg_name)) |spec| {
+            switch (spec) {
+                .string => {},
+                .object => |obj| {
+                    if (std.mem.eql(u8, obj.type, "bool")) {
+                        if ((obj.true == null) != (obj.false == null)) {
+                            return error.PartialBoolMap;
+                        }
+                        if (obj.true) |t| {
+                            if (format.bool_map) |old| {
+                                allocator.free(old.true_text);
+                                allocator.free(old.false_text);
+                            }
+                            format.bool_map = .{
+                                .true_text = try allocator.dupe(u8, t),
+                                .false_text = try allocator.dupe(u8, obj.false.?),
+                            };
+                        }
+                    }
+                    if (obj.separator) |sep| {
+                        format.list_separator = try allocator.dupe(u8, sep);
+                    }
+                },
+            }
+        }
+    }
+
+    return format;
 }
 
 fn compileSegments(
     allocator: std.mem.Allocator,
     template_segments: []const template.Segment,
-    arg_names: *std.ArrayList([]const u8),
+    arg_entries: *std.ArrayList(ArgBuildEntry),
+    in_optional: bool,
 ) ![]const recipe_ir.CompiledSegment {
     const segments = try allocator.alloc(recipe_ir.CompiledSegment, template_segments.len);
 
@@ -776,12 +784,18 @@ fn compileSegments(
         segments[idx] = switch (segment) {
             .literal => |literal| .{ .literal = try allocator.dupe(u8, literal) },
             .placeholder => |name| .{ .arg = blk: {
-                if (findArgIndex(arg_names.items, name)) |arg_idx| break :blk arg_idx;
+                if (findArgEntryIndex(arg_entries.items, name)) |arg_idx| {
+                    if (!in_optional) arg_entries.items[arg_idx].required = true;
+                    break :blk arg_idx;
+                }
                 const name_copy = try allocator.dupe(u8, name);
-                try arg_names.append(allocator, name_copy);
-                break :blk arg_names.items.len - 1;
+                try arg_entries.append(allocator, .{
+                    .name = name_copy,
+                    .required = !in_optional,
+                });
+                break :blk arg_entries.items.len - 1;
             } },
-            .optional => |inner| .{ .optional = try compileSegments(allocator, inner, arg_names) },
+            .optional => |inner| .{ .optional = try compileSegments(allocator, inner, arg_entries, true) },
         };
     }
 
@@ -795,19 +809,27 @@ fn compileStepArgs(
     slot_map: *const SlotMap,
     diag: *diagnostic.PrecompileDiagnostic,
 ) ![]recipe_ir.StepArg {
-    const args = try allocator.alloc(recipe_ir.StepArg, command.arg_names.len);
+    const args = try allocator.alloc(recipe_ir.StepArg, command.args.len);
 
-    for (command.arg_names, 0..) |arg_name, idx| {
-        const doc_arg = if (doc_args) |wrapper|
-            wrapper.get(arg_name) orelse {
-                diag.argument_name = arg_name;
-                return error.MissingCommandArgument;
+    for (command.args, 0..) |arg, idx| {
+        if (doc_args) |wrapper| {
+            if (wrapper.get(arg.name)) |doc_arg| {
+                args[idx] = try compileArg(allocator, doc_arg, slot_map);
+                continue;
             }
-        else {
-            diag.argument_name = arg_name;
-            return error.MissingCommandArgument;
-        };
-        args[idx] = try compileArg(allocator, doc_arg, slot_map);
+        }
+
+        if (arg.default) |default_arg| {
+            args[idx] = default_arg;
+            continue;
+        }
+        if (arg.is_optional) {
+            args[idx] = try makeEmptyStringArg(allocator);
+            continue;
+        }
+
+        diag.argument_name = arg.name;
+        return error.MissingCommandArgument;
     }
 
     if (doc_args) |wrapper| {
@@ -898,6 +920,54 @@ fn compileArg(
     };
 }
 
+fn compileArgDefault(
+    allocator: std.mem.Allocator,
+    source_args: ?std.StringHashMap(adapter_schema.ArgSpec),
+    arg_name: []const u8,
+) !?recipe_ir.StepArg {
+    const args_map = source_args orelse return null;
+    const spec = args_map.get(arg_name) orelse return null;
+    return switch (spec) {
+        .string => null,
+        .object => |obj| if (obj.default) |default_value|
+            try compileAdapterDefaultArg(allocator, default_value)
+        else
+            null,
+    };
+}
+
+fn compileAdapterDefaultArg(
+    allocator: std.mem.Allocator,
+    value: adapter_schema.ArgDefault,
+) !recipe_ir.StepArg {
+    return switch (value) {
+        .scalar => |scalar| .{ .scalar = try compileAdapterDefaultScalar(allocator, scalar) },
+        .list => |items| blk: {
+            const out = try allocator.alloc(expr.Expression, items.len);
+            for (items, 0..) |item, idx| {
+                out[idx] = try compileAdapterDefaultScalar(allocator, item);
+            }
+            break :blk .{ .list = out };
+        },
+    };
+}
+
+fn compileAdapterDefaultScalar(
+    allocator: std.mem.Allocator,
+    value: adapter_schema.ArgDefaultScalar,
+) !expr.Expression {
+    return switch (value) {
+        .string => |text| makeLiteralExpr(allocator, .{ .push_string = try allocator.dupe(u8, text) }),
+        .int => |n| makeLiteralExpr(allocator, .{ .push_int = n }),
+        .float => |n| makeLiteralExpr(allocator, .{ .push_float = n }),
+        .bool => |b| makeLiteralExpr(allocator, .{ .push_bool = b }),
+    };
+}
+
+fn makeEmptyStringArg(allocator: std.mem.Allocator) !recipe_ir.StepArg {
+    return .{ .scalar = try makeLiteralExpr(allocator, .{ .push_string = try allocator.dupe(u8, "") }) };
+}
+
 fn compileArgScalar(
     allocator: std.mem.Allocator,
     value: config.ArgScalarDoc,
@@ -922,9 +992,9 @@ fn makeLiteralExpr(allocator: std.mem.Allocator, op: expr.Op) !expr.Expression {
     return .{ .ops = ops };
 }
 
-fn findArgIndex(arg_names: []const []const u8, name: []const u8) ?usize {
-    for (arg_names, 0..) |arg_name, idx| {
-        if (std.mem.eql(u8, arg_name, name)) return idx;
+fn findArgEntryIndex(arg_entries: []const ArgBuildEntry, name: []const u8) ?usize {
+    for (arg_entries, 0..) |arg_entry, idx| {
+        if (std.mem.eql(u8, arg_entry.name, name)) return idx;
     }
     return null;
 }
@@ -976,8 +1046,8 @@ test "load recipe and adapters" {
     const command = instrument.commands.get("set") orelse return error.TestUnexpectedResult;
     try std.testing.expect(command.instrument == instrument);
     try std.testing.expect(command.response == null);
-    try std.testing.expectEqual(@as(usize, 1), command.arg_names.len);
-    try std.testing.expect(std.mem.eql(u8, command.arg_names[0], "voltage"));
+    try std.testing.expectEqual(@as(usize, 1), command.args.len);
+    try std.testing.expect(std.mem.eql(u8, command.args[0].name, "voltage"));
 
     try std.testing.expectEqual(@as(usize, 1), compiled.tasks.len);
     const task0_steps = compiled.tasks[0].steps();
@@ -1399,6 +1469,109 @@ test "precompile validates command arguments" {
     try std.testing.expectError(error.UnexpectedCommandArgument, precompilePath(gpa, std.testing.io, unexpected_argument_path, dir, null));
 }
 
+test "precompile allows omitted optional group arguments" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/psu0.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set_voltage:
+        \\    write: "VOLT {voltage}[,(@{channels})]"
+    );
+    try workspace.writeFile("recipes/r.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set_voltage
+        \\        args:
+        \\          voltage: 1.0
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/r.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
+    defer dir.close(std.testing.io);
+
+    var compiled = try precompilePath(gpa, std.testing.io, recipe_path, dir, null);
+    defer compiled.deinit();
+
+    const call = compiled.tasks[0].steps()[0].action.instrument_call;
+    const command = call.command;
+    const channels_idx = command.argIndex("channels") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(command.args[channels_idx].is_optional);
+
+    switch (call.args[channels_idx]) {
+        .scalar => |e| switch (e.ops[0]) {
+            .push_string => |s| try std.testing.expectEqualStrings("", s),
+            else => return error.TestUnexpectedResult,
+        },
+        .list => return error.TestUnexpectedResult,
+    }
+}
+
+test "precompile uses adapter argument defaults for omitted arguments" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/switch.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  select_channel:
+        \\    write: "INST {channel}"
+        \\    args:
+        \\      channel:
+        \\        type: string
+        \\        default: "1"
+    );
+    try workspace.writeFile("recipes/r.yaml",
+        \\instruments:
+        \\  sw:
+        \\    adapter: switch.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\tasks:
+        \\  - steps:
+        \\      - call: sw.select_channel
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/r.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
+    defer dir.close(std.testing.io);
+
+    var compiled = try precompilePath(gpa, std.testing.io, recipe_path, dir, null);
+    defer compiled.deinit();
+
+    const call = compiled.tasks[0].steps()[0].action.instrument_call;
+    const channel_idx = call.command.argIndex("channel") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!call.command.args[channel_idx].is_optional);
+
+    switch (call.args[channel_idx]) {
+        .scalar => |e| switch (e.ops[0]) {
+            .push_string => |s| try std.testing.expectEqualStrings("1", s),
+            else => return error.TestUnexpectedResult,
+        },
+        .list => return error.TestUnexpectedResult,
+    }
+}
+
 test "precompiled command renders via helper" {
     const gpa = std.testing.allocator;
     var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
@@ -1420,8 +1593,8 @@ test "precompiled command renders via helper" {
     defer compiled.deinit(gpa);
 
     try std.testing.expect(compiled.instrument == &instrument);
-    try std.testing.expectEqual(@as(usize, 1), compiled.arg_names.len);
-    try std.testing.expectEqualStrings("voltage", compiled.arg_names[0]);
+    try std.testing.expectEqual(@as(usize, 1), compiled.args.len);
+    try std.testing.expectEqualStrings("voltage", compiled.args[0].name);
 
     const args = [_]recipe_ir.RenderValue{
         .{ .scalar = .{ .float = 3.3 } },

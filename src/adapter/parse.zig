@@ -221,3 +221,32 @@ test "parse args object form" {
         .string => return error.TestUnexpectedResult,
     }
 }
+
+test "parse args object default form" {
+    const gpa = std.testing.allocator;
+
+    var adapter = try parseTestYaml(gpa,
+        \\commands:
+        \\  select_channel:
+        \\    write: "INST {channel}"
+        \\    args:
+        \\      channel:
+        \\        type: string
+        \\        default: "1"
+    );
+    defer adapter.deinit();
+
+    const cmd = adapter.commands.get("select_channel") orelse return error.TestUnexpectedResult;
+    const args = cmd.args orelse return error.TestUnexpectedResult;
+    const spec = args.get("channel") orelse return error.TestUnexpectedResult;
+    switch (spec) {
+        .object => |obj| switch (obj.default.?) {
+            .scalar => |scalar| switch (scalar) {
+                .string => |s| try std.testing.expectEqualStrings("1", s),
+                else => return error.TestUnexpectedResult,
+            },
+            .list => return error.TestUnexpectedResult,
+        },
+        .string => return error.TestUnexpectedResult,
+    }
+}

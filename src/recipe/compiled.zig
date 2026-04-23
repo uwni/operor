@@ -112,6 +112,14 @@ pub const ArgFormat = struct {
     list_separator: ?[]const u8 = null,
 };
 
+/// Metadata for one unique placeholder in a precompiled command.
+pub const CommandArg = struct {
+    name: []const u8,
+    is_optional: bool,
+    default: ?StepArg = null,
+    format: ArgFormat = .{},
+};
+
 /// Executable command prepared during recipe precompilation.
 pub const PrecompiledCommand = struct {
     /// Precompiled instrument that owns this command.
@@ -120,10 +128,8 @@ pub const PrecompiledCommand = struct {
     response: ?instrument.Encoding,
     /// Allocator-owned compiled render segments used at execution time.
     segments: []const CompiledSegment,
-    /// Unique placeholder names in render order.
-    arg_names: []const []const u8,
-    /// Rendering format rules aligned to `arg_names`.
-    arg_formats: []const ArgFormat,
+    /// Placeholder metadata used for validation, defaults, and rendering.
+    args: []const CommandArg,
     /// Errors that can occur while rendering the precompiled template.
     pub const RenderError = error{
         MissingVariable,
@@ -133,16 +139,12 @@ pub const PrecompiledCommand = struct {
 
     /// Releases heap-owned template and placeholder data.
     pub fn deinit(self: PrecompiledCommand, allocator: std.mem.Allocator) void {
-        for (self.arg_names) |name| allocator.free(name);
-        allocator.free(self.arg_names);
-        for (self.arg_formats) |fmt| {
-            if (fmt.bool_map) |map| {
-                allocator.free(map.true_text);
-                allocator.free(map.false_text);
-            }
-            if (fmt.list_separator) |text| allocator.free(text);
+        for (self.args) |arg| {
+            allocator.free(arg.name);
+            if (arg.default) |default_arg| deinitStepArg(allocator, default_arg);
+            deinitArgFormat(allocator, arg.format);
         }
-        allocator.free(self.arg_formats);
+        allocator.free(self.args);
         freeCompiledSegments(allocator, self.segments);
     }
 
@@ -152,8 +154,8 @@ pub const PrecompiledCommand = struct {
     }
 
     pub fn argIndex(self: *const PrecompiledCommand, name: []const u8) ?usize {
-        for (self.arg_names, 0..) |arg_name, idx| {
-            if (std.mem.eql(u8, arg_name, name)) return idx;
+        for (self.args, 0..) |arg, idx| {
+            if (std.mem.eql(u8, arg.name, name)) return idx;
         }
         return null;
     }
@@ -170,9 +172,9 @@ pub const PrecompiledCommand = struct {
         if (stack_buffer.len >= suffix.len) {
             const render_buffer = stack_buffer[0 .. stack_buffer.len - suffix.len];
             var w: std.Io.Writer = .fixed(render_buffer);
-            renderInternal(&w, self.segments, args, self.arg_formats, float_precision) catch |err| switch (err) {
+            renderInternal(&w, self.segments, args, self.args, float_precision) catch |err| switch (err) {
                 error.WriteFailed => {
-                    const owned = try renderAllocWithSuffix(allocator, self.segments, args, self.arg_formats, suffix, float_precision);
+                    const owned = try renderAllocWithSuffix(allocator, self.segments, args, self.args, suffix, float_precision);
                     return .{ .bytes = owned, .owned = owned };
                 },
                 else => unreachable,
@@ -184,7 +186,7 @@ pub const PrecompiledCommand = struct {
             return .{ .bytes = stack_buffer[0..combined_len] };
         }
 
-        const owned = try renderAllocWithSuffix(allocator, self.segments, args, self.arg_formats, suffix, float_precision);
+        const owned = try renderAllocWithSuffix(allocator, self.segments, args, self.args, suffix, float_precision);
         return .{ .bytes = owned, .owned = owned };
     }
 };
@@ -233,7 +235,7 @@ pub const Step = struct {
         instrument_idx: usize,
         /// Precompiled command resolved during recipe precompile.
         command: *const PrecompiledCommand,
-        /// Compiled arguments aligned to `command.arg_names`.
+        /// Compiled argument values aligned to `command.args`.
         args: []const StepArg,
         /// Optional slot that receives the parsed response value.
         save_slot: ?usize = null,
@@ -404,11 +406,19 @@ fn writeValueWithFormat(writer: anytype, value: Value, fmt: ArgFormat, float_pre
     }
 }
 
+fn deinitArgFormat(allocator: std.mem.Allocator, fmt: ArgFormat) void {
+    if (fmt.bool_map) |map| {
+        allocator.free(map.true_text);
+        allocator.free(map.false_text);
+    }
+    if (fmt.list_separator) |text| allocator.free(text);
+}
+
 fn renderInternal(
     writer: anytype,
     segments: []const CompiledSegment,
     args: []const RenderValue,
-    arg_formats: []const ArgFormat,
+    arg_meta: []const CommandArg,
     float_precision: ?u8,
 ) !void {
     for (segments) |segment| {
@@ -416,7 +426,7 @@ fn renderInternal(
             .literal => |literal| try writer.writeAll(literal),
             .arg => |arg_idx| {
                 const rv = args[arg_idx];
-                const fmt = arg_formats[arg_idx];
+                const fmt = arg_meta[arg_idx].format;
                 switch (rv) {
                     .scalar => |value| try writeValueWithFormat(writer, value, fmt, float_precision),
                     .list => |items| {
@@ -433,10 +443,28 @@ fn renderInternal(
                     if (s == .arg and args[s.arg].isEmpty()) continue;
                     if (s == .arg) break true;
                 } else false;
-                if (has_value) try renderInternal(writer, inner, args, arg_formats, float_precision);
+                if (has_value) try renderInternal(writer, inner, args, arg_meta, float_precision);
             },
         }
     }
+}
+
+fn deinitStepArg(allocator: std.mem.Allocator, arg: StepArg) void {
+    switch (arg) {
+        .scalar => |expr_value| deinitExpressionDeep(allocator, expr_value),
+        .list => |items| {
+            for (items) |expr_value| deinitExpressionDeep(allocator, expr_value);
+            allocator.free(items);
+        },
+    }
+}
+
+fn deinitExpressionDeep(allocator: std.mem.Allocator, expr_value: expr.Expression) void {
+    for (expr_value.ops) |op| switch (op) {
+        .push_string => |s| allocator.free(s),
+        else => {},
+    };
+    allocator.free(expr_value.ops);
 }
 
 fn freeCompiledSegments(allocator: std.mem.Allocator, segments: []const CompiledSegment) void {
@@ -452,14 +480,14 @@ fn renderAllocWithSuffix(
     allocator: std.mem.Allocator,
     segments: []const CompiledSegment,
     args: []const RenderValue,
-    arg_formats: []const ArgFormat,
+    arg_meta: []const CommandArg,
     suffix: []const u8,
     float_precision: ?u8,
 ) PrecompiledCommand.RenderError![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
 
-    renderInternal(&out.writer, segments, args, arg_formats, float_precision) catch |err| switch (err) {
+    renderInternal(&out.writer, segments, args, arg_meta, float_precision) catch |err| switch (err) {
         error.WriteFailed => return error.OutOfMemory,
     };
 

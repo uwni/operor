@@ -13,15 +13,15 @@ pub const executor = @import("executor/root.zig");
 pub const recipe = @import("recipe/root.zig");
 /// Low-level VISA integration layer.
 pub const visa = @import("visa/root.zig");
+const repl_mod = @import("repl.zig");
 
 /// Execution options re-exported from the executor module.
 pub const ExecOptions = executor.ExecOptions;
 /// Resource listing result re-exported from the VISA layer.
 pub const ResourceList = visa.ResourceList;
-const repl_api = @import("repl.zig");
 
 /// Recommended stdin buffer size for the interactive REPL.
-pub const repl_stdin_buffer_bytes = repl_api.stdin_buffer_bytes;
+pub const repl_stdin_buffer_bytes = repl_mod.stdin_buffer_bytes;
 
 /// Executes a recipe against its referenced instruments.
 pub fn execute(allocator: std.mem.Allocator, opts: ExecOptions) !void {
@@ -48,7 +48,7 @@ pub fn repl(
     reader: *std.Io.Reader,
     out: *std.Io.Writer,
 ) !void {
-    try repl_api.run(allocator, io, resource_addr, visa_lib, reader, out);
+    try repl_mod.run(allocator, io, resource_addr, visa_lib, reader, out);
 }
 
 /// Precompiles and prints a human-readable preview of a recipe without opening VISA sessions.

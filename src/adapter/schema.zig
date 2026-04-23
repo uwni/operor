@@ -60,12 +60,36 @@ pub const ArgSpec = union(enum) {
     };
 };
 
+/// Literal default value for an adapter command argument.
+/// Mirrors recipe argument values but lives in the adapter schema to avoid
+/// coupling adapter parsing to recipe parsing.
+pub const ArgDefaultScalar = union(enum) {
+    string: []const u8,
+    int: i64,
+    float: f64,
+    bool: bool,
+
+    pub const serde = .{
+        .tag = serde_lib.UnionTag.untagged,
+    };
+};
+
+pub const ArgDefault = union(enum) {
+    scalar: ArgDefaultScalar,
+    list: []const ArgDefaultScalar,
+
+    pub const serde = .{
+        .tag = serde_lib.UnionTag.untagged,
+    };
+};
+
 /// Object form of an argument type specification.
 pub const ArgSpecObject = struct {
     type: []const u8,
     true: ?[]const u8 = null,
     false: ?[]const u8 = null,
     separator: ?[]const u8 = null,
+    default: ?ArgDefault = null,
 };
 
 /// Parsed command entry from a adapter document.
