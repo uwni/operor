@@ -73,7 +73,7 @@ test "main parses run command" {
         "run",
         "--adapter-dir",
         "adapters",
-        "recipes/r1.json",
+        "recipes/r1.yaml",
         "--preview",
     } };
 
@@ -93,7 +93,7 @@ test "main parses run command" {
 
     try std.testing.expectEqual(@as(usize, 0), run.args.help);
     try std.testing.expectEqualStrings("adapters", run.args.@"adapter-dir".?);
-    try std.testing.expectEqualStrings("recipes/r1.json", run.positionals[0].?);
+    try std.testing.expectEqualStrings("recipes/r1.yaml", run.positionals[0].?);
     try std.testing.expect(run.args.preview != 0);
     try std.testing.expect(run.args.@"dry-run" == 0);
 }

@@ -1,0 +1,11 @@
+metadata:
+  version: "1.2.3"
+  description: bench supply
+commands:
+  set:
+    write: "VOLT {voltage}"
+  set_voltage:
+    write: "VOLT {voltage},(@{channels})"
+  measure_voltage:
+    write: "MEAS:VOLT?"
+    read: float

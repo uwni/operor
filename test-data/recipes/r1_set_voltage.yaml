@@ -1,0 +1,12 @@
+instruments:
+  d1:
+    adapter: psu.yaml
+    resource: "USB0::1::INSTR"
+pipeline:
+  record: all
+tasks:
+  - steps:
+      - call: d1.set_voltage
+        args:
+          voltage: 5
+          channels: [1, 2]

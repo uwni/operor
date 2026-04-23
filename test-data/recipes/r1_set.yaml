@@ -1,0 +1,14 @@
+instruments:
+  d1:
+    adapter: psu.yaml
+    resource: "USB0::1::INSTR"
+pipeline:
+  record: all
+vars:
+  v: 0
+tasks:
+  - steps:
+      - call: d1.set
+        args:
+          voltage: "5"
+        assign: v

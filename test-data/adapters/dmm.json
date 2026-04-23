@@ -1,9 +1,0 @@
-{
-  "metadata": {},
-  "commands": {
-    "measure_voltage": {
-      "write": "MEAS:VOLT?",
-      "read": "float"
-    }
-  }
-}

@@ -1,0 +1,13 @@
+instruments:
+  d1:
+    adapter: psu.yaml
+    resource: "USB0::1::INSTR"
+pipeline:
+  record: all
+tasks:
+  - while: true
+    steps:
+      - call: d1.set
+        args:
+          voltage: "5"
+stop_when: "$ELAPSED_MS >= 2000 || $ITER >= 3"

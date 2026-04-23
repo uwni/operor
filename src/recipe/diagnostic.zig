@@ -75,7 +75,7 @@ pub const PrecompileDiagnostic = struct {
 
         switch (err) {
             error.FileNotFound => try writer.writeAll("file not found"),
-            error.SyntaxError => try writer.writeAll("invalid JSON syntax"),
+            error.SyntaxError => try writer.writeAll("invalid configuration syntax"),
             error.AdapterNotFound => try writer.writeAll("adapter not found"),
             error.InstrumentNotFound => try writer.writeAll("instrument not declared in recipe"),
             error.CommandNotFound => try writer.writeAll("command not found in adapter"),
