@@ -84,20 +84,32 @@ pub const RenderedCommand = struct {
     owned: ?[]u8 = null,
 
     /// Releases the owned render buffer when one was allocated.
-    pub fn deinit(self: RenderedCommand, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *RenderedCommand, allocator: std.mem.Allocator) void {
         if (self.owned) |buffer| allocator.free(buffer);
+        self.* = undefined;
     }
 };
 
 pub const CompiledSegment = union(enum) {
     literal: []const u8,
     arg: usize,
-    optional: []const CompiledSegment,
+    optional: []CompiledSegment,
 };
 
 pub const StepArg = union(enum) {
     scalar: expr.Expression,
-    list: []const expr.Expression,
+    list: []expr.Expression,
+
+    fn deinit(self: *StepArg, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .scalar => |*expr_value| expr_value.deinit(allocator),
+            .list => |items| {
+                for (items) |*expr_value| expr_value.deinit(allocator);
+                allocator.free(items);
+            },
+        }
+        self.* = undefined;
+    }
 };
 
 /// Optional text mapping for boolean values.
@@ -110,6 +122,15 @@ pub const BoolTextMap = struct {
 pub const ArgFormat = struct {
     bool_map: ?BoolTextMap = null,
     list_separator: ?[]const u8 = null,
+
+    pub fn deinit(self: *ArgFormat, allocator: std.mem.Allocator) void {
+        if (self.bool_map) |map| {
+            allocator.free(map.true_text);
+            allocator.free(map.false_text);
+        }
+        if (self.list_separator) |text| allocator.free(text);
+        self.* = undefined;
+    }
 };
 
 /// Metadata for one unique placeholder in a precompiled command.
@@ -127,9 +148,9 @@ pub const PrecompiledCommand = struct {
     /// Response encoding declared by the source adapter command.
     response: ?instrument.Encoding,
     /// Allocator-owned compiled render segments used at execution time.
-    segments: []const CompiledSegment,
+    segments: []CompiledSegment,
     /// Placeholder metadata used for validation, defaults, and rendering.
-    args: []const CommandArg,
+    args: []CommandArg,
     /// Errors that can occur while rendering the precompiled template.
     pub const RenderError = error{
         MissingVariable,
@@ -138,14 +159,15 @@ pub const PrecompiledCommand = struct {
     };
 
     /// Releases heap-owned template and placeholder data.
-    pub fn deinit(self: PrecompiledCommand, allocator: std.mem.Allocator) void {
-        for (self.args) |arg| {
+    pub fn deinit(self: *PrecompiledCommand, allocator: std.mem.Allocator) void {
+        for (self.args) |*arg| {
             allocator.free(arg.name);
-            if (arg.default) |default_arg| deinitStepArg(allocator, default_arg);
-            deinitArgFormat(allocator, arg.format);
+            if (arg.default) |*default_arg| default_arg.deinit(allocator);
+            arg.format.deinit(allocator);
         }
         allocator.free(self.args);
         freeCompiledSegments(allocator, self.segments);
+        self.* = undefined;
     }
 
     /// Returns whether the compiled template expects a given placeholder.
@@ -327,6 +349,45 @@ pub const PipelineConfig = struct {
     /// Declares which `assign` variables to record as frame columns.
     /// Use `"all"` to record every `assign` variable, or list names explicitly.
     record: ?RecordConfig = null,
+
+    pub fn clone(
+        cfg: *const PipelineConfig,
+        allocator: std.mem.Allocator,
+    ) !PipelineConfig {
+        if (cfg.buffer_size) |size| {
+            if (size == 0) return error.InvalidPipelineConfig;
+        }
+        if (cfg.warn_usage_percent) |percent| {
+            if (percent == 0 or percent > 100) return error.InvalidPipelineConfig;
+        }
+        const has_network_host = cfg.network_host != null;
+        const has_network_port = cfg.network_port != null;
+        if (has_network_host != has_network_port) return error.InvalidPipelineConfig;
+        if (cfg.network_port) |port| {
+            if (port == 0) return error.InvalidPipelineConfig;
+        }
+
+        const record_copy: ?RecordConfig = if (cfg.record) |record| switch (record) {
+            .all => |value| .{ .all = try allocator.dupe(u8, value) },
+            .explicit => |columns| blk: {
+                const items = try allocator.alloc([]const u8, columns.len);
+                for (columns, 0..) |name, idx| {
+                    items[idx] = try allocator.dupe(u8, name);
+                }
+                break :blk .{ .explicit = items };
+            },
+        } else null;
+
+        return .{
+            .buffer_size = cfg.buffer_size,
+            .warn_usage_percent = cfg.warn_usage_percent,
+            .mode = cfg.mode,
+            .file_path = if (cfg.file_path) |path| try allocator.dupe(u8, path) else null,
+            .network_host = if (cfg.network_host) |host| try allocator.dupe(u8, host) else null,
+            .network_port = cfg.network_port,
+            .record = record_copy,
+        };
+    }
 };
 
 const serde_lib = @import("serde");
@@ -406,14 +467,6 @@ fn writeValueWithFormat(writer: anytype, value: Value, fmt: ArgFormat, float_pre
     }
 }
 
-fn deinitArgFormat(allocator: std.mem.Allocator, fmt: ArgFormat) void {
-    if (fmt.bool_map) |map| {
-        allocator.free(map.true_text);
-        allocator.free(map.false_text);
-    }
-    if (fmt.list_separator) |text| allocator.free(text);
-}
-
 fn renderInternal(
     writer: anytype,
     segments: []const CompiledSegment,
@@ -449,25 +502,7 @@ fn renderInternal(
     }
 }
 
-fn deinitStepArg(allocator: std.mem.Allocator, arg: StepArg) void {
-    switch (arg) {
-        .scalar => |expr_value| deinitExpressionDeep(allocator, expr_value),
-        .list => |items| {
-            for (items) |expr_value| deinitExpressionDeep(allocator, expr_value);
-            allocator.free(items);
-        },
-    }
-}
-
-fn deinitExpressionDeep(allocator: std.mem.Allocator, expr_value: expr.Expression) void {
-    for (expr_value.ops) |op| switch (op) {
-        .push_string => |s| allocator.free(s),
-        else => {},
-    };
-    allocator.free(expr_value.ops);
-}
-
-fn freeCompiledSegments(allocator: std.mem.Allocator, segments: []const CompiledSegment) void {
+fn freeCompiledSegments(allocator: std.mem.Allocator, segments: []CompiledSegment) void {
     for (segments) |segment| switch (segment) {
         .literal => |literal| allocator.free(literal),
         .arg => {},

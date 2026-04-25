@@ -232,11 +232,14 @@ test "Context exposes built-ins alongside stored values" {
     try testing.expectEqualDeep(Value{ .int = 2 }, ctx.resolveBinding(.{ .builtin = .task_idx }));
     try testing.expectEqualDeep(Value{ .float = 3.3 }, ctx.resolveBinding(.{ .slot = 0 }));
 
-    var expr_obj = try expr_mod.parse(testing.allocator, "$ITER + $TASK_IDX");
-    defer expr_obj.deinit(testing.allocator);
     var empty_slots: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer empty_slots.deinit(testing.allocator);
-    try expr_obj.bindVariables(&empty_slots);
+    var temp_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer temp_arena.deinit();
+    var ast = try expr_mod.parseAst(temp_arena.allocator(), "$ITER + $TASK_IDX");
+    try ast.bindVariables(&empty_slots);
+    var expr_obj = try ast.lower(testing.allocator);
+    defer expr_obj.deinit(testing.allocator);
     const eval_result = try expr_obj.eval(ctx.varResolver(), testing.allocator);
     try testing.expectEqual(@as(i64, 9), eval_result.value.int);
 }
@@ -280,9 +283,12 @@ test "Context list round-trip through setSlot and varResolver" {
     try slots.put(testing.allocator, "arr", {});
     try slots.put(testing.allocator, "idx", {});
 
-    var e = try expr_mod.parse(testing.allocator, "${arr}[${idx}]");
+    var temp_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer temp_arena.deinit();
+    var ast = try expr_mod.parseAst(temp_arena.allocator(), "${arr}[${idx}]");
+    try ast.bindVariables(&slots);
+    var e = try ast.lower(testing.allocator);
     defer e.deinit(testing.allocator);
-    try e.bindVariables(&slots);
     const eval_result = try e.eval(ctx.varResolver(), testing.allocator);
     try testing.expectApproxEqAbs(@as(f64, 10.0), eval_result.value.float, 1e-9);
 

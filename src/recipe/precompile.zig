@@ -114,86 +114,18 @@ const SlotMap = struct {
     const_count: usize,
     alloc: std.mem.Allocator,
 
-    /// Compile an expression source string: parse, bind variables, attempt
-    /// full const evaluation, and fall back to inline + remap.
+    /// Compile an expression source string, bind variables, and rewrite it
+    /// into runtime-ready bytecode with partial constant folding applied.
     fn compileExpr(self: *const SlotMap, source: []const u8) !expr.Expression {
-        var e = try expr.parse(self.alloc, source);
-        try e.bindVariables(&self.slots);
-        if (self.tryConstFold(&e)) |result_op| {
-            const ops = try self.alloc.alloc(expr.Op, 1);
-            ops[0] = result_op;
-            e.ops = ops;
-        } else {
-            self.inlineAndRemap(e.ops);
-        }
-        return e;
-    }
+        var temp_arena: std.heap.ArenaAllocator = .init(self.alloc);
+        defer temp_arena.deinit();
 
-    /// Try to evaluate a bound expression fully at compile time.
-    /// Returns a single push Op when all variable references are consts.
-    fn tryConstFold(self: *const SlotMap, e: *const expr.Expression) ?expr.Op {
-        for (e.ops) |op| {
-            switch (op) {
-                .load_var, .load_list_len, .load_list_elem, .call_join => |ref| {
-                    const slot = ref.slotIndex() orelse return null;
-                    if (slot >= self.const_count) return null;
-                },
-                else => {},
-            }
-        }
-        const result = e.eval(self.constResolver(), self.alloc) catch return null;
-        defer result.deinit();
-        return switch (result.value) {
-            .int => |i| .{ .push_int = i },
-            .float => |f| .{ .push_float = f },
-            .bool => |b| .{ .push_bool = b },
-            .string => |s| .{ .push_string = self.alloc.dupe(u8, s) catch return null },
-        };
-    }
+        var ast = try expr.parseAst(temp_arena.allocator(), source);
+        try ast.bindVariables(&self.slots);
 
-    /// Inline const scalar values into ops and remap var slots.
-    fn inlineAndRemap(self: *const SlotMap, ops: []expr.Op) void {
-        for (ops) |*op| {
-            switch (op.*) {
-                .load_var => |ref| if (ref.slotIndex()) |slot| {
-                    if (slot < self.const_count) {
-                        // when try to load a const var, inline its value directly into the op and avoid any runtime lookup;
-                        op.* = switch (self.initial_values[slot]) {
-                            .int => |i| .{ .push_int = i },
-                            .float => |f| .{ .push_float = f },
-                            .bool => |b| .{ .push_bool = b },
-                            .string => |s| .{ .push_string = s },
-                            .list => .{ .push_int = 0 }, // list cannot inline to scalar; eval will error
-                        };
-                    } else {
-                        op.* = .{ .load_var = .{ .binding = .{ .slot = slot - self.const_count } } };
-                    }
-                },
-                .load_list_len => |ref| if (ref.slotIndex()) |slot| {
-                    if (slot < self.const_count) {
-                        switch (self.initial_values[slot]) {
-                            .list => |items| op.* = .{ .push_int = @intCast(items.len) },
-                            else => {}, // type error caught at eval time
-                        }
-                    } else {
-                        op.* = .{ .load_list_len = .{ .binding = .{ .slot = slot - self.const_count } } };
-                    }
-                },
-                .load_list_elem => |ref| if (ref.slotIndex()) |slot| {
-                    if (slot >= self.const_count) {
-                        op.* = .{ .load_list_elem = .{ .binding = .{ .slot = slot - self.const_count } } };
-                    }
-                    // const list: keep original slot for constResolver during full eval
-                },
-                .call_join => |ref| if (ref.slotIndex()) |slot| {
-                    if (slot >= self.const_count) {
-                        op.* = .{ .call_join = .{ .binding = .{ .slot = slot - self.const_count } } };
-                    }
-                    // const list: keep original slot for constResolver during full eval
-                },
-                else => {},
-            }
-        }
+        var optimizer = ExprOptimizer.init(self, temp_arena.allocator());
+        try optimizer.optimize(&ast);
+        return try optimizer.lower(ast.root);
     }
 
     /// Look up a name and return the runtime binding (var slot remapped)
@@ -222,24 +154,6 @@ const SlotMap = struct {
         return slot - self.const_count;
     }
 
-    /// Returns a compile-time resolver for const slots (using original indices).
-    /// Used by tryConstFold for full expression evaluation.
-    fn resolve(ctx_ptr: *const anyopaque, binding: expr.VariableBinding) ?expr.ResolvedValue {
-        const self: *const SlotMap = @ptrCast(@alignCast(ctx_ptr));
-        return switch (binding) {
-            .slot => |slot| {
-                // After inlineAndRemap, load_list_elem/call_join still use original slot indices
-                if (slot >= self.const_count) return null;
-                return resolveConstValue(self.initial_values[slot]);
-            },
-            .builtin => null,
-        };
-    }
-
-    fn constResolver(self: *const SlotMap) expr.VarResolver {
-        return .{ .ctx = @ptrCast(self), .resolve_fn = resolve };
-    }
-
     fn resolveConstValue(value: recipe_ir.Value) expr.ResolvedValue {
         return switch (value) {
             .float => |f| .{ .float = f },
@@ -259,6 +173,662 @@ const SlotMap = struct {
         return resolveConstValue(items[index]);
     }
 };
+
+const ExprOptimizer = struct {
+    slot_map: *const SlotMap,
+    allocator: std.mem.Allocator,
+
+    const ScalarClass = enum {
+        int,
+        float,
+        other,
+    };
+
+    const LowerError = error{
+        OutOfMemory,
+        InvalidExpression,
+    };
+
+    fn init(slot_map: *const SlotMap, allocator: std.mem.Allocator) ExprOptimizer {
+        return .{
+            .slot_map = slot_map,
+            .allocator = allocator,
+        };
+    }
+
+    fn optimize(self: *ExprOptimizer, ast: *expr.Ast) !void {
+        ast.root = try self.simplify(ast.root);
+    }
+
+    fn lower(self: *ExprOptimizer, root: *expr.Ast.Node) !expr.Expression {
+        var out: std.ArrayList(expr.Op) = .empty;
+        errdefer {
+            freeLoweredOps(self.slot_map.alloc, out.items);
+            out.deinit(self.slot_map.alloc);
+        }
+        try self.lowerNode(&out, root);
+        try validateLoweredOps(out.items);
+        return .{ .ops = try out.toOwnedSlice(self.slot_map.alloc) };
+    }
+
+    fn newNode(self: *ExprOptimizer, value: expr.Ast.Node) !*expr.Ast.Node {
+        const node = try self.allocator.create(expr.Ast.Node);
+        node.* = value;
+        return node;
+    }
+
+    fn simplify(self: *ExprOptimizer, node: *expr.Ast.Node) !*expr.Ast.Node {
+        return switch (node.*) {
+            .int, .float, .bool, .string => node,
+            .load_var => |ref| blk: {
+                if (try self.constScalarNode(ref)) |const_node| break :blk const_node;
+                break :blk node;
+            },
+            .load_list_len => |ref| blk: {
+                if (self.constListItems(ref)) |items| {
+                    break :blk try self.newNode(.{ .int = @intCast(items.len) });
+                }
+                break :blk node;
+            },
+            .load_list_elem => |data| blk: {
+                const index = try self.simplify(data.index);
+                if (self.constListItems(data.ref)) |items| {
+                    if (constInt(index)) |idx| {
+                        break :blk try self.foldConstListElem(items, idx);
+                    }
+                }
+                if (index == data.index) break :blk node;
+                break :blk try self.newNode(.{ .load_list_elem = .{ .ref = data.ref, .index = index } });
+            },
+            .call_join => |data| blk: {
+                const delim = try self.simplify(data.delim);
+                if (self.constListItems(data.ref)) |items| {
+                    if (constString(delim)) |text| {
+                        break :blk try self.newNode(.{ .string = try self.joinConstList(text, items) });
+                    }
+                }
+                if (delim == data.delim) break :blk node;
+                break :blk try self.newNode(.{ .call_join = .{ .ref = data.ref, .delim = delim } });
+            },
+            .unary => |data| blk: {
+                const child = try self.simplify(data.child);
+                if (data.op == .to_bool and nodeProducesBool(child)) break :blk child;
+                if (constValue(child)) |value| {
+                    if (try foldUnaryConst(data.op, value)) |folded| {
+                        break :blk try self.newConstNode(folded);
+                    }
+                }
+                if (child == data.child) break :blk node;
+                break :blk try self.newNode(.{ .unary = .{ .op = data.op, .child = child } });
+            },
+            .binary => |data| blk: {
+                const lhs = try self.simplify(data.lhs);
+                const rhs = try self.simplify(data.rhs);
+                if (constValue(lhs)) |left_value| {
+                    if (constValue(rhs)) |right_value| {
+                        if (try foldBinaryConst(data.op, left_value, right_value)) |folded| {
+                            break :blk try self.newConstNode(folded);
+                        }
+                    }
+                }
+                if (data.op == .add or data.op == .mul) {
+                    if (try self.reassociateBinary(data.op, lhs, rhs)) |rewritten| break :blk rewritten;
+                }
+                if (lhs == data.lhs and rhs == data.rhs) break :blk node;
+                break :blk try self.newNode(.{ .binary = .{ .op = data.op, .lhs = lhs, .rhs = rhs } });
+            },
+            .logical_and => |data| blk: {
+                const lhs = try self.simplify(data.lhs);
+                const rhs = try self.simplify(data.rhs);
+                if (constValue(lhs)) |left_value| {
+                    if (!left_value.isTruthy()) break :blk try self.newNode(.{ .bool = false });
+                    break :blk try self.makeToBool(rhs);
+                }
+                if (constValue(rhs)) |right_value| {
+                    if (right_value.isTruthy()) break :blk try self.makeToBool(lhs);
+                }
+                if (lhs == data.lhs and rhs == data.rhs) break :blk node;
+                break :blk try self.newNode(.{ .logical_and = .{ .lhs = lhs, .rhs = rhs } });
+            },
+            .logical_or => |data| blk: {
+                const lhs = try self.simplify(data.lhs);
+                const rhs = try self.simplify(data.rhs);
+                if (constValue(lhs)) |left_value| {
+                    if (left_value.isTruthy()) break :blk try self.newNode(.{ .bool = true });
+                    break :blk try self.makeToBool(rhs);
+                }
+                if (constValue(rhs)) |right_value| {
+                    if (!right_value.isTruthy()) break :blk try self.makeToBool(lhs);
+                }
+                if (lhs == data.lhs and rhs == data.rhs) break :blk node;
+                break :blk try self.newNode(.{ .logical_or = .{ .lhs = lhs, .rhs = rhs } });
+            },
+        };
+    }
+
+    fn lowerNode(self: *ExprOptimizer, out: *std.ArrayList(expr.Op), node: *expr.Ast.Node) LowerError!void {
+        switch (node.*) {
+            .int => |value| try out.append(self.slot_map.alloc, .{ .push_int = value }),
+            .float => |value| try out.append(self.slot_map.alloc, .{ .push_float = value }),
+            .bool => |value| try out.append(self.slot_map.alloc, .{ .push_bool = value }),
+            .string => |value| try out.append(self.slot_map.alloc, .{ .push_string = try self.slot_map.alloc.dupe(u8, value) }),
+            .load_var => |ref| try out.append(self.slot_map.alloc, .{ .load_var = try self.remapBinding(ref) }),
+            .load_list_len => |ref| try out.append(self.slot_map.alloc, .{ .load_list_len = try self.remapBinding(ref) }),
+            .load_list_elem => |data| {
+                try self.lowerNode(out, data.index);
+                try out.append(self.slot_map.alloc, .{ .load_list_elem = try self.remapBinding(data.ref) });
+            },
+            .call_join => |data| {
+                try self.lowerNode(out, data.delim);
+                try out.append(self.slot_map.alloc, .{ .call_join = try self.remapBinding(data.ref) });
+            },
+            .unary => |data| {
+                try self.lowerNode(out, data.child);
+                try out.append(self.slot_map.alloc, switch (data.op) {
+                    .negate => .negate,
+                    .not => .not,
+                    .to_bool => .to_bool,
+                });
+            },
+            .binary => |data| {
+                try self.lowerNode(out, data.lhs);
+                try self.lowerNode(out, data.rhs);
+                try out.append(self.slot_map.alloc, switch (data.op) {
+                    .add => .add,
+                    .sub => .sub,
+                    .mul => .mul,
+                    .div => .div,
+                    .cmp_gt => .{ .cmp = .gt },
+                    .cmp_lt => .{ .cmp = .lt },
+                    .cmp_ge => .{ .cmp = .ge },
+                    .cmp_le => .{ .cmp = .le },
+                    .cmp_eq => .{ .cmp = .eq },
+                    .cmp_ne => .{ .cmp = .ne },
+                    .call_min => .call_min,
+                    .call_max => .call_max,
+                });
+            },
+            .logical_and => |data| {
+                try self.emitAsBool(out, data.lhs);
+                const jump_pos = out.items.len;
+                try out.append(self.slot_map.alloc, .{ .jump_if_false = 0 });
+                try out.append(self.slot_map.alloc, .pop);
+                try self.emitAsBool(out, data.rhs);
+                out.items[jump_pos] = .{ .jump_if_false = @intCast(out.items.len - jump_pos - 1) };
+            },
+            .logical_or => |data| {
+                try self.emitAsBool(out, data.lhs);
+                const jump_pos = out.items.len;
+                try out.append(self.slot_map.alloc, .{ .jump_if_true = 0 });
+                try out.append(self.slot_map.alloc, .pop);
+                try self.emitAsBool(out, data.rhs);
+                out.items[jump_pos] = .{ .jump_if_true = @intCast(out.items.len - jump_pos - 1) };
+            },
+        }
+    }
+
+    fn emitAsBool(self: *ExprOptimizer, out: *std.ArrayList(expr.Op), node: *expr.Ast.Node) LowerError!void {
+        try self.lowerNode(out, node);
+        if (!nodeProducesBool(node)) try out.append(self.slot_map.alloc, .to_bool);
+    }
+
+    fn newConstNode(self: *ExprOptimizer, value: expr.Value) !*expr.Ast.Node {
+        return switch (value) {
+            .int => |v| try self.newNode(.{ .int = v }),
+            .float => |v| try self.newNode(.{ .float = v }),
+            .bool => |v| try self.newNode(.{ .bool = v }),
+            .string => |v| try self.newNode(.{ .string = try self.allocator.dupe(u8, v) }),
+        };
+    }
+
+    fn constValue(node: *expr.Ast.Node) ?expr.Value {
+        return switch (node.*) {
+            .int => |value| .{ .int = value },
+            .float => |value| .{ .float = value },
+            .bool => |value| .{ .bool = value },
+            .string => |value| .{ .string = value },
+            else => null,
+        };
+    }
+
+    fn constInt(node: *expr.Ast.Node) ?i64 {
+        return switch (node.*) {
+            .int => |value| value,
+            else => null,
+        };
+    }
+
+    fn constString(node: *expr.Ast.Node) ?[]const u8 {
+        return switch (node.*) {
+            .string => |value| value,
+            else => null,
+        };
+    }
+
+    fn constScalarNode(self: *ExprOptimizer, ref: expr.VariableRef) !?*expr.Ast.Node {
+        const binding = switch (ref) {
+            .binding => |binding| binding,
+            .name => return null,
+        };
+        return switch (binding) {
+            .builtin => null,
+            .slot => |slot| if (slot >= self.slot_map.const_count)
+                null
+            else switch (self.slot_map.initial_values[slot]) {
+                .int => |value| try self.newNode(.{ .int = value }),
+                .float => |value| try self.newNode(.{ .float = value }),
+                .bool => |value| try self.newNode(.{ .bool = value }),
+                .string => |value| try self.newNode(.{ .string = try self.allocator.dupe(u8, value) }),
+                .list => null,
+            },
+        };
+    }
+
+    fn constListItems(self: *ExprOptimizer, ref: expr.VariableRef) ?[]const recipe_ir.Value {
+        const binding = switch (ref) {
+            .binding => |binding| binding,
+            .name => return null,
+        };
+        return switch (binding) {
+            .builtin => null,
+            .slot => |slot| if (slot >= self.slot_map.const_count)
+                null
+            else switch (self.slot_map.initial_values[slot]) {
+                .list => |items| items,
+                else => null,
+            },
+        };
+    }
+
+    fn makeToBool(self: *ExprOptimizer, node: *expr.Ast.Node) !*expr.Ast.Node {
+        if (nodeProducesBool(node)) return node;
+        if (constValue(node)) |value| return try self.newNode(.{ .bool = value.isTruthy() });
+        return try self.newNode(.{ .unary = .{ .op = .to_bool, .child = node } });
+    }
+
+    fn scalarClass(self: *ExprOptimizer, node: *expr.Ast.Node) ScalarClass {
+        return switch (node.*) {
+            .int => .int,
+            .float => .float,
+            .bool, .string => .other,
+            .load_var => |ref| self.bindingScalarClass(ref),
+            .load_list_len => .int,
+            .load_list_elem, .call_join, .logical_and, .logical_or => .other,
+            .unary => |data| switch (data.op) {
+                .negate => self.scalarClass(data.child),
+                .not, .to_bool => .other,
+            },
+            .binary => |data| switch (data.op) {
+                .add, .sub, .mul, .call_min, .call_max => blk: {
+                    const lhs = self.scalarClass(data.lhs);
+                    const rhs = self.scalarClass(data.rhs);
+                    if (lhs == .int and rhs == .int) break :blk .int;
+                    if ((lhs == .int or lhs == .float) and (rhs == .int or rhs == .float)) break :blk .float;
+                    break :blk .other;
+                },
+                .div => blk: {
+                    const lhs = self.scalarClass(data.lhs);
+                    const rhs = self.scalarClass(data.rhs);
+                    if ((lhs == .int or lhs == .float) and (rhs == .int or rhs == .float)) break :blk .float;
+                    break :blk .other;
+                },
+                .cmp_gt, .cmp_lt, .cmp_ge, .cmp_le, .cmp_eq, .cmp_ne => .other,
+            },
+        };
+    }
+
+    fn bindingScalarClass(self: *ExprOptimizer, ref: expr.VariableRef) ScalarClass {
+        const binding = switch (ref) {
+            .binding => |binding| binding,
+            .name => return .other,
+        };
+        return switch (binding) {
+            .builtin => .int,
+            .slot => |slot| switch (self.slot_map.initial_values[slot]) {
+                .int => .int,
+                .float => .float,
+                else => .other,
+            },
+        };
+    }
+
+    fn reassociateBinary(self: *ExprOptimizer, op: expr.Ast.BinaryOp, lhs: *expr.Ast.Node, rhs: *expr.Ast.Node) !?*expr.Ast.Node {
+        if (op != .add and op != .mul) return null;
+
+        var operands: std.ArrayList(*expr.Ast.Node) = .empty;
+        defer operands.deinit(self.allocator);
+        try self.collectAssocOperands(&operands, op, lhs);
+        try self.collectAssocOperands(&operands, op, rhs);
+
+        for (operands.items) |item| {
+            if (self.scalarClass(item) != .int) return null;
+        }
+
+        var const_count: usize = 0;
+        var first_const_pos: ?usize = null;
+        var aggregate: i64 = if (op == .add) 0 else 1;
+        var nonconst: std.ArrayList(*expr.Ast.Node) = .empty;
+        defer nonconst.deinit(self.allocator);
+
+        for (operands.items, 0..) |item, idx| {
+                if (constInt(item)) |value| {
+                    if (first_const_pos == null) first_const_pos = idx;
+                    const_count += 1;
+                    aggregate = switch (op) {
+                    .add => aggregate + value,
+                    .mul => aggregate * value,
+                    else => unreachable,
+                };
+            } else {
+                try nonconst.append(self.allocator, item);
+            }
+        }
+
+        if (const_count == 0) return null;
+
+        const drop_identity = switch (op) {
+            .add => aggregate == 0 and nonconst.items.len > 0,
+            .mul => aggregate == 1 and nonconst.items.len > 0,
+            else => unreachable,
+        };
+        if (const_count == 1 and !drop_identity) return null;
+
+        var ordered: std.ArrayList(*expr.Ast.Node) = .empty;
+        defer ordered.deinit(self.allocator);
+
+        const insert_pos = blk: {
+            if (first_const_pos == null) break :blk nonconst.items.len;
+            var count_before: usize = 0;
+            for (operands.items[0..first_const_pos.?]) |item| {
+                if (constInt(item) == null) count_before += 1;
+            }
+            break :blk count_before;
+        };
+
+        for (nonconst.items, 0..) |item, idx| {
+            if (!drop_identity and idx == insert_pos) {
+                try ordered.append(self.allocator, try self.newNode(.{ .int = aggregate }));
+            }
+            try ordered.append(self.allocator, item);
+        }
+        if (!drop_identity and insert_pos >= nonconst.items.len) {
+            try ordered.append(self.allocator, try self.newNode(.{ .int = aggregate }));
+        }
+
+        if (ordered.items.len == 0) return try self.newNode(.{ .int = aggregate });
+        if (ordered.items.len == 1) return ordered.items[0];
+
+        var current = ordered.items[0];
+        for (ordered.items[1..]) |item| {
+            current = try self.newNode(.{ .binary = .{ .op = op, .lhs = current, .rhs = item } });
+        }
+        return current;
+    }
+
+    fn collectAssocOperands(self: *ExprOptimizer, out: *std.ArrayList(*expr.Ast.Node), op: expr.Ast.BinaryOp, node: *expr.Ast.Node) !void {
+        switch (node.*) {
+            .binary => |data| if (data.op == op) {
+                try self.collectAssocOperands(out, op, data.lhs);
+                try self.collectAssocOperands(out, op, data.rhs);
+                return;
+            },
+            else => {},
+        }
+        try out.append(self.allocator, node);
+    }
+
+    fn foldConstListElem(self: *ExprOptimizer, items: []const recipe_ir.Value, index: i64) !*expr.Ast.Node {
+        if (index < 0) return error.InvalidExpression;
+        const idx: usize = @intCast(index);
+        if (idx >= items.len) return error.InvalidExpression;
+        return switch (items[idx]) {
+            .int => |value| try self.newNode(.{ .int = value }),
+            .float => |value| try self.newNode(.{ .float = value }),
+            .bool => |value| try self.newNode(.{ .bool = value }),
+            .string => |value| try self.newNode(.{ .string = try self.allocator.dupe(u8, value) }),
+            .list => error.InvalidExpression,
+        };
+    }
+
+    fn joinConstList(self: *ExprOptimizer, delimiter: []const u8, items: []const recipe_ir.Value) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        for (items, 0..) |item, idx| {
+            if (idx > 0) try out.appendSlice(self.allocator, delimiter);
+            switch (item) {
+                .int => |value| {
+                    var buf: [64]u8 = undefined;
+                    const formatted = try std.fmt.bufPrint(&buf, "{d}", .{value});
+                    try out.appendSlice(self.allocator, formatted);
+                },
+                .float => |value| {
+                    var buf: [64]u8 = undefined;
+                    const formatted = try std.fmt.bufPrint(&buf, "{d}", .{value});
+                    try out.appendSlice(self.allocator, formatted);
+                },
+                .bool => |value| try out.appendSlice(self.allocator, if (value) "true" else "false"),
+                .string => |value| try out.appendSlice(self.allocator, value),
+                .list => return error.InvalidExpression,
+            }
+        }
+        return try out.toOwnedSlice(self.allocator);
+    }
+
+    fn foldUnaryConst(op: expr.Ast.UnaryOp, value: expr.Value) !?expr.Value {
+        return switch (op) {
+            .negate => switch (value) {
+                .int => |v| .{ .int = -v },
+                .float => |v| .{ .float = -v },
+                else => null,
+            },
+            .not => .{ .bool = !value.isTruthy() },
+            .to_bool => .{ .bool = value.isTruthy() },
+        };
+    }
+
+    fn foldBinaryConst(op: expr.Ast.BinaryOp, lhs: expr.Value, rhs: expr.Value) !?expr.Value {
+        return switch (op) {
+            .add => foldPromoteArith(lhs, rhs, .add),
+            .sub => foldPromoteArith(lhs, rhs, .sub),
+            .mul => foldPromoteArith(lhs, rhs, .mul),
+            .div => foldDiv(lhs, rhs),
+            .cmp_gt => .{ .bool = try foldCmpValues(lhs, rhs, .gt) },
+            .cmp_lt => .{ .bool = try foldCmpValues(lhs, rhs, .lt) },
+            .cmp_ge => .{ .bool = try foldCmpValues(lhs, rhs, .ge) },
+            .cmp_le => .{ .bool = try foldCmpValues(lhs, rhs, .le) },
+            .cmp_eq => .{ .bool = try foldCmpValues(lhs, rhs, .eq) },
+            .cmp_ne => .{ .bool = try foldCmpValues(lhs, rhs, .ne) },
+            .call_min => foldPromoteMinMax(lhs, rhs, true),
+            .call_max => foldPromoteMinMax(lhs, rhs, false),
+        };
+    }
+
+    fn remapBinding(self: *ExprOptimizer, ref: expr.VariableRef) !expr.VariableBinding {
+        const binding = switch (ref) {
+            .binding => |binding| binding,
+            .name => return error.InvalidExpression,
+        };
+        return switch (binding) {
+            .builtin => binding,
+            .slot => |slot| if (slot < self.slot_map.const_count)
+                error.InvalidExpression
+            else
+                .{ .slot = slot - self.slot_map.const_count },
+        };
+    }
+};
+
+fn nodeProducesBool(node: *const expr.Ast.Node) bool {
+    return switch (node.*) {
+        .bool => true,
+        .unary => |data| switch (data.op) {
+            .not, .to_bool => true,
+            .negate => false,
+        },
+        .binary => |data| switch (data.op) {
+            .cmp_gt,
+            .cmp_lt,
+            .cmp_ge,
+            .cmp_le,
+            .cmp_eq,
+            .cmp_ne,
+            => true,
+            else => false,
+        },
+        .logical_and, .logical_or => true,
+        else => false,
+    };
+}
+
+fn freeLoweredOps(allocator: std.mem.Allocator, ops: []const expr.Op) void {
+    for (ops) |op| switch (op) {
+        .push_string => |text| allocator.free(text),
+        else => {},
+    };
+}
+
+fn validateLoweredOps(ops: []const expr.Op) !void {
+    var depth: usize = 0;
+    var max_depth: usize = 0;
+    for (ops) |op| {
+        switch (op) {
+            .push_int, .push_float, .push_string, .push_bool, .load_var, .load_list_len => depth += 1,
+            .load_list_elem, .call_join => {},
+            .add, .sub, .mul, .div, .cmp, .call_min, .call_max => {
+                if (depth < 2) return error.InvalidExpression;
+                depth -= 1;
+            },
+            .negate, .not, .to_bool, .jump_if_false, .jump_if_true => {
+                if (depth < 1) return error.InvalidExpression;
+            },
+            .pop => {
+                if (depth < 1) return error.InvalidExpression;
+                depth -= 1;
+            },
+        }
+        if (depth > max_depth) max_depth = depth;
+    }
+    if (depth != 1) return error.InvalidExpression;
+    if (max_depth > expr.Expression.max_stack) return error.StackOverflow;
+}
+
+fn opFromConst(value: expr.Value) expr.Op {
+    return switch (value) {
+        .int => |v| .{ .push_int = v },
+        .float => |v| .{ .push_float = v },
+        .bool => |v| .{ .push_bool = v },
+        .string => |v| .{ .push_string = v },
+    };
+}
+
+const FoldArithOp = enum {
+    add,
+    sub,
+    mul,
+};
+
+const FoldCmpOp = enum {
+    gt,
+    lt,
+    ge,
+    le,
+    eq,
+    ne,
+};
+
+fn foldPromoteArith(a: expr.Value, b: expr.Value, comptime op: FoldArithOp) !?expr.Value {
+    return switch (a) {
+        .string, .bool => null,
+        .int => |ai| switch (b) {
+            .string, .bool => null,
+            .int => |bi| .{ .int = switch (op) {
+                .add => ai + bi,
+                .sub => ai - bi,
+                .mul => ai * bi,
+            } },
+            .float => |bf| blk: {
+                const af: f64 = @floatFromInt(ai);
+                break :blk .{ .float = switch (op) {
+                    .add => af + bf,
+                    .sub => af - bf,
+                    .mul => af * bf,
+                } };
+            },
+        },
+        .float => |af| switch (b) {
+            .string, .bool => null,
+            .int, .float => blk: {
+                const bf = b.toFloat();
+                break :blk .{ .float = switch (op) {
+                    .add => af + bf,
+                    .sub => af - bf,
+                    .mul => af * bf,
+                } };
+            },
+        },
+    };
+}
+
+fn foldDiv(a: expr.Value, b: expr.Value) !?expr.Value {
+    if (a == .string or a == .bool or b == .string or b == .bool) return null;
+    const rf = b.toFloat();
+    if (rf == 0.0) return null;
+    return .{ .float = a.toFloat() / rf };
+}
+
+fn foldCmpValues(a: expr.Value, b: expr.Value, op: FoldCmpOp) !bool {
+    return switch (a) {
+        .string => |sa| switch (b) {
+            .string => |sb| {
+                const order = std.mem.order(u8, sa, sb);
+                return switch (op) {
+                    .eq => order == .eq,
+                    .ne => order != .eq,
+                    .lt => order == .lt,
+                    .le => order != .gt,
+                    .gt => order == .gt,
+                    .ge => order != .lt,
+                };
+            },
+            else => return error.InvalidExpression,
+        },
+        else => switch (b) {
+            .string => return error.InvalidExpression,
+            else => {
+                const l = a.toFloat();
+                const r = b.toFloat();
+                return switch (op) {
+                    .gt => l > r,
+                    .lt => l < r,
+                    .ge => l >= r,
+                    .le => l <= r,
+                    .eq => l == r,
+                    .ne => l != r,
+                };
+            },
+        },
+    };
+}
+
+fn foldPromoteMinMax(a: expr.Value, b: expr.Value, comptime pick_min: bool) !?expr.Value {
+    return switch (a) {
+        .string, .bool => null,
+        .int => |ai| switch (b) {
+            .string, .bool => null,
+            .int => |bi| .{ .int = if (pick_min) @min(ai, bi) else @max(ai, bi) },
+            .float => |bf| blk: {
+                const af: f64 = @floatFromInt(ai);
+                break :blk .{ .float = if (pick_min) @min(af, bf) else @max(af, bf) };
+            },
+        },
+        .float => |af| switch (b) {
+            .string, .bool => null,
+            .int, .float => blk: {
+                const bf = b.toFloat();
+                break :blk .{ .float = if (pick_min) @min(af, bf) else @max(af, bf) };
+            },
+        },
+    };
+}
 
 /// Validate consts/vars, build the merged slot map (consts first, then vars),
 /// compile initial values, and create the compile-time const resolver.
@@ -587,7 +1157,7 @@ fn resolvePipelineConfig(
 ) !recipe_ir.PipelineConfig {
     const pipeline_cfg = recipe.pipeline orelse return error.MissingPipeline;
     if (pipeline_cfg.record == null) return error.MissingRecordConfig;
-    var pipeline = try clonePipelineConfig(arena_alloc, pipeline_cfg);
+    var pipeline = try pipeline_cfg.clone(arena_alloc);
     switch (pipeline.record.?) {
         .all => {
             pipeline.record = .{ .explicit = try arena_alloc.dupe([]const u8, assign_set.keys()) };
@@ -777,7 +1347,7 @@ fn compileSegments(
     template_segments: []const template.Segment,
     arg_entries: *std.ArrayList(ArgBuildEntry),
     in_optional: bool,
-) ![]const recipe_ir.CompiledSegment {
+) ![]recipe_ir.CompiledSegment {
     const segments = try allocator.alloc(recipe_ir.CompiledSegment, template_segments.len);
 
     for (template_segments, 0..) |segment, idx| {
@@ -864,42 +1434,6 @@ fn compileScalarValue(allocator: std.mem.Allocator, value: config.ArgScalarDoc) 
         .int => |number| .{ .int = number },
         .float => |number| .{ .float = number },
         .bool => |flag| .{ .bool = flag },
-    };
-}
-
-fn clonePipelineConfig(allocator: std.mem.Allocator, cfg: config.PipelineConfig) !recipe_ir.PipelineConfig {
-    if (cfg.buffer_size) |size| {
-        if (size == 0) return error.InvalidPipelineConfig;
-    }
-    if (cfg.warn_usage_percent) |percent| {
-        if (percent == 0 or percent > 100) return error.InvalidPipelineConfig;
-    }
-    const has_network_host = cfg.network_host != null;
-    const has_network_port = cfg.network_port != null;
-    if (has_network_host != has_network_port) return error.InvalidPipelineConfig;
-    if (cfg.network_port) |port| {
-        if (port == 0) return error.InvalidPipelineConfig;
-    }
-
-    const record_copy: ?recipe_ir.RecordConfig = if (cfg.record) |record| switch (record) {
-        .all => |value| .{ .all = try allocator.dupe(u8, value) },
-        .explicit => |columns| blk: {
-            const items = try allocator.alloc([]const u8, columns.len);
-            for (columns, 0..) |name, idx| {
-                items[idx] = try allocator.dupe(u8, name);
-            }
-            break :blk .{ .explicit = items };
-        },
-    } else null;
-
-    return .{
-        .buffer_size = cfg.buffer_size,
-        .warn_usage_percent = cfg.warn_usage_percent,
-        .mode = cfg.mode,
-        .file_path = if (cfg.file_path) |path| try allocator.dupe(u8, path) else null,
-        .network_host = if (cfg.network_host) |host| try allocator.dupe(u8, host) else null,
-        .network_port = cfg.network_port,
-        .record = record_copy,
     };
 }
 
@@ -1321,12 +1855,9 @@ test "precompile preserves typed literal step arguments" {
         .scalar => |e| {
             try std.testing.expectEqual(@as(usize, 1), e.ops.len);
             switch (e.ops[0]) {
-                .load_var => |ref| switch (ref) {
-                    .binding => |b| switch (b) {
-                        .slot => |slot| try std.testing.expect(slot < compiled.initial_values.len),
-                        .builtin => return error.TestUnexpectedResult,
-                    },
-                    .name => return error.TestUnexpectedResult,
+                .load_var => |binding| switch (binding) {
+                    .slot => |slot| try std.testing.expect(slot < compiled.initial_values.len),
+                    .builtin => return error.TestUnexpectedResult,
                 },
                 else => return error.TestUnexpectedResult,
             }
@@ -1589,7 +2120,7 @@ test "precompiled command renders via helper" {
     };
     defer instrument.commands.deinit();
 
-    const compiled = try compileCommand(gpa, source, &instrument, null);
+    var compiled = try compileCommand(gpa, source, &instrument, null);
     defer compiled.deinit(gpa);
 
     try std.testing.expect(compiled.instrument == &instrument);
@@ -1601,7 +2132,7 @@ test "precompiled command renders via helper" {
     };
 
     var stack_buf: [32]u8 = undefined;
-    const rendered = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, null);
+    var rendered = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, null);
     defer rendered.deinit(gpa);
 
     try std.testing.expectEqualStrings("VOLT 3.3\n", rendered.bytes);
@@ -1625,7 +2156,7 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     };
     defer instrument.commands.deinit();
 
-    const compiled = try compileCommand(gpa, source, &instrument, null);
+    var compiled = try compileCommand(gpa, source, &instrument, null);
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
@@ -1633,7 +2164,7 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     };
 
     var stack_buf: [8]u8 = undefined;
-    const rendered = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, null);
+    var rendered = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, null);
     defer rendered.deinit(gpa);
 
     try std.testing.expect(rendered.owned != null);
@@ -1657,7 +2188,7 @@ test "float_precision controls decimal places in rendered command" {
     };
     defer instrument.commands.deinit();
 
-    const compiled = try compileCommand(gpa, source, &instrument, null);
+    var compiled = try compileCommand(gpa, source, &instrument, null);
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
@@ -1667,17 +2198,17 @@ test "float_precision controls decimal places in rendered command" {
     var stack_buf: [64]u8 = undefined;
 
     // With precision 2: "VOLT 3.14\n"
-    const r2 = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, 2);
+    var r2 = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, 2);
     defer r2.deinit(gpa);
     try std.testing.expectEqualStrings("VOLT 3.14\n", r2.bytes);
 
     // With precision 0: "VOLT 3\n"
-    const r0 = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, 0);
+    var r0 = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, 0);
     defer r0.deinit(gpa);
     try std.testing.expectEqualStrings("VOLT 3\n", r0.bytes);
 
     // Without precision (null): shortest representation
-    const rn = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, null);
+    var rn = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, null);
     defer rn.deinit(gpa);
     try std.testing.expectEqualStrings("VOLT 3.14159265\n", rn.bytes);
 }
@@ -1699,7 +2230,7 @@ test "precompiled command applies bool format from adapter defaults" {
     };
     defer instrument.commands.deinit();
 
-    const compiled = try compileCommand(gpa, source, &instrument, .{ .true = "ON", .false = "OFF" });
+    var compiled = try compileCommand(gpa, source, &instrument, .{ .true = "ON", .false = "OFF" });
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
@@ -1707,7 +2238,7 @@ test "precompiled command applies bool format from adapter defaults" {
     };
 
     var stack_buf: [32]u8 = undefined;
-    const rendered = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, null);
+    var rendered = try compiled.render(gpa, stack_buf[0..], args[0..], instrument.write_termination, null);
     defer rendered.deinit(gpa);
 
     try std.testing.expectEqualStrings("OUTP ON\n", rendered.bytes);
@@ -2765,4 +3296,157 @@ test "precompile does not fold expressions referencing runtime vars" {
         },
         .list => return error.TestUnexpectedResult,
     }
+}
+
+test "precompile partially folds const prefix with runtime var" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/psu.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set:
+        \\    write: "V {voltage}"
+    );
+    try workspace.writeFile("recipes/partial_fold.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\consts:
+        \\  base: 1
+        \\vars:
+        \\  v: 0
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args:
+        \\          voltage: "${base} + 2 + ${v}"
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/partial_fold.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
+    defer dir.close(std.testing.io);
+
+    var compiled = try precompilePath(gpa, std.testing.io, recipe_path, dir, null);
+    defer compiled.deinit();
+
+    const step = compiled.tasks[0].steps()[0].action.instrument_call;
+    const voltage_arg = step.args[step.command.argIndex("voltage").?];
+    switch (voltage_arg) {
+        .scalar => |e| {
+            try std.testing.expectEqual(@as(usize, 3), e.ops.len);
+            switch (e.ops[0]) {
+                .push_int => |value| try std.testing.expectEqual(@as(i64, 3), value),
+                else => return error.TestUnexpectedResult,
+            }
+            switch (e.ops[1]) {
+                .load_var => |binding| switch (binding) {
+                    .slot => |slot| try std.testing.expectEqual(@as(usize, 0), slot),
+                    .builtin => return error.TestUnexpectedResult,
+                },
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expect(e.ops[2] == .add);
+        },
+        .list => return error.TestUnexpectedResult,
+    }
+}
+
+test "precompile reassociates builtin plus trailing constants" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.makePath("adapters");
+    try workspace.writeFile("recipes/reassoc.yaml",
+        \\instruments: {}
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  out: 0
+        \\tasks:
+        \\  - steps:
+        \\      - compute: "$ITER + 1 + 2"
+        \\        assign: out
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/reassoc.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
+    defer dir.close(std.testing.io);
+
+    var compiled = try precompilePath(gpa, std.testing.io, recipe_path, dir, null);
+    defer compiled.deinit();
+
+    switch (compiled.tasks[0].steps()[0].action) {
+        .compute => |comp| {
+            try std.testing.expectEqual(@as(usize, 3), comp.expression.ops.len);
+            switch (comp.expression.ops[0]) {
+                .load_var => |binding| switch (binding) {
+                    .builtin => |builtin| try std.testing.expect(builtin == .iter),
+                    .slot => return error.TestUnexpectedResult,
+                },
+                else => return error.TestUnexpectedResult,
+            }
+            switch (comp.expression.ops[1]) {
+                .push_int => |value| try std.testing.expectEqual(@as(i64, 3), value),
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expect(comp.expression.ops[2] == .add);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "precompile simplifies logical rhs constant" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.makePath("adapters");
+    try workspace.writeFile("recipes/logical_simplify.yaml",
+        \\instruments: {}
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  a: 0
+        \\stop_when: "${a} && (1 + 2)"
+        \\tasks: []
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/logical_simplify.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
+    defer dir.close(std.testing.io);
+
+    var compiled = try precompilePath(gpa, std.testing.io, recipe_path, dir, null);
+    defer compiled.deinit();
+
+    const stop_when = compiled.stop_when orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), stop_when.ops.len);
+    switch (stop_when.ops[0]) {
+        .load_var => |binding| switch (binding) {
+            .slot => |slot| try std.testing.expectEqual(@as(usize, 0), slot),
+            .builtin => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(stop_when.ops[1] == .to_bool);
 }

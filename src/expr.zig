@@ -18,958 +18,49 @@
 ///   - `len()` returns `int`; `min()`/`max()` follow promotion rules.
 const std = @import("std");
 
-/// Expression result: can be a 64-bit integer, a 64-bit float, or a string.
-///
-/// Promotion rule: `int` → `float` is implicit (lossless widening);
-/// `float` → `int` is forbidden (precision loss).
-pub const Value = union(enum) {
-    int: i64,
-    float: f64,
-    bool: bool,
-    string: []const u8,
-
-    /// Promote to `f64`. Integer values are widened losslessly.
-    /// Caller must ensure this is not called on `.string`.
-    pub fn toFloat(self: Value) f64 {
-        return switch (self) {
-            .int => |i| @floatFromInt(i),
-            .float => |f| f,
-            .bool => |b| if (b) 1.0 else 0.0,
-            .string => unreachable,
-        };
-    }
-
-    /// True when the value is non-zero (numeric) or non-empty (string).
-    pub fn isTruthy(self: Value) bool {
-        return switch (self) {
-            .int => |i| i != 0,
-            .float => |f| f != 0.0,
-            .bool => |b| b,
-            .string => |s| s.len != 0,
-        };
-    }
-};
-
-pub const EvalError = error{
-    InvalidExpression,
-    UnexpectedToken,
-    UnmatchedParen,
-    DivisionByZero,
-    VariableNotFound,
-    InvalidNumber,
-    OutOfMemory,
-    StackOverflow,
-};
-
-pub const BuiltinVar = enum {
-    iter,
-    task_idx,
-    elapsed_ms,
-};
-
-pub const VariableBinding = union(enum) {
-    slot: usize,
-    builtin: BuiltinVar,
-};
-
-pub const VariableRef = union(enum) {
-    name: []const u8,
-    binding: VariableBinding,
-
-    pub fn slotIndex(self: VariableRef) ?usize {
-        return switch (self) {
-            .binding => |b| switch (b) {
-                .slot => |s| s,
-                .builtin => null,
-            },
-            .name => null,
-        };
-    }
-};
-
-// ── Bytecode ────────────────────────────────────────────────────────────
-//
-// The parser emits a linear array of `Op` instructions in reverse-Polish
-// (postfix) order.  Evaluation uses a small value stack and a flat `for`
-// loop
-
-const CmpOp = enum { gt, lt, ge, le, eq, ne };
-
-pub const Op = union(enum) {
-    push_int: i64,
-    push_float: f64,
-    push_string: []const u8,
-    push_bool: bool,
-    /// Push the scalar value of a bound variable.
-    load_var: VariableRef,
-    /// Push the length (as int) of a list variable.
-    load_list_len: VariableRef,
-    /// Pop an integer index, push the element from a list variable.
-    load_list_elem: VariableRef,
-    add,
-    sub,
-    mul,
-    div,
-    cmp: CmpOp,
-    negate,
-    not,
-    call_min,
-    call_max,
-    /// Pop delimiter string, resolve list variable, join elements, push result string.
-    call_join: VariableRef,
-    /// Short-circuit AND: if top is falsy, replace with int(0) and skip
-    /// `skip` ops (jumping past the RHS and its trailing `to_bool`).
-    and_sc: u16,
-    /// Short-circuit OR: if top is truthy, replace with int(1) and skip.
-    or_sc: u16,
-    /// Replace top of stack with int 0 or 1.
-    to_bool,
-};
-
-/// Pre-parsed, compiled expression that can be evaluated many times.
-pub const Expression = struct {
-    ops: []Op,
-
-    pub fn deinit(self: *Expression, allocator: std.mem.Allocator) void {
-        allocator.free(self.ops);
-    }
-
-    pub const max_stack = 64;
-    const max_owned = 4;
-
-    /// Result of expression evaluation, bundling the value with ownership info.
-    pub const EvalResult = struct {
-        value: Value,
-        /// Allocator-owned string produced by join(); null when no allocation was made.
-        owned: ?[]u8 = null,
-        allocator: std.mem.Allocator,
-
-        pub fn deinit(self: EvalResult) void {
-            if (self.owned) |buf| self.allocator.free(buf);
-        }
-    };
-
-    pub fn eval(self: *const Expression, resolver: VarResolver, allocator: std.mem.Allocator) EvalError!EvalResult {
-        // Fast path: single push op needs no stack machinery.
-        if (self.ops.len == 1) switch (self.ops[0]) {
-            .push_int => |i| return .{ .value = .{ .int = i }, .allocator = undefined },
-            .push_float => |f| return .{ .value = .{ .float = f }, .allocator = undefined },
-            .push_bool => |b| return .{ .value = .{ .bool = b }, .allocator = undefined },
-            .push_string => |s| return .{ .value = .{ .string = s }, .allocator = undefined },
-            else => {},
-        };
-
-        var stack: [max_stack]Value = [1]Value{.{ .int = 0 }} ** max_stack;
-        var sp: usize = 0;
-        var ip: usize = 0;
-        var owned_strings: [max_owned]?[]u8 = .{null} ** max_owned;
-        var owned_count: usize = 0;
-        errdefer for (owned_strings[0..owned_count]) |maybe_str| {
-            if (maybe_str) |s| allocator.free(s);
-        };
-
-        while (ip < self.ops.len) : (ip += 1) {
-            switch (self.ops[ip]) {
-                .push_int => |n| {
-                    stack[sp] = .{ .int = n };
-                    sp += 1;
-                },
-                .push_float => |n| {
-                    stack[sp] = .{ .float = n };
-                    sp += 1;
-                },
-                .push_string => |s| {
-                    stack[sp] = .{ .string = s };
-                    sp += 1;
-                },
-                .push_bool => |b| {
-                    stack[sp] = .{ .bool = b };
-                    sp += 1;
-                },
-                .load_var => |ref| {
-                    const resolved = resolver.resolve(ref.binding) orelse return error.VariableNotFound;
-                    stack[sp] = try resolveScalar(resolved);
-                    sp += 1;
-                },
-                .load_list_len => |ref| {
-                    const resolved = resolver.resolve(ref.binding) orelse return error.VariableNotFound;
-                    stack[sp] = switch (resolved) {
-                        .list => |l| .{ .int = @intCast(l.len) },
-                        else => return error.InvalidExpression,
-                    };
-                    sp += 1;
-                },
-                .load_list_elem => |ref| {
-                    sp -= 1;
-                    const idx_val = stack[sp];
-                    const iv = switch (idx_val) {
-                        .int => |v| v,
-                        .float, .string, .bool => return error.InvalidExpression,
-                    };
-                    if (iv < 0) return error.InvalidExpression;
-                    const i: usize = @intCast(iv);
-                    const resolved = resolver.resolve(ref.binding) orelse return error.VariableNotFound;
-                    const list = switch (resolved) {
-                        .list => |l| l,
-                        else => return error.InvalidExpression,
-                    };
-                    if (i >= list.len) return error.InvalidExpression;
-                    const elem = list.at(i) orelse return error.VariableNotFound;
-                    stack[sp] = try resolveScalar(elem);
-                    sp += 1;
-                },
-                // NOTE: all handlers below read `stack[sp - 1]` (or `stack[sp]`)
-                // into locals BEFORE writing back.  This works around a Zig ≤ 0.15
-                // miscompilation where constructing a tagged-union literal on the
-                // LHS (`stack[runtime_idx] = .{ .float = stack[runtime_idx]… }`)
-                // writes the tag byte before the RHS finishes reading the payload,
-                // corrupting the value.  See repro.zig in this repo.
-                .add => {
-                    const b = stack[sp - 1];
-                    const a = stack[sp - 2];
-                    sp -= 1;
-                    stack[sp - 1] = try promoteArith(a, b, .add);
-                },
-                .sub => {
-                    const b = stack[sp - 1];
-                    const a = stack[sp - 2];
-                    sp -= 1;
-                    stack[sp - 1] = try promoteArith(a, b, .sub);
-                },
-                .mul => {
-                    const b = stack[sp - 1];
-                    const a = stack[sp - 2];
-                    sp -= 1;
-                    stack[sp - 1] = try promoteArith(a, b, .mul);
-                },
-                .div => {
-                    const b = stack[sp - 1];
-                    const a = stack[sp - 2];
-                    if (a == .string or a == .bool or b == .string or b == .bool) return error.InvalidExpression;
-                    sp -= 1;
-                    const rf = b.toFloat();
-                    if (rf == 0.0) return error.DivisionByZero;
-                    stack[sp - 1] = .{ .float = a.toFloat() / rf };
-                },
-                .cmp => |op| {
-                    const b = stack[sp - 1];
-                    const a = stack[sp - 2];
-                    sp -= 1;
-                    stack[sp - 1] = .{ .bool = try cmpValues(a, b, op) };
-                },
-                .negate => {
-                    const v = stack[sp - 1];
-                    stack[sp - 1] = switch (v) {
-                        .int => |i| .{ .int = -i },
-                        .float => |f| .{ .float = -f },
-                        .string, .bool => return error.InvalidExpression,
-                    };
-                },
-                .not => {
-                    const v = stack[sp - 1];
-                    stack[sp - 1] = .{ .bool = !v.isTruthy() };
-                },
-                .call_min => {
-                    const b = stack[sp - 1];
-                    const a = stack[sp - 2];
-                    sp -= 1;
-                    stack[sp - 1] = try promoteMinMax(a, b, true);
-                },
-                .call_max => {
-                    const b = stack[sp - 1];
-                    const a = stack[sp - 2];
-                    sp -= 1;
-                    stack[sp - 1] = try promoteMinMax(a, b, false);
-                },
-                .and_sc => |skip| {
-                    const v = stack[sp - 1];
-                    if (!v.isTruthy()) {
-                        stack[sp - 1] = .{ .bool = false };
-                        ip += skip;
-                    } else {
-                        sp -= 1;
-                    }
-                },
-                .or_sc => |skip| {
-                    const v = stack[sp - 1];
-                    if (v.isTruthy()) {
-                        stack[sp - 1] = .{ .bool = true };
-                        ip += skip;
-                    } else {
-                        sp -= 1;
-                    }
-                },
-                .to_bool => {
-                    const v = stack[sp - 1];
-                    stack[sp - 1] = .{ .bool = v.isTruthy() };
-                },
-                .call_join => |ref| {
-                    sp -= 1;
-                    const delim = switch (stack[sp]) {
-                        .string => |s| s,
-                        else => return error.InvalidExpression,
-                    };
-                    const resolved = resolver.resolve(ref.binding) orelse return error.VariableNotFound;
-                    const list = switch (resolved) {
-                        .list => |l| l,
-                        else => return error.InvalidExpression,
-                    };
-                    const joined = try joinList(allocator, list, delim);
-                    if (owned_count >= max_owned) {
-                        allocator.free(joined);
-                        return error.OutOfMemory;
-                    }
-                    owned_strings[owned_count] = joined;
-                    owned_count += 1;
-                    stack[sp] = .{ .string = joined };
-                    sp += 1;
-                },
-            }
-        }
-
-        const result = stack[0];
-        var result_owned: ?[]u8 = null;
-        for (owned_strings[0..owned_count]) |maybe_str| {
-            if (maybe_str) |s| {
-                if (result == .string and result.string.ptr == s.ptr) {
-                    result_owned = s;
-                } else {
-                    allocator.free(s);
-                }
-            }
-        }
-        return .{ .value = result, .owned = result_owned, .allocator = allocator };
-    }
-
-    /// Evaluates and returns true when the result is non-zero.
-    pub fn isTruthy(self: *const Expression, resolver: VarResolver, allocator: std.mem.Allocator) EvalError!bool {
-        const result = try self.eval(resolver, allocator);
-        defer result.deinit();
-        return result.value.isTruthy();
-    }
-
-    /// Iterates through all variable names referenced in the expression.
-    pub fn variables(self: *const Expression) VariableIterator {
-        return .{ .ops = self.ops };
-    }
-
-    /// Rewrites variable references from source names to compiled bindings.
-    pub fn bindVariables(self: *Expression, slots: anytype) !void {
-        for (self.ops) |*op| {
-            switch (op.*) {
-                .load_var => |ref| switch (ref) {
-                    .name => |name| {
-                        op.* = .{ .load_var = .{ .binding = resolveBuiltin(name) orelse .{
-                            .slot = slots.getIndex(name) orelse return error.UndeclaredVariable,
-                        } } };
-                    },
-                    .binding => return error.AlreadyBound,
-                },
-                .load_list_len => |ref| switch (ref) {
-                    .name => |name| {
-                        op.* = .{ .load_list_len = .{ .binding = resolveBuiltin(name) orelse .{
-                            .slot = slots.getIndex(name) orelse return error.UndeclaredVariable,
-                        } } };
-                    },
-                    .binding => return error.AlreadyBound,
-                },
-                .load_list_elem => |ref| switch (ref) {
-                    .name => |name| {
-                        op.* = .{ .load_list_elem = .{ .binding = resolveBuiltin(name) orelse .{
-                            .slot = slots.getIndex(name) orelse return error.UndeclaredVariable,
-                        } } };
-                    },
-                    .binding => return error.AlreadyBound,
-                },
-                .call_join => |ref| switch (ref) {
-                    .name => |name| {
-                        op.* = .{ .call_join = .{ .binding = resolveBuiltin(name) orelse .{
-                            .slot = slots.getIndex(name) orelse return error.UndeclaredVariable,
-                        } } };
-                    },
-                    .binding => return error.AlreadyBound,
-                },
-                else => {},
-            }
-        }
-    }
-};
-
-/// Iterator over all variable names in an expression.
-pub const VariableIterator = struct {
-    ops: []const Op,
-    idx: usize = 0,
-
-    pub fn next(self: *VariableIterator) ?[]const u8 {
-        while (self.idx < self.ops.len) : (self.idx += 1) {
-            const ref: VariableRef = switch (self.ops[self.idx]) {
-                .load_var => |r| r,
-                .load_list_len => |r| r,
-                .load_list_elem => |r| r,
-                .call_join => |r| r,
-                else => continue,
-            };
-            switch (ref) {
-                .name => |n| {
-                    self.idx += 1;
-                    return n;
-                },
-                .binding => {},
-            }
-        }
-        return null;
-    }
-};
-
-pub const ResolvedValue = union(enum) {
-    int: i64,
-    float: f64,
-    bool: bool,
-    string: []const u8,
-    /// Opaque list: length and a callback to resolve individual elements.
-    list: ResolvedList,
-};
-
-pub const ResolvedList = struct {
-    len: usize,
-    ctx: *const anyopaque,
-    at_fn: *const fn (ctx: *const anyopaque, index: usize) ?ResolvedValue,
-
-    fn at(self: ResolvedList, index: usize) ?ResolvedValue {
-        return self.at_fn(self.ctx, index);
-    }
-};
-
-/// Opaque variable resolver: calls the provided function to map bindings to values.
-pub const VarResolver = struct {
-    ctx: *const anyopaque,
-    resolve_fn: *const fn (ctx: *const anyopaque, binding: VariableBinding) ?ResolvedValue,
-
-    pub fn resolve(self: VarResolver, binding: VariableBinding) ?ResolvedValue {
-        return self.resolve_fn(self.ctx, binding);
-    }
-
-    /// Returns a resolver that always yields null (for variable-free expressions).
-    pub fn none() VarResolver {
-        return .{
-            .ctx = undefined,
-            .resolve_fn = struct {
-                fn noResolve(_: *const anyopaque, _: VariableBinding) ?ResolvedValue {
-                    return null;
-                }
-            }.noResolve,
-        };
-    }
-};
-
-/// Parse an expression string into a compiled bytecode program.
-pub fn parse(allocator: std.mem.Allocator, source: []const u8) EvalError!Expression {
-    var parser = Parser{
-        .allocator = allocator,
-        .source = source,
-        .pos = 0,
-        .ops = .empty,
-    };
-    errdefer parser.ops.deinit(allocator);
-
-    try parser.parseOr();
-    if (parser.pos < parser.source.len) {
-        parser.skipWhitespace();
-        if (parser.pos < parser.source.len) return error.UnexpectedToken;
-    }
-
-    return .{
-        .ops = try parser.ops.toOwnedSlice(allocator),
-    };
-}
-
-// ── Eval helpers ────────────────────────────────────────────────────────
-
-/// Arithmetic with integer promotion: int ⊗ int → int; otherwise float.
-fn promoteArith(a: Value, b: Value, comptime op: enum { add, sub, mul }) EvalError!Value {
-    return switch (a) {
-        .string, .bool => error.InvalidExpression,
-        .int => |ai| switch (b) {
-            .string, .bool => error.InvalidExpression,
-            .int => |bi| .{ .int = switch (op) {
-                .add => ai + bi,
-                .sub => ai - bi,
-                .mul => ai * bi,
-            } },
-            .float => |bf| blk: {
-                const af: f64 = @floatFromInt(ai);
-                break :blk .{ .float = switch (op) {
-                    .add => af + bf,
-                    .sub => af - bf,
-                    .mul => af * bf,
-                } };
-            },
-        },
-        .float => |af| switch (b) {
-            .string, .bool => error.InvalidExpression,
-            .int, .float => blk: {
-                const bf = b.toFloat();
-                break :blk .{ .float = switch (op) {
-                    .add => af + bf,
-                    .sub => af - bf,
-                    .mul => af * bf,
-                } };
-            },
-        },
-    };
-}
-
-/// Compare two values. Mixed int/float promotes to float.
-/// String-string comparison uses lexicographic order; mixed string/number is an error.
-fn cmpValues(a: Value, b: Value, op: CmpOp) EvalError!bool {
-    return switch (a) {
-        .string => |sa| switch (b) {
-            .string => |sb| {
-                const order = std.mem.order(u8, sa, sb);
-                return switch (op) {
-                    .eq => order == .eq,
-                    .ne => order != .eq,
-                    .lt => order == .lt,
-                    .le => order != .gt,
-                    .gt => order == .gt,
-                    .ge => order != .lt,
-                };
-            },
-            else => error.InvalidExpression,
-        },
-        else => switch (b) {
-            .string => error.InvalidExpression,
-            else => {
-                const l = a.toFloat();
-                const r = b.toFloat();
-                return switch (op) {
-                    .gt => l > r,
-                    .lt => l < r,
-                    .ge => l >= r,
-                    .le => l <= r,
-                    .eq => l == r,
-                    .ne => l != r,
-                };
-            },
-        },
-    };
-}
-
-/// min/max with integer promotion: int ⊗ int → int; otherwise float.
-fn promoteMinMax(a: Value, b: Value, comptime pick_min: bool) EvalError!Value {
-    return switch (a) {
-        .string, .bool => error.InvalidExpression,
-        .int => |ai| switch (b) {
-            .string, .bool => error.InvalidExpression,
-            .int => |bi| .{ .int = if (pick_min) @min(ai, bi) else @max(ai, bi) },
-            .float => |bf| blk: {
-                const af: f64 = @floatFromInt(ai);
-                break :blk .{ .float = if (pick_min) @min(af, bf) else @max(af, bf) };
-            },
-        },
-        .float => |af| switch (b) {
-            .string, .bool => error.InvalidExpression,
-            .int, .float => blk: {
-                const bf = b.toFloat();
-                break :blk .{ .float = if (pick_min) @min(af, bf) else @max(af, bf) };
-            },
-        },
-    };
-}
-
-/// Convert a resolved external value to an expression `Value`.
-fn resolveScalar(val: ResolvedValue) EvalError!Value {
-    return switch (val) {
-        .int => |i| .{ .int = i },
-        .float => |f| .{ .float = f },
-        .bool => |b| .{ .bool = b },
-        .string => |s| .{ .string = s },
-        .list => error.InvalidExpression,
-    };
-}
-
-/// Join list elements into a single string with the given delimiter.
-fn joinList(allocator: std.mem.Allocator, list: ResolvedList, delimiter: []const u8) EvalError![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-
-    for (0..list.len) |i| {
-        if (i > 0) out.appendSlice(allocator, delimiter) catch return error.OutOfMemory;
-        const elem = list.at(i) orelse return error.VariableNotFound;
-        switch (elem) {
-            .int => |v| {
-                var buf: [64]u8 = undefined;
-                const s = std.fmt.bufPrint(&buf, "{d}", .{v}) catch return error.OutOfMemory;
-                out.appendSlice(allocator, s) catch return error.OutOfMemory;
-            },
-            .float => |v| {
-                var buf: [64]u8 = undefined;
-                const s = std.fmt.bufPrint(&buf, "{d}", .{v}) catch return error.OutOfMemory;
-                out.appendSlice(allocator, s) catch return error.OutOfMemory;
-            },
-            .bool => |b| out.appendSlice(allocator, if (b) "true" else "false") catch return error.OutOfMemory,
-            .string => |s| out.appendSlice(allocator, s) catch return error.OutOfMemory,
-            .list => return error.InvalidExpression,
-        }
-    }
-
-    return out.toOwnedSlice(allocator) catch error.OutOfMemory;
-}
-
-pub fn resolveBuiltin(name: []const u8) ?VariableBinding {
-    if (std.mem.eql(u8, name, "$ITER")) return .{ .builtin = .iter };
-    if (std.mem.eql(u8, name, "$TASK_IDX")) return .{ .builtin = .task_idx };
-    if (std.mem.eql(u8, name, "$ELAPSED_MS")) return .{ .builtin = .elapsed_ms };
-    return null;
-}
-
-// ── Recursive-descent parser (emits bytecode directly) ──────────────────
-//
-// Precedence (lowest to highest):
-//   ||
-//   &&
-//   == !=
-//   > < >= <=
-//   + -
-//   * /
-//   unary (! -)
-//   atom (number, variable, parenthesized)
-
-const Parser = struct {
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    pos: usize,
-    ops: std.ArrayList(Op),
-    depth: usize = 0,
-    max_depth: usize = 0,
-
-    fn push(self: *Parser) EvalError!void {
-        self.depth += 1;
-        if (self.depth > Expression.max_stack) return error.StackOverflow;
-        if (self.depth > self.max_depth) self.max_depth = self.depth;
-    }
-
-    fn pop(self: *Parser, n: usize) void {
-        self.depth -= n;
-    }
-
-    fn emit(self: *Parser, op: Op) EvalError!void {
-        self.ops.append(self.allocator, op) catch return error.OutOfMemory;
-    }
-
-    fn skipWhitespace(self: *Parser) void {
-        while (self.pos < self.source.len and (self.source[self.pos] == ' ' or self.source[self.pos] == '\t')) {
-            self.pos += 1;
-        }
-    }
-
-    fn peek(self: *Parser) ?u8 {
-        self.skipWhitespace();
-        if (self.pos >= self.source.len) return null;
-        return self.source[self.pos];
-    }
-
-    fn matchChar(self: *Parser, expected: u8) bool {
-        self.skipWhitespace();
-        if (self.pos < self.source.len and self.source[self.pos] == expected) {
-            self.pos += 1;
-            return true;
-        }
-        return false;
-    }
-
-    fn matchStr(self: *Parser, prefix: []const u8) bool {
-        self.skipWhitespace();
-        if (std.mem.startsWith(u8, self.source[self.pos..], prefix)) {
-            self.pos += prefix.len;
-            return true;
-        }
-        return false;
-    }
-
-    // ── Precedence levels ───────────────────────────────────────────
-
-    fn parseOr(self: *Parser) EvalError!void {
-        try self.parseAnd();
-        while (true) {
-            if (self.matchStr("||")) {
-                const sc_pos = self.ops.items.len;
-                try self.emit(.{ .or_sc = 0 }); // placeholder
-                self.pop(1); // LHS consumed by short-circuit
-                try self.parseAnd();
-                try self.emit(.to_bool);
-                self.ops.items[sc_pos] = .{ .or_sc = @intCast(self.ops.items.len - sc_pos - 1) };
-            } else break;
-        }
-    }
-
-    fn parseAnd(self: *Parser) EvalError!void {
-        try self.parseEquality();
-        while (true) {
-            if (self.matchStr("&&")) {
-                const sc_pos = self.ops.items.len;
-                try self.emit(.{ .and_sc = 0 }); // placeholder
-                self.pop(1); // LHS consumed by short-circuit
-                try self.parseEquality();
-                try self.emit(.to_bool);
-                self.ops.items[sc_pos] = .{ .and_sc = @intCast(self.ops.items.len - sc_pos - 1) };
-            } else break;
-        }
-    }
-
-    fn parseEquality(self: *Parser) EvalError!void {
-        try self.parseComparison();
-        while (true) {
-            if (self.matchStr("==")) {
-                try self.parseComparison();
-                try self.emit(.{ .cmp = .eq });
-                self.pop(1); // binary: 2 in, 1 out
-            } else if (self.matchStr("!=")) {
-                try self.parseComparison();
-                try self.emit(.{ .cmp = .ne });
-                self.pop(1);
-            } else break;
-        }
-    }
-
-    fn parseComparison(self: *Parser) EvalError!void {
-        try self.parseAddSub();
-        while (true) {
-            if (self.matchStr(">=")) {
-                try self.parseAddSub();
-                try self.emit(.{ .cmp = .ge });
-                self.pop(1);
-            } else if (self.matchStr("<=")) {
-                try self.parseAddSub();
-                try self.emit(.{ .cmp = .le });
-                self.pop(1);
-            } else if (self.matchStr(">")) {
-                try self.parseAddSub();
-                try self.emit(.{ .cmp = .gt });
-                self.pop(1);
-            } else if (self.matchStr("<")) {
-                try self.parseAddSub();
-                try self.emit(.{ .cmp = .lt });
-                self.pop(1);
-            } else break;
-        }
-    }
-
-    fn parseAddSub(self: *Parser) EvalError!void {
-        try self.parseMulDiv();
-        while (true) {
-            self.skipWhitespace();
-            if (self.matchChar('+')) {
-                try self.parseMulDiv();
-                try self.emit(.add);
-                self.pop(1);
-            } else if (self.pos < self.source.len and self.source[self.pos] == '-') {
-                // Distinguish binary minus from unary minus by consuming here.
-                self.pos += 1;
-                try self.parseMulDiv();
-                try self.emit(.sub);
-                self.pop(1);
-            } else break;
-        }
-    }
-
-    fn parseMulDiv(self: *Parser) EvalError!void {
-        try self.parseUnary();
-        while (true) {
-            self.skipWhitespace();
-            if (self.matchChar('*')) {
-                try self.parseUnary();
-                try self.emit(.mul);
-                self.pop(1);
-            } else if (self.matchChar('/')) {
-                try self.parseUnary();
-                try self.emit(.div);
-                self.pop(1);
-            } else break;
-        }
-    }
-
-    fn parseUnary(self: *Parser) EvalError!void {
-        self.skipWhitespace();
-        if (self.matchChar('!')) {
-            try self.parseUnary();
-            try self.emit(.not);
-            return;
-        }
-        if (self.pos < self.source.len and self.source[self.pos] == '-') {
-            // Only treat as unary if the next char is not a digit (avoid conflicting with negative number literals handled by atom).
-            if (self.pos + 1 < self.source.len and !std.ascii.isDigit(self.source[self.pos + 1]) and self.source[self.pos + 1] != '.') {
-                self.pos += 1;
-                try self.parseUnary();
-                try self.emit(.negate);
-                return;
-            }
-        }
-        try self.parseAtom();
-    }
-
-    fn parseAtom(self: *Parser) EvalError!void {
-        self.skipWhitespace();
-        if (self.pos >= self.source.len) return error.InvalidExpression;
-
-        // Parenthesized sub-expression.
-        if (self.source[self.pos] == '(') {
-            self.pos += 1;
-            try self.parseOr();
-            if (!self.matchChar(')')) return error.UnmatchedParen;
-            return;
-        }
-
-        // Variable reference: ${name} or ${name}[subscript]
-        if (self.pos + 1 < self.source.len and self.source[self.pos] == '$' and self.source[self.pos + 1] == '{') {
-            self.pos += 2;
-            const name_start = self.pos;
-            while (self.pos < self.source.len and self.source[self.pos] != '}') : (self.pos += 1) {}
-            if (self.pos >= self.source.len) return error.InvalidExpression;
-            const name = self.source[name_start..self.pos];
-            self.pos += 1; // skip '}'
-
-            // Check for list subscript [expr]
-            if (self.pos < self.source.len and self.source[self.pos] == '[') {
-                self.pos += 1;
-                try self.parseOr(); // subscript → pushes index onto stack
-                if (!self.matchChar(']')) return error.UnmatchedParen;
-                try self.emit(.{ .load_list_elem = .{ .name = name } });
-                // subscript pushed +1, load_list_elem pops index & pushes elem → net 0
-                // from the subscript's perspective; overall atom contributes +1
-            } else {
-                try self.emit(.{ .load_var = .{ .name = name } });
-                try self.push();
-            }
-            return;
-        }
-
-        // Built-in variable: $ITER, $TASK_IDX
-        if (self.pos + 1 < self.source.len and self.source[self.pos] == '$' and std.ascii.isAlphabetic(self.source[self.pos + 1])) {
-            const start = self.pos;
-            self.pos += 1;
-            while (self.pos < self.source.len and (std.ascii.isAlphanumeric(self.source[self.pos]) or self.source[self.pos] == '_')) : (self.pos += 1) {}
-            const name = self.source[start..self.pos];
-            try self.emit(.{ .load_var = .{ .name = name } });
-            try self.push();
-            return;
-        }
-
-        // Function call: min(x, y), max(x, y), len(x)
-        if (std.ascii.isAlphabetic(self.source[self.pos])) {
-            const name_start = self.pos;
-            while (self.pos < self.source.len and (std.ascii.isAlphanumeric(self.source[self.pos]) or self.source[self.pos] == '_')) : (self.pos += 1) {}
-            const name = self.source[name_start..self.pos];
-            self.skipWhitespace();
-            if (self.matchChar('(')) {
-                if (std.mem.eql(u8, name, "len")) {
-                    // len() requires a single variable argument.
-                    const var_ref = try self.parseVarArg();
-                    if (!self.matchChar(')')) return error.UnexpectedToken;
-                    try self.emit(.{ .load_list_len = var_ref });
-                    try self.push();
-                } else if (std.mem.eql(u8, name, "min") or std.mem.eql(u8, name, "max")) {
-                    try self.parseOr(); // first arg
-                    if (!self.matchChar(',')) return error.UnexpectedToken;
-                    try self.parseOr(); // second arg
-                    if (!self.matchChar(')')) return error.UnexpectedToken;
-                    try self.emit(if (std.mem.eql(u8, name, "min")) .call_min else .call_max);
-                    self.pop(1); // binary: 2 in, 1 out
-                } else if (std.mem.eql(u8, name, "join")) {
-                    // join(${list_var}, "delimiter")
-                    const var_ref = try self.parseVarArg();
-                    if (!self.matchChar(',')) return error.UnexpectedToken;
-                    try self.parseOr(); // delimiter expression (usually a string literal)
-                    if (!self.matchChar(')')) return error.UnexpectedToken;
-                    try self.emit(.{ .call_join = var_ref });
-                    // delimiter pushed by parseOr (+1), call_join pops it and pushes result: net 0
-                } else {
-                    return error.InvalidExpression;
-                }
-                return;
-            } else {
-                // Not a function, backtrack to start of name.
-                self.pos = name_start;
-            }
-        }
-
-        // String literal: "..."
-        if (self.pos < self.source.len and self.source[self.pos] == '"') {
-            self.pos += 1;
-            const start = self.pos;
-            while (self.pos < self.source.len and self.source[self.pos] != '"') : (self.pos += 1) {}
-            if (self.pos >= self.source.len) return error.InvalidExpression;
-            const str = self.source[start..self.pos];
-            self.pos += 1; // skip closing quote
-            try self.push();
-            try self.emit(.{ .push_string = str });
-            return;
-        }
-
-        // Number literal (including negative).
-        if (std.ascii.isDigit(self.source[self.pos]) or self.source[self.pos] == '-' or self.source[self.pos] == '.') {
-            try self.parseNumber();
-            return;
-        }
-
-        return error.UnexpectedToken;
-    }
-
-    /// Parse a bare variable reference (${name} or $BUILTIN) without
-    /// emitting an op.  Used for function args that must be variables.
-    fn parseVarArg(self: *Parser) EvalError!VariableRef {
-        self.skipWhitespace();
-        if (self.pos + 1 < self.source.len and self.source[self.pos] == '$' and self.source[self.pos + 1] == '{') {
-            self.pos += 2;
-            const name_start = self.pos;
-            while (self.pos < self.source.len and self.source[self.pos] != '}') : (self.pos += 1) {}
-            if (self.pos >= self.source.len) return error.InvalidExpression;
-            const name = self.source[name_start..self.pos];
-            self.pos += 1;
-            return .{ .name = name };
-        }
-        if (self.pos + 1 < self.source.len and self.source[self.pos] == '$' and std.ascii.isAlphabetic(self.source[self.pos + 1])) {
-            const start = self.pos;
-            self.pos += 1;
-            while (self.pos < self.source.len and (std.ascii.isAlphanumeric(self.source[self.pos]) or self.source[self.pos] == '_')) : (self.pos += 1) {}
-            return .{ .name = self.source[start..self.pos] };
-        }
-        return error.InvalidExpression;
-    }
-
-    fn parseNumber(self: *Parser) EvalError!void {
-        const start = self.pos;
-        if (self.pos < self.source.len and self.source[self.pos] == '-') self.pos += 1;
-        var is_float = false;
-        while (self.pos < self.source.len and (std.ascii.isDigit(self.source[self.pos]) or self.source[self.pos] == '.')) {
-            if (self.source[self.pos] == '.') is_float = true;
-            self.pos += 1;
-        }
-        // Scientific notation (e.g., 1e3, 2.5E-4) implies float.
-        if (self.pos < self.source.len and (self.source[self.pos] == 'e' or self.source[self.pos] == 'E')) {
-            is_float = true;
-            self.pos += 1;
-            if (self.pos < self.source.len and (self.source[self.pos] == '+' or self.source[self.pos] == '-')) self.pos += 1;
-            while (self.pos < self.source.len and std.ascii.isDigit(self.source[self.pos])) : (self.pos += 1) {}
-        }
-        if (self.pos == start) return error.InvalidNumber;
-        const text = self.source[start..self.pos];
-        if (!is_float) {
-            const int_val = std.fmt.parseInt(i64, text, 10) catch return error.InvalidNumber;
-            try self.emit(.{ .push_int = int_val });
-        } else {
-            const float_val = std.fmt.parseFloat(f64, text) catch return error.InvalidNumber;
-            try self.emit(.{ .push_float = float_val });
-        }
-        try self.push();
-    }
-};
+const types = @import("expr/types.zig");
+const ast_mod = @import("expr/ast.zig");
+const bytecode = @import("expr/bytecode.zig");
+const parse_ast_mod = @import("expr/parse_ast.zig");
+
+pub const Value = types.Value;
+pub const EvalError = types.EvalError;
+pub const BuiltinVar = types.BuiltinVar;
+pub const VariableBinding = types.VariableBinding;
+pub const VariableRef = types.VariableRef;
+pub const ResolvedValue = types.ResolvedValue;
+pub const ResolvedList = types.ResolvedList;
+pub const VarResolver = types.VarResolver;
+pub const resolveBuiltin = types.resolveBuiltin;
+
+pub const Ast = ast_mod.Ast;
+pub const Op = bytecode.Op;
+pub const Expression = bytecode.Expression;
+
+pub const parseAst = parse_ast_mod.parseAst;
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
+fn lowerTestExpr(allocator: std.mem.Allocator, source: []const u8) EvalError!Expression {
+    var temp_arena = std.heap.ArenaAllocator.init(allocator);
+    defer temp_arena.deinit();
+
+    var ast = try parseAst(temp_arena.allocator(), source);
+    return try ast.lower(allocator);
+}
+
+fn lowerBoundTestExpr(allocator: std.mem.Allocator, source: []const u8, slots: anytype) !Expression {
+    var temp_arena = std.heap.ArenaAllocator.init(allocator);
+    defer temp_arena.deinit();
+
+    var ast = try parseAst(temp_arena.allocator(), source);
+    try ast.bindVariables(slots);
+    return try ast.lower(allocator);
+}
+
 /// Test helper: parse + eval in one shot (no variable binding).
 fn testEval(allocator: std.mem.Allocator, source: []const u8, resolver: VarResolver) EvalError!Value {
-    var expr_obj = try parse(allocator, source);
+    var expr_obj = try lowerTestExpr(allocator, source);
     defer expr_obj.deinit(allocator);
     const result = try expr_obj.eval(resolver, allocator);
     std.debug.assert(result.owned == null);
@@ -987,9 +78,16 @@ const TestContext = struct {
             if (std.mem.eql(u8, n, name)) return i;
         }
         const idx = self.count;
-        self.slot_names[self.count] = name;
+        self.slot_names[self.count] = std.testing.allocator.dupe(u8, name) catch unreachable;
         self.count += 1;
         return idx;
+    }
+
+    fn deinit(self: *TestContext) void {
+        for (self.slot_names[0..self.count]) |name| {
+            std.testing.allocator.free(name);
+        }
+        self.* = undefined;
     }
 
     fn resolve(ctx_ptr: *const anyopaque, binding: VariableBinding) ?ResolvedValue {
@@ -1012,22 +110,74 @@ const TestContext = struct {
 };
 
 fn testBoundEval(source: []const u8, vars: *const std.StringHashMap([]const u8)) !Value {
-    var expr_obj = try parse(std.testing.allocator, source);
-    defer expr_obj.deinit(std.testing.allocator);
     var tc = TestContext{ .vars = vars };
+    defer tc.deinit();
     var slots: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer slots.deinit(std.testing.allocator);
-    var it = expr_obj.variables();
-    while (it.next()) |name| {
-        if (slots.getIndex(name) == null) {
-            _ = tc.addVar(name);
-            try slots.put(std.testing.allocator, name, {});
-        }
-    }
-    try expr_obj.bindVariables(&slots);
-    const result = try expr_obj.eval(tc.resolver(), std.testing.allocator);
+    var temp_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer temp_arena.deinit();
+    const ast = try parseAst(temp_arena.allocator(), source);
+    try collectAstNames(ast.root, &tc, &slots);
+    var expr_obj = try lowerBoundTestExpr(std.testing.allocator, source, &slots);
+    defer expr_obj.deinit(std.testing.allocator);
+    var result = try expr_obj.eval(tc.resolver(), std.testing.allocator);
     defer result.deinit();
     return result.value;
+}
+
+fn collectAstNames(
+    node: *const Ast.Node,
+    tc: *TestContext,
+    slots: *std.StringArrayHashMapUnmanaged(void),
+) !void {
+    switch (node.*) {
+        .load_var => |ref| switch (ref) {
+            .name => |name| try addAstName(tc, slots, name),
+            .binding => {},
+        },
+        .load_list_len => |ref| switch (ref) {
+            .name => |name| try addAstName(tc, slots, name),
+            .binding => {},
+        },
+        .load_list_elem => |data| {
+            switch (data.ref) {
+                .name => |name| try addAstName(tc, slots, name),
+                .binding => {},
+            }
+            try collectAstNames(data.index, tc, slots);
+        },
+        .call_join => |data| {
+            switch (data.ref) {
+                .name => |name| try addAstName(tc, slots, name),
+                .binding => {},
+            }
+            try collectAstNames(data.delim, tc, slots);
+        },
+        .unary => |data| try collectAstNames(data.child, tc, slots),
+        .binary => |data| {
+            try collectAstNames(data.lhs, tc, slots);
+            try collectAstNames(data.rhs, tc, slots);
+        },
+        .logical_and => |data| {
+            try collectAstNames(data.lhs, tc, slots);
+            try collectAstNames(data.rhs, tc, slots);
+        },
+        .logical_or => |data| {
+            try collectAstNames(data.lhs, tc, slots);
+            try collectAstNames(data.rhs, tc, slots);
+        },
+        else => {},
+    }
+}
+
+fn addAstName(
+    tc: *TestContext,
+    slots: *std.StringArrayHashMapUnmanaged(void),
+    name: []const u8,
+) !void {
+    if (slots.getIndex(name) != null) return;
+    _ = tc.addVar(name);
+    try slots.put(std.testing.allocator, name, {});
 }
 
 fn expectInt(expected: i64, actual: Value) !void {
@@ -1063,7 +213,7 @@ test "expr arithmetic" {
 
     try expectInt(7, try testEval(std.testing.allocator, "3 + 4", r));
     try expectInt(6, try testEval(std.testing.allocator, "2 * 3", r));
-    try expectFloat(2.5, try testEval(std.testing.allocator, "5 / 2", r)); // division always float
+    try expectFloat(2.5, try testEval(std.testing.allocator, "5 / 2", r));
     try expectFloat(0.0, try testEval(std.testing.allocator, "0 + 0.0", r));
     try expectInt(0, try testEval(std.testing.allocator, "0 + 0", r));
 
@@ -1121,14 +271,12 @@ test "expr built-in variables" {
     var empty_slots: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer empty_slots.deinit(std.testing.allocator);
 
-    var e1 = try parse(std.testing.allocator, "$ITER");
+    var e1 = try lowerBoundTestExpr(std.testing.allocator, "$ITER", &empty_slots);
     defer e1.deinit(std.testing.allocator);
-    try e1.bindVariables(&empty_slots);
     try expectInt(42, (try e1.eval(resolver_v, std.testing.allocator)).value);
 
-    var e2 = try parse(std.testing.allocator, "$ITER + 1");
+    var e2 = try lowerBoundTestExpr(std.testing.allocator, "$ITER + 1", &empty_slots);
     defer e2.deinit(std.testing.allocator);
-    try e2.bindVariables(&empty_slots);
     try expectInt(43, (try e2.eval(resolver_v, std.testing.allocator)).value);
 }
 
@@ -1146,7 +294,6 @@ test "expr complex power check" {
     try vars.put("voltage", "12.0");
     try vars.put("current", "9.0");
 
-    // power = 108.0 (float * float), check > 100 (int) → promoted comparison
     try expectBool(true, try testBoundEval("${voltage} * ${current} > 100", &vars));
 }
 
@@ -1184,20 +331,15 @@ test "expr parse reuse" {
     var vars: std.StringHashMap([]const u8) = .init(std.testing.allocator);
     defer vars.deinit();
 
-    var expr_obj = try parse(std.testing.allocator, "${x} * 2 + 1");
-    defer expr_obj.deinit(std.testing.allocator);
-
     var tc = TestContext{ .vars = &vars };
+    defer tc.deinit();
     var slots: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer slots.deinit(std.testing.allocator);
-    var it = expr_obj.variables();
-    while (it.next()) |name| {
-        if (slots.getIndex(name) == null) {
-            _ = tc.addVar(name);
-            try slots.put(std.testing.allocator, name, {});
-        }
-    }
-    try expr_obj.bindVariables(&slots);
+    _ = tc.addVar("x");
+    try slots.put(std.testing.allocator, "x", {});
+
+    var expr_obj = try lowerBoundTestExpr(std.testing.allocator, "${x} * 2 + 1", &slots);
+    defer expr_obj.deinit(std.testing.allocator);
 
     try vars.put("x", "3");
     try expectInt(7, (try expr_obj.eval(tc.resolver(), std.testing.allocator)).value);
@@ -1216,9 +358,7 @@ test "resolveBuiltin recognizes $ELAPSED_MS" {
 
 // ── List tests ──────────────────────────────────────────────────────────
 
-/// Test helper that stores both scalar and list values for slot-based resolution.
 const ListTestContext = struct {
-    /// Per-slot values: scalar (string) or list (slice of f64).
     slot_values: [32]SlotValue = undefined,
     slot_names: [32][]const u8 = undefined,
     count: usize = 0,
@@ -1287,10 +427,8 @@ test "expr len() on list variable" {
     var slot_map = tc.slots();
     defer slot_map.deinit(std.testing.allocator);
 
-    var e = try parse(std.testing.allocator, "len(${voltages})");
+    var e = try lowerBoundTestExpr(std.testing.allocator, "len(${voltages})", &slot_map);
     defer e.deinit(std.testing.allocator);
-    try e.bindVariables(&slot_map);
-
     try expectInt(3, (try e.eval(tc.resolver(), std.testing.allocator)).value);
 }
 
@@ -1302,10 +440,8 @@ test "expr list indexing" {
     var slot_map = tc.slots();
     defer slot_map.deinit(std.testing.allocator);
 
-    var e = try parse(std.testing.allocator, "${arr}[${idx}]");
+    var e = try lowerBoundTestExpr(std.testing.allocator, "${arr}[${idx}]", &slot_map);
     defer e.deinit(std.testing.allocator);
-    try e.bindVariables(&slot_map);
-
     try expectFloat(20.0, (try e.eval(tc.resolver(), std.testing.allocator)).value);
 }
 
@@ -1316,10 +452,8 @@ test "expr list index with literal" {
     var slot_map = tc.slots();
     defer slot_map.deinit(std.testing.allocator);
 
-    var e = try parse(std.testing.allocator, "${arr}[2]");
+    var e = try lowerBoundTestExpr(std.testing.allocator, "${arr}[2]", &slot_map);
     defer e.deinit(std.testing.allocator);
-    try e.bindVariables(&slot_map);
-
     try expectFloat(30.0, (try e.eval(tc.resolver(), std.testing.allocator)).value);
 }
 
@@ -1330,10 +464,8 @@ test "expr list index out of bounds" {
     var slot_map = tc.slots();
     defer slot_map.deinit(std.testing.allocator);
 
-    var e = try parse(std.testing.allocator, "${arr}[5]");
+    var e = try lowerBoundTestExpr(std.testing.allocator, "${arr}[5]", &slot_map);
     defer e.deinit(std.testing.allocator);
-    try e.bindVariables(&slot_map);
-
     try std.testing.expectError(error.InvalidExpression, e.eval(tc.resolver(), std.testing.allocator));
 }
 
@@ -1344,10 +476,8 @@ test "expr list in arithmetic" {
     var slot_map = tc.slots();
     defer slot_map.deinit(std.testing.allocator);
 
-    var e = try parse(std.testing.allocator, "${arr}[0] + ${arr}[2]");
+    var e = try lowerBoundTestExpr(std.testing.allocator, "${arr}[0] + ${arr}[2]", &slot_map);
     defer e.deinit(std.testing.allocator);
-    try e.bindVariables(&slot_map);
-
     try expectFloat(40.0, (try e.eval(tc.resolver(), std.testing.allocator)).value);
 }
 
@@ -1358,10 +488,8 @@ test "expr bare list variable is error" {
     var slot_map = tc.slots();
     defer slot_map.deinit(std.testing.allocator);
 
-    var e = try parse(std.testing.allocator, "${arr} + 1");
+    var e = try lowerBoundTestExpr(std.testing.allocator, "${arr} + 1", &slot_map);
     defer e.deinit(std.testing.allocator);
-    try e.bindVariables(&slot_map);
-
     try std.testing.expectError(error.InvalidExpression, e.eval(tc.resolver(), std.testing.allocator));
 }
 
@@ -1372,17 +500,12 @@ test "expr len() in arithmetic" {
     var slot_map = tc.slots();
     defer slot_map.deinit(std.testing.allocator);
 
-    var e = try parse(std.testing.allocator, "len(${items}) - 1");
+    var e = try lowerBoundTestExpr(std.testing.allocator, "len(${items}) - 1", &slot_map);
     defer e.deinit(std.testing.allocator);
-    try e.bindVariables(&slot_map);
-
     try expectInt(3, (try e.eval(tc.resolver(), std.testing.allocator)).value);
 }
 
 test "expr stack overflow rejected at parse time" {
-    // Build "1+(1+(1+(...)))" with >64 nesting levels.
-    // Each pending "1+" keeps its LHS on the stack while recursing into the RHS,
-    // so 65 levels requires 65 simultaneous stack slots → exceeds max_stack.
     var buf: [1024]u8 = undefined;
     var pos: usize = 0;
     for (0..Expression.max_stack + 1) |_| {
@@ -1396,13 +519,23 @@ test "expr stack overflow rejected at parse time" {
         pos += 1;
     }
     const src = buf[0..pos];
-    try std.testing.expectError(error.StackOverflow, parse(std.testing.allocator, src));
+    try std.testing.expectError(error.StackOverflow, lowerTestExpr(std.testing.allocator, src));
 }
 
 test "expr string literal" {
     const r = VarResolver.none();
-    try expectString("hello", try testEval(std.testing.allocator, "\"hello\"", r));
-    try expectString("", try testEval(std.testing.allocator, "\"\"", r));
+
+    var hello = try lowerTestExpr(std.testing.allocator, "\"hello\"");
+    defer hello.deinit(std.testing.allocator);
+    var hello_result = try hello.eval(r, std.testing.allocator);
+    defer hello_result.deinit();
+    try expectString("hello", hello_result.value);
+
+    var empty = try lowerTestExpr(std.testing.allocator, "\"\"");
+    defer empty.deinit(std.testing.allocator);
+    var empty_result = try empty.eval(r, std.testing.allocator);
+    defer empty_result.deinit();
+    try expectString("", empty_result.value);
 }
 
 test "expr string comparison" {
@@ -1429,9 +562,7 @@ test "expr string variable comparison" {
 test "expr string truthiness" {
     const r = VarResolver.none();
 
-    // Non-empty string is truthy
     try expectBool(true, try testEval(std.testing.allocator, "\"hello\" && 1", r));
-    // Empty string is falsy
     try expectBool(false, try testEval(std.testing.allocator, "\"\" && 1", r));
     try expectBool(false, try testEval(std.testing.allocator, "!\"hello\"", r));
     try expectBool(true, try testEval(std.testing.allocator, "!\"\"", r));
@@ -1460,11 +591,9 @@ test "expr join() on list variable" {
     var slot_map = tc.slots();
     defer slot_map.deinit(std.testing.allocator);
 
-    var e = try parse(std.testing.allocator, "join(${channels}, \",\")");
+    var e = try lowerBoundTestExpr(std.testing.allocator, "join(${channels}, \",\")", &slot_map);
     defer e.deinit(std.testing.allocator);
-    try e.bindVariables(&slot_map);
-
-    const result = try e.eval(tc.resolver(), std.testing.allocator);
+    var result = try e.eval(tc.resolver(), std.testing.allocator);
     defer result.deinit();
     try expectString("1,2,3", result.value);
 }
@@ -1476,11 +605,9 @@ test "expr join() with custom delimiter" {
     var slot_map = tc.slots();
     defer slot_map.deinit(std.testing.allocator);
 
-    var e = try parse(std.testing.allocator, "join(${items}, \" | \")");
+    var e = try lowerBoundTestExpr(std.testing.allocator, "join(${items}, \" | \")", &slot_map);
     defer e.deinit(std.testing.allocator);
-    try e.bindVariables(&slot_map);
-
-    const result = try e.eval(tc.resolver(), std.testing.allocator);
+    var result = try e.eval(tc.resolver(), std.testing.allocator);
     defer result.deinit();
     try expectString("10 | 20", result.value);
 }
@@ -1492,11 +619,9 @@ test "expr join() on empty list" {
     var slot_map = tc.slots();
     defer slot_map.deinit(std.testing.allocator);
 
-    var e = try parse(std.testing.allocator, "join(${empty}, \",\")");
+    var e = try lowerBoundTestExpr(std.testing.allocator, "join(${empty}, \",\")", &slot_map);
     defer e.deinit(std.testing.allocator);
-    try e.bindVariables(&slot_map);
-
-    const result = try e.eval(tc.resolver(), std.testing.allocator);
+    var result = try e.eval(tc.resolver(), std.testing.allocator);
     defer result.deinit();
     try expectString("", result.value);
 }
@@ -1508,9 +633,7 @@ test "expr join() on non-list is error" {
     var slot_map = tc.slots();
     defer slot_map.deinit(std.testing.allocator);
 
-    var e = try parse(std.testing.allocator, "join(${x}, \",\")");
+    var e = try lowerBoundTestExpr(std.testing.allocator, "join(${x}, \",\")", &slot_map);
     defer e.deinit(std.testing.allocator);
-    try e.bindVariables(&slot_map);
-
     try std.testing.expectError(error.InvalidExpression, e.eval(tc.resolver(), std.testing.allocator));
 }

@@ -84,7 +84,7 @@ pub fn executeCompute(
     comp: *const recipe_mod.Step.Compute,
     ctx: *session.Context,
 ) !?SavedValue {
-    const eval_res = try comp.expression.eval(ctx.varResolver(), allocator);
+    var eval_res = try comp.expression.eval(ctx.varResolver(), allocator);
     defer eval_res.deinit();
     const result = eval_res.value;
 
@@ -134,7 +134,7 @@ fn executeInstrumentCall(
 
     var render_stack_buf: [command_stack_bytes]u8 = undefined;
     const write_termination = step.command.instrument.write_termination;
-    const rendered = cmd.render(allocator, render_stack_buf[0..], resolved_args, write_termination, float_precision) catch |err| switch (err) {
+    var rendered = cmd.render(allocator, render_stack_buf[0..], resolved_args, write_termination, float_precision) catch |err| switch (err) {
         error.MissingVariable => {
             var warning_buf: [160]u8 = undefined;
             const warning = try std.fmt.bufPrint(warning_buf[0..], "missing template variable for call {s}", .{step.call});

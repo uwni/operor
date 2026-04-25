@@ -119,8 +119,9 @@ pub const Command = struct {
     }
 
     /// Frees all owned data allocated by `parse`.
-    pub fn deinit(self: Command, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Command, allocator: std.mem.Allocator) void {
         template.freeSegments(allocator, self.template);
         if (self.description) |d| allocator.free(d);
+        self.* = undefined;
     }
 };
