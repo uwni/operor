@@ -118,3 +118,12 @@ pub fn bindBorrowedVariableRef(ref: *VariableRef, slots: anytype) !void {
         .binding => return error.AlreadyBound,
     }
 }
+
+pub fn remapBoundVariableRef(ref: *VariableRef, mapper: anytype) !void {
+    switch (ref.*) {
+        .binding => |binding| {
+            ref.* = .{ .binding = try mapper.remap(binding) };
+        },
+        .name => return error.UnboundVariable,
+    }
+}

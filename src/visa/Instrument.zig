@@ -111,24 +111,24 @@ fn readToOwnedWithChunk(self: *Instrument, allocator: std.mem.Allocator, chunk_b
 }
 
 /// Waits for the configured query delay before a follow-up read.
-pub fn waitQueryDelay(self: *const Instrument) void {
+pub fn waitQueryDelay(self: *const Instrument) !void {
     if (self.options.query_delay_ms == 0) return;
     var threaded: std.Io.Threaded = .init_single_threaded;
     const io = threaded.io();
-    io.sleep(.fromMilliseconds(@as(i64, self.options.query_delay_ms)), .awake) catch {};
+    try io.sleep(.fromMilliseconds(@as(i64, self.options.query_delay_ms)), .awake);
 }
 
 /// Writes a command and reads the complete response using the configured query delay.
-pub fn queryToOwned(self: *Instrument, allocator: std.mem.Allocator, command: []const u8) bindings.Error![]u8 {
+pub fn queryToOwned(self: *Instrument, allocator: std.mem.Allocator, command: []const u8) ![]u8 {
     try self.write(command);
-    self.waitQueryDelay();
+    try self.waitQueryDelay();
     return self.readToOwned(allocator);
 }
 
 /// Writes a command and returns the first read chunk directly into `buffer`.
-pub fn queryRaw(self: *Instrument, command: []const u8, buffer: []u8) bindings.Error!ReadResult {
+pub fn queryRaw(self: *Instrument, command: []const u8, buffer: []u8) !ReadResult {
     try self.write(command);
-    self.waitQueryDelay();
+    try self.waitQueryDelay();
     return self.read(buffer);
 }
 

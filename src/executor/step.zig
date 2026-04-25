@@ -6,10 +6,9 @@ const session = @import("session.zig");
 const expr = @import("../expr.zig");
 const parallel_mod = @import("parallel.zig");
 
-const warn_tag = tty.styledText("[WARN]", .{.yellow});
 const dry_run_tag = tty.styledText("[dry-run]", .{.fuchsia});
 
-const command_stack_bytes: usize = 512;
+pub const command_stack_bytes: usize = 512;
 /// Parsed response value in the native Zig type indicated by the command encoding.
 pub const ParsedValue = union(instrument_types.Encoding) {
     raw: []const u8,
@@ -71,7 +70,7 @@ pub fn executeStep(
         .instrument_call => |ic| executeInstrumentCall(allocator, instrument.?, &ic, ctx, dry_run, log_sink, scratch, float_precision),
         .compute => |comp| executeCompute(allocator, &comp, ctx),
         .sleep => |s| {
-            ctx.io.sleep(.fromNanoseconds(@as(i96, s.duration_ms) * 1_000_000), .awake) catch {};
+            try ctx.io.sleep(.fromNanoseconds(@as(i96, s.duration_ms) * 1_000_000), .awake);
             return null;
         },
         .parallel => |p| parallel_mod.executeParallel(allocator, &p, instruments, ctx, dry_run, log_sink, scratch, float_precision),
@@ -88,27 +87,53 @@ pub fn executeCompute(
     defer eval_res.deinit();
     const result = eval_res.value;
 
-    try ctx.setSlot(comp.save_slot, switch (result) {
+    const value: session.Value = switch (result) {
         .int => |i| .{ .int = i },
         .float => |f| .{ .float = f },
         .bool => |b| .{ .bool = b },
         .string => |s| .{ .string = s },
-    });
-
-    const save_column = comp.save_column orelse return null;
-
-    // String for pipeline Frame.
-    const value_owned = switch (result) {
-        .int => |i| try std.fmt.allocPrint(allocator, "{d}", .{i}),
-        .float => |f| try std.fmt.allocPrint(allocator, "{d}", .{f}),
-        .bool => |b| try allocator.dupe(u8, if (b) "true" else "false"),
-        .string => |s| try allocator.dupe(u8, s),
     };
+    try ctx.setSlot(comp.save_slot, value);
+    return try saveColumnValue(allocator, comp.save_column, value);
+}
 
-    return .{
-        .column = save_column,
-        .value_owned = value_owned,
-    };
+pub fn renderInstrumentCall(
+    allocator: std.mem.Allocator,
+    step: *const recipe_mod.Step.InstrumentCall,
+    ctx: *const session.Context,
+    scratch: *StepScratch,
+    stack_buffer: []u8,
+    float_precision: ?u8,
+) !recipe_mod.RenderedCommand {
+    scratch.reset();
+    const alloc = scratch.tempAllocator();
+    const resolved_args = try alloc.alloc(session.RenderValue, step.args.len);
+    for (step.args, 0..) |arg, idx| {
+        resolved_args[idx] = try resolveStepArg(ctx, arg, alloc);
+    }
+
+    return try step.command.render(
+        allocator,
+        stack_buffer,
+        resolved_args,
+        step.command.instrument.write_termination,
+        float_precision,
+    );
+}
+
+pub fn storeInstrumentResponse(
+    allocator: std.mem.Allocator,
+    step: *const recipe_mod.Step.InstrumentCall,
+    ctx: *session.Context,
+    resp: []const u8,
+) !?SavedValue {
+    const slot = step.save_slot orelse return null;
+    const encoding = step.command.response orelse return null;
+
+    const stored = try parseResponse(encoding, resp, step.command.instrument.bool_map);
+    const value = parsedValueToSessionValue(stored);
+    try ctx.setSlot(slot, value);
+    return try saveColumnValue(allocator, step.save_column, value);
 }
 
 /// Sends an instrument command and optionally saves the parsed response.
@@ -122,74 +147,25 @@ fn executeInstrumentCall(
     scratch: *StepScratch,
     float_precision: ?u8,
 ) !?SavedValue {
-    const cmd = step.command;
-    const adapter_name = cmd.instrument.adapter_name;
-
-    scratch.reset();
-    const alloc = scratch.tempAllocator();
-    const resolved_args = try alloc.alloc(session.RenderValue, step.args.len);
-    for (step.args, 0..) |arg, idx| {
-        resolved_args[idx] = try resolveStepArg(ctx, arg, alloc);
-    }
-
     var render_stack_buf: [command_stack_bytes]u8 = undefined;
-    const write_termination = step.command.instrument.write_termination;
-    var rendered = cmd.render(allocator, render_stack_buf[0..], resolved_args, write_termination, float_precision) catch |err| switch (err) {
-        error.MissingVariable => {
-            var warning_buf: [160]u8 = undefined;
-            const warning = try std.fmt.bufPrint(warning_buf[0..], "missing template variable for call {s}", .{step.call});
-            logWarning(log_sink, warning);
-            return null;
-        },
-        else => return err,
-    };
+    var rendered = try renderInstrumentCall(allocator, step, ctx, scratch, render_stack_buf[0..], float_precision);
     defer rendered.deinit(allocator);
 
     if (dry_run) {
-        logDryRun(log_sink, adapter_name, rendered.bytes);
+        logDryRun(log_sink, step.command.instrument.adapter_name, rendered.bytes);
         return null;
     }
 
     const instr = &(instrument.handle orelse unreachable);
-    instr.write(rendered.bytes) catch |err| {
-        var warning_buf: [192]u8 = undefined;
-        const warning = try std.fmt.bufPrint(warning_buf[0..], "write failed {s}: {any}", .{ adapter_name, err });
-        logWarning(log_sink, warning);
-        return null;
-    };
+    try instr.write(rendered.bytes);
 
-    if (cmd.response) |encoding| {
-        instr.waitQueryDelay();
-        const resp = instr.readToOwned(allocator) catch |err| {
-            var warning_buf: [192]u8 = undefined;
-            const warning = try std.fmt.bufPrint(warning_buf[0..], "read failed {s}: {any}", .{ adapter_name, err });
-            logWarning(log_sink, warning);
-            return null;
-        };
-        errdefer allocator.free(resp);
-        if (step.save_slot) |slot| {
-            defer allocator.free(resp);
-            const stored = try parseResponse(encoding, resp, cmd.instrument.bool_map);
-            const value = switch (stored) {
-                .raw => |v| session.Value{ .string = v },
-                .string => |v| session.Value{ .string = v },
-                .int => |v| session.Value{ .int = v },
-                .float => |v| session.Value{ .float = v },
-                .bool => |v| session.Value{ .bool = v },
-            };
-            try ctx.setSlot(slot, value);
-
-            const save_column = step.save_column orelse return null;
-            const stored_value_owned = try std.fmt.allocPrint(allocator, "{f}", .{value});
-
-            return .{
-                .column = save_column,
-                .value_owned = stored_value_owned,
-            };
-        } else {
-            defer allocator.free(resp);
-            return null;
+    if (step.command.response != null) {
+        if (instr.options.query_delay_ms > 0) {
+            try ctx.io.sleep(.fromMilliseconds(@as(i64, instr.options.query_delay_ms)), .awake);
         }
+        const resp = try instr.readToOwned(allocator);
+        defer allocator.free(resp);
+        return try storeInstrumentResponse(allocator, step, ctx, resp);
     }
 
     return null;
@@ -222,6 +198,28 @@ fn parseBoolResponse(trimmed: []const u8, bool_map: ?recipe_mod.BoolTextMap) !bo
     return trimmed.len > 0 and trimmed[0] == '1';
 }
 
+fn parsedValueToSessionValue(stored: ParsedValue) session.Value {
+    return switch (stored) {
+        .raw => |v| .{ .string = v },
+        .string => |v| .{ .string = v },
+        .int => |v| .{ .int = v },
+        .float => |v| .{ .float = v },
+        .bool => |v| .{ .bool = v },
+    };
+}
+
+fn saveColumnValue(
+    allocator: std.mem.Allocator,
+    save_column: ?usize,
+    value: session.Value,
+) !?SavedValue {
+    const column = save_column orelse return null;
+    return .{
+        .column = column,
+        .value_owned = try std.fmt.allocPrint(allocator, "{f}", .{value}),
+    };
+}
+
 fn evalToValue(
     e: *const expr.Expression,
     ctx: *const session.Context,
@@ -252,12 +250,6 @@ pub fn resolveStepArg(
             break :blk .{ .list = resolved };
         },
     };
-}
-
-fn logWarning(log_sink: session.LogSink, message: []const u8) void {
-    var buf: [512]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, warn_tag ++ " {s}\n", .{message}) catch return;
-    log_sink.writeAll(text);
 }
 
 fn logDryRun(log_sink: session.LogSink, adapter_name: []const u8, rendered: []const u8) void {

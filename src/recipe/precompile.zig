@@ -125,7 +125,8 @@ const SlotMap = struct {
 
         var optimizer = ExprOptimizer.init(self, temp_arena.allocator());
         try optimizer.optimize(&ast);
-        return try optimizer.lower(ast.root);
+        try ast.remapBindings(SlotBindingRemapper{ .slot_map = self });
+        return try ast.lower(self.alloc);
     }
 
     /// Look up a name and return the runtime binding (var slot remapped)
@@ -174,6 +175,20 @@ const SlotMap = struct {
     }
 };
 
+const SlotBindingRemapper = struct {
+    slot_map: *const SlotMap,
+
+    pub fn remap(self: @This(), binding: expr.VariableBinding) !expr.VariableBinding {
+        return switch (binding) {
+            .builtin => binding,
+            .slot => |slot| if (slot < self.slot_map.const_count)
+                error.InvalidExpression
+            else
+                .{ .slot = slot - self.slot_map.const_count },
+        };
+    }
+};
+
 const ExprOptimizer = struct {
     slot_map: *const SlotMap,
     allocator: std.mem.Allocator,
@@ -182,11 +197,6 @@ const ExprOptimizer = struct {
         int,
         float,
         other,
-    };
-
-    const LowerError = error{
-        OutOfMemory,
-        InvalidExpression,
     };
 
     fn init(slot_map: *const SlotMap, allocator: std.mem.Allocator) ExprOptimizer {
@@ -198,17 +208,6 @@ const ExprOptimizer = struct {
 
     fn optimize(self: *ExprOptimizer, ast: *expr.Ast) !void {
         ast.root = try self.simplify(ast.root);
-    }
-
-    fn lower(self: *ExprOptimizer, root: *expr.Ast.Node) !expr.Expression {
-        var out: std.ArrayList(expr.Op) = .empty;
-        errdefer {
-            freeLoweredOps(self.slot_map.alloc, out.items);
-            out.deinit(self.slot_map.alloc);
-        }
-        try self.lowerNode(&out, root);
-        try validateLoweredOps(out.items);
-        return .{ .ops = try out.toOwnedSlice(self.slot_map.alloc) };
     }
 
     fn newNode(self: *ExprOptimizer, value: expr.Ast.Node) !*expr.Ast.Node {
@@ -252,7 +251,7 @@ const ExprOptimizer = struct {
             },
             .unary => |data| blk: {
                 const child = try self.simplify(data.child);
-                if (data.op == .to_bool and nodeProducesBool(child)) break :blk child;
+                if (data.op == .to_bool and child.producesBool()) break :blk child;
                 if (constValue(child)) |value| {
                     if (try foldUnaryConst(data.op, value)) |folded| {
                         break :blk try self.newConstNode(folded);
@@ -304,72 +303,6 @@ const ExprOptimizer = struct {
                 break :blk try self.newNode(.{ .logical_or = .{ .lhs = lhs, .rhs = rhs } });
             },
         };
-    }
-
-    fn lowerNode(self: *ExprOptimizer, out: *std.ArrayList(expr.Op), node: *expr.Ast.Node) LowerError!void {
-        switch (node.*) {
-            .int => |value| try out.append(self.slot_map.alloc, .{ .push_int = value }),
-            .float => |value| try out.append(self.slot_map.alloc, .{ .push_float = value }),
-            .bool => |value| try out.append(self.slot_map.alloc, .{ .push_bool = value }),
-            .string => |value| try out.append(self.slot_map.alloc, .{ .push_string = try self.slot_map.alloc.dupe(u8, value) }),
-            .load_var => |ref| try out.append(self.slot_map.alloc, .{ .load_var = try self.remapBinding(ref) }),
-            .load_list_len => |ref| try out.append(self.slot_map.alloc, .{ .load_list_len = try self.remapBinding(ref) }),
-            .load_list_elem => |data| {
-                try self.lowerNode(out, data.index);
-                try out.append(self.slot_map.alloc, .{ .load_list_elem = try self.remapBinding(data.ref) });
-            },
-            .call_join => |data| {
-                try self.lowerNode(out, data.delim);
-                try out.append(self.slot_map.alloc, .{ .call_join = try self.remapBinding(data.ref) });
-            },
-            .unary => |data| {
-                try self.lowerNode(out, data.child);
-                try out.append(self.slot_map.alloc, switch (data.op) {
-                    .negate => .negate,
-                    .not => .not,
-                    .to_bool => .to_bool,
-                });
-            },
-            .binary => |data| {
-                try self.lowerNode(out, data.lhs);
-                try self.lowerNode(out, data.rhs);
-                try out.append(self.slot_map.alloc, switch (data.op) {
-                    .add => .add,
-                    .sub => .sub,
-                    .mul => .mul,
-                    .div => .div,
-                    .cmp_gt => .{ .cmp = .gt },
-                    .cmp_lt => .{ .cmp = .lt },
-                    .cmp_ge => .{ .cmp = .ge },
-                    .cmp_le => .{ .cmp = .le },
-                    .cmp_eq => .{ .cmp = .eq },
-                    .cmp_ne => .{ .cmp = .ne },
-                    .call_min => .call_min,
-                    .call_max => .call_max,
-                });
-            },
-            .logical_and => |data| {
-                try self.emitAsBool(out, data.lhs);
-                const jump_pos = out.items.len;
-                try out.append(self.slot_map.alloc, .{ .jump_if_false = 0 });
-                try out.append(self.slot_map.alloc, .pop);
-                try self.emitAsBool(out, data.rhs);
-                out.items[jump_pos] = .{ .jump_if_false = @intCast(out.items.len - jump_pos - 1) };
-            },
-            .logical_or => |data| {
-                try self.emitAsBool(out, data.lhs);
-                const jump_pos = out.items.len;
-                try out.append(self.slot_map.alloc, .{ .jump_if_true = 0 });
-                try out.append(self.slot_map.alloc, .pop);
-                try self.emitAsBool(out, data.rhs);
-                out.items[jump_pos] = .{ .jump_if_true = @intCast(out.items.len - jump_pos - 1) };
-            },
-        }
-    }
-
-    fn emitAsBool(self: *ExprOptimizer, out: *std.ArrayList(expr.Op), node: *expr.Ast.Node) LowerError!void {
-        try self.lowerNode(out, node);
-        if (!nodeProducesBool(node)) try out.append(self.slot_map.alloc, .to_bool);
     }
 
     fn newConstNode(self: *ExprOptimizer, value: expr.Value) !*expr.Ast.Node {
@@ -441,7 +374,7 @@ const ExprOptimizer = struct {
     }
 
     fn makeToBool(self: *ExprOptimizer, node: *expr.Ast.Node) !*expr.Ast.Node {
-        if (nodeProducesBool(node)) return node;
+        if (node.producesBool()) return node;
         if (constValue(node)) |value| return try self.newNode(.{ .bool = value.isTruthy() });
         return try self.newNode(.{ .unary = .{ .op = .to_bool, .child = node } });
     }
@@ -511,10 +444,10 @@ const ExprOptimizer = struct {
         defer nonconst.deinit(self.allocator);
 
         for (operands.items, 0..) |item, idx| {
-                if (constInt(item)) |value| {
-                    if (first_const_pos == null) first_const_pos = idx;
-                    const_count += 1;
-                    aggregate = switch (op) {
+            if (constInt(item)) |value| {
+                if (first_const_pos == null) first_const_pos = idx;
+                const_count += 1;
+                aggregate = switch (op) {
                     .add => aggregate + value,
                     .mul => aggregate * value,
                     else => unreachable,
@@ -641,84 +574,7 @@ const ExprOptimizer = struct {
             .call_max => foldPromoteMinMax(lhs, rhs, false),
         };
     }
-
-    fn remapBinding(self: *ExprOptimizer, ref: expr.VariableRef) !expr.VariableBinding {
-        const binding = switch (ref) {
-            .binding => |binding| binding,
-            .name => return error.InvalidExpression,
-        };
-        return switch (binding) {
-            .builtin => binding,
-            .slot => |slot| if (slot < self.slot_map.const_count)
-                error.InvalidExpression
-            else
-                .{ .slot = slot - self.slot_map.const_count },
-        };
-    }
 };
-
-fn nodeProducesBool(node: *const expr.Ast.Node) bool {
-    return switch (node.*) {
-        .bool => true,
-        .unary => |data| switch (data.op) {
-            .not, .to_bool => true,
-            .negate => false,
-        },
-        .binary => |data| switch (data.op) {
-            .cmp_gt,
-            .cmp_lt,
-            .cmp_ge,
-            .cmp_le,
-            .cmp_eq,
-            .cmp_ne,
-            => true,
-            else => false,
-        },
-        .logical_and, .logical_or => true,
-        else => false,
-    };
-}
-
-fn freeLoweredOps(allocator: std.mem.Allocator, ops: []const expr.Op) void {
-    for (ops) |op| switch (op) {
-        .push_string => |text| allocator.free(text),
-        else => {},
-    };
-}
-
-fn validateLoweredOps(ops: []const expr.Op) !void {
-    var depth: usize = 0;
-    var max_depth: usize = 0;
-    for (ops) |op| {
-        switch (op) {
-            .push_int, .push_float, .push_string, .push_bool, .load_var, .load_list_len => depth += 1,
-            .load_list_elem, .call_join => {},
-            .add, .sub, .mul, .div, .cmp, .call_min, .call_max => {
-                if (depth < 2) return error.InvalidExpression;
-                depth -= 1;
-            },
-            .negate, .not, .to_bool, .jump_if_false, .jump_if_true => {
-                if (depth < 1) return error.InvalidExpression;
-            },
-            .pop => {
-                if (depth < 1) return error.InvalidExpression;
-                depth -= 1;
-            },
-        }
-        if (depth > max_depth) max_depth = depth;
-    }
-    if (depth != 1) return error.InvalidExpression;
-    if (max_depth > expr.Expression.max_stack) return error.StackOverflow;
-}
-
-fn opFromConst(value: expr.Value) expr.Op {
-    return switch (value) {
-        .int => |v| .{ .push_int = v },
-        .float => |v| .{ .push_float = v },
-        .bool => |v| .{ .push_bool = v },
-        .string => |v| .{ .push_string = v },
-    };
-}
 
 const FoldArithOp = enum {
     add,

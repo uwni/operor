@@ -116,6 +116,35 @@ pub const Ast = struct {
             }
         }
 
+        pub fn remapBindings(self: *Node, mapper: anytype) !void {
+            switch (self.*) {
+                .int, .float, .bool, .string => {},
+                .load_var => |*ref| try types.remapBoundVariableRef(ref, mapper),
+                .load_list_len => |*ref| try types.remapBoundVariableRef(ref, mapper),
+                .load_list_elem => |*data| {
+                    try types.remapBoundVariableRef(&data.ref, mapper);
+                    try data.index.remapBindings(mapper);
+                },
+                .call_join => |*data| {
+                    try types.remapBoundVariableRef(&data.ref, mapper);
+                    try data.delim.remapBindings(mapper);
+                },
+                .unary => |*data| try data.child.remapBindings(mapper),
+                .binary => |*data| {
+                    try data.lhs.remapBindings(mapper);
+                    try data.rhs.remapBindings(mapper);
+                },
+                .logical_and => |*data| {
+                    try data.lhs.remapBindings(mapper);
+                    try data.rhs.remapBindings(mapper);
+                },
+                .logical_or => |*data| {
+                    try data.lhs.remapBindings(mapper);
+                    try data.rhs.remapBindings(mapper);
+                },
+            }
+        }
+
         pub fn lower(self: *const Node, allocator: std.mem.Allocator, out: *std.ArrayList(bytecode.Op)) EvalError!void {
             switch (self.*) {
                 .int => |value| try out.append(allocator, .{ .push_int = value }),
@@ -212,6 +241,10 @@ pub const Ast = struct {
 
     pub fn bindVariables(self: *Ast, slots: anytype) !void {
         try self.root.bindVariables(slots);
+    }
+
+    pub fn remapBindings(self: *Ast, mapper: anytype) !void {
+        try self.root.remapBindings(mapper);
     }
 
     pub fn lower(self: *const Ast, allocator: std.mem.Allocator) EvalError!bytecode.Expression {

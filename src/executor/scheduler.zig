@@ -54,7 +54,7 @@ pub fn runTasks(
 
     for (compiled_recipe.tasks, 0..) |*task, task_idx| {
         if (stop_requested.load(.seq_cst)) break;
-        if (shouldStop(compiled_recipe, ctx, allocator)) break;
+        if (try shouldStop(compiled_recipe, ctx, allocator)) break;
 
         switch (task.*) {
             .sequential => {
@@ -62,7 +62,7 @@ pub fn runTasks(
                 ctx.iteration += 1;
             },
             .conditional => |cond| {
-                const is_true = cond.@"if".isTruthy(ctx.varResolver(), allocator) catch false;
+                const is_true = try cond.@"if".isTruthy(ctx.varResolver(), allocator);
                 if (is_true) {
                     try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, &scratch, column_count);
                     ctx.iteration += 1;
@@ -71,9 +71,9 @@ pub fn runTasks(
             .loop => |loop_task| {
                 while (true) {
                     if (stop_requested.load(.seq_cst)) break;
-                    if (shouldStop(compiled_recipe, ctx, allocator)) break;
+                    if (try shouldStop(compiled_recipe, ctx, allocator)) break;
 
-                    const is_true = loop_task.condition.isTruthy(ctx.varResolver(), allocator) catch false;
+                    const is_true = try loop_task.condition.isTruthy(ctx.varResolver(), allocator);
                     if (!is_true) break;
 
                     try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, &scratch, column_count);
@@ -233,9 +233,9 @@ pub const SamplerState = struct {
     result: ?anyerror = null,
 };
 
-fn shouldStop(compiled_recipe: *const recipe_mod.PrecompiledRecipe, ctx: *session.Context, allocator: std.mem.Allocator) bool {
+fn shouldStop(compiled_recipe: *const recipe_mod.PrecompiledRecipe, ctx: *session.Context, allocator: std.mem.Allocator) !bool {
     const stop_expr = compiled_recipe.stop_when orelse return false;
-    return stop_expr.isTruthy(ctx.varResolver(), allocator) catch false;
+    return try stop_expr.isTruthy(ctx.varResolver(), allocator);
 }
 
 pub fn runTasksThread(state: *SamplerState) void {

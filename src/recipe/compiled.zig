@@ -1,6 +1,5 @@
 const std = @import("std");
 const instrument = @import("../instrument.zig");
-const diagnostic = @import("diagnostic.zig");
 const expr = @import("../expr.zig");
 
 /// Writes a float with exactly `decimal_places` digits after the decimal point,
@@ -153,7 +152,6 @@ pub const PrecompiledCommand = struct {
     args: []CommandArg,
     /// Errors that can occur while rendering the precompiled template.
     pub const RenderError = error{
-        MissingVariable,
         BufferTooSmall,
         OutOfMemory,
     };
@@ -425,17 +423,6 @@ pub const PrecompiledRecipe = struct {
     /// Releases all arena-owned precompiled recipe data.
     pub fn deinit(self: *PrecompiledRecipe) void {
         self.arena.deinit();
-    }
-
-    /// Loads and precompiles a recipe document from disk.
-    pub fn precompilePath(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        recipe_path: []const u8,
-        adapter_dir: std.Io.Dir,
-        precompile_diagnostic: *diagnostic.PrecompileDiagnostic,
-    ) !PrecompiledRecipe {
-        return @import("precompile.zig").precompilePath(allocator, io, recipe_path, adapter_dir, precompile_diagnostic);
     }
 };
 

@@ -21,7 +21,8 @@ const Phase = enum {
 const SessionState = struct {
     step: *const recipe_mod.Step,
     phase: Phase,
-    job_id: visa.ViJobId = 0,
+    /// VISA async job identifier for the current in-flight write/read, if any.
+    job_id: ?visa.ViJobId = null,
     /// Chunk buffer for async reads (allocated once, reused for multi-chunk).
     read_chunk_buf: ?[]u8 = null,
     /// Accumulates multi-chunk async read responses.
@@ -95,15 +96,14 @@ pub fn executeParallel(
     for (steps) |*s| {
         if (instrumentIdx(s)) |idx| {
             if (instruments[idx].handle) |*instr| {
-                instr.enableAsyncEvents() catch {
-                    return executeSequentialFallback(allocator, parallel, instruments, ctx, dry_run, log_sink, scratch, float_precision);
-                };
+                try instr.enableAsyncEvents();
             }
         }
     }
 
     // --- Initialize session states ---
     const states = try allocator.alloc(SessionState, steps.len);
+    errdefer cancelActiveJobs(states, instruments);
     defer {
         for (states) |*st| {
             if (st.read_chunk_buf) |buf| allocator.free(buf);
@@ -121,8 +121,7 @@ pub fn executeParallel(
         // Execute compute steps synchronously upfront (no I/O involved).
         if (s.action == .compute) {
             const comp = &s.action.compute;
-            const result = step_mod.executeCompute(allocator, comp, ctx) catch null;
-            states[i].result = result;
+            states[i].result = try step_mod.executeCompute(allocator, comp, ctx);
         }
     }
 
@@ -134,10 +133,6 @@ pub fn executeParallel(
             if (st.phase == .done) continue;
             all_done = false;
             try advanceState(st, allocator, instruments, ctx, scratch, float_precision);
-        }
-        if (!all_done) {
-            // Yield to avoid busy-spinning.
-            ctx.io.sleep(.fromNanoseconds(1_000_000), .awake) catch {}; // 1ms
         }
     }
 
@@ -177,18 +172,14 @@ fn advanceState(
         .write_pending => {
             const ic = &st.step.action.instrument_call;
             const instr = &(instruments[ic.instrument_idx].handle orelse unreachable);
+            var render_stack_buf: [step_mod.command_stack_bytes]u8 = undefined;
+            var rendered = try step_mod.renderInstrumentCall(allocator, ic, ctx, scratch, render_stack_buf[0..], float_precision);
+            defer rendered.deinit(allocator);
 
-            scratch.reset();
-            const alloc = scratch.tempAllocator();
-            const resolved_args = try alloc.alloc(session.RenderValue, ic.args.len);
-            for (ic.args, 0..) |arg, idx| {
-                resolved_args[idx] = try step_mod.resolveStepArg(ctx, arg, alloc);
-            }
-
-            var render_stack_buf: [512]u8 = undefined;
-            const rendered = try ic.command.render(allocator, render_stack_buf[0..], resolved_args, ic.command.instrument.write_termination, float_precision);
-
-            st.rendered_command = rendered.owned orelse try allocator.dupe(u8, rendered.bytes);
+            st.rendered_command = if (rendered.owned) |owned| blk: {
+                rendered.owned = null;
+                break :blk owned;
+            } else try allocator.dupe(u8, rendered.bytes);
 
             st.job_id = try instr.writeAsync(st.rendered_command.?);
             st.phase = .write_waiting;
@@ -199,6 +190,7 @@ fn advanceState(
 
             const event = (try instr.waitEvent(0)) orelse return;
             defer instr.close(event) catch {};
+            st.job_id = null;
 
             if (st.rendered_command) |cmd| {
                 allocator.free(cmd);
@@ -239,6 +231,7 @@ fn advanceState(
             const instr = &(instruments[ic.instrument_idx].handle orelse unreachable);
 
             const event = (try instr.waitEvent(0)) orelse return;
+            st.job_id = null;
             const ret_count = instr.eventRetCount(event) catch |e| {
                 instr.close(event) catch {};
                 return e;
@@ -273,6 +266,21 @@ fn advanceState(
     }
 }
 
+fn cancelActiveJobs(states: []SessionState, instruments: []session.InstrumentRuntime) void {
+    for (states) |*st| {
+        const job_id = st.job_id orelse continue;
+        switch (st.step.action) {
+            .instrument_call => |ic| {
+                if (instruments[ic.instrument_idx].handle) |*instr| {
+                    instr.terminate(job_id) catch {};
+                }
+            },
+            else => {},
+        }
+        st.job_id = null;
+    }
+}
+
 /// Parses the accumulated read data and stores the result in the session state.
 fn processReadResult(
     st: *SessionState,
@@ -287,26 +295,7 @@ fn processReadResult(
         st.read_accum.items.len -= term.len;
     }
 
-    const read_data = st.read_accum.items;
-    const slot = ic.save_slot orelse return;
-    const encoding = ic.command.response orelse return;
-    const stored = try step_mod.parseResponse(
-        encoding,
-        read_data,
-        ic.command.instrument.bool_map,
-    );
-    const value: session.Value = switch (stored) {
-        .raw => |v| .{ .string = v },
-        .string => |v| .{ .string = v },
-        .int => |v| .{ .int = v },
-        .float => |v| .{ .float = v },
-        .bool => |v| .{ .bool = v },
-    };
-    try ctx.setSlot(slot, value);
-
-    const col = ic.save_column orelse return;
-    const value_owned = try std.fmt.allocPrint(allocator, "{f}", .{value});
-    st.result = .{ .column = col, .value_owned = value_owned };
+    st.result = try step_mod.storeInstrumentResponse(allocator, ic, ctx, st.read_accum.items);
 }
 
 /// Fallback: execute inner steps sequentially using the existing step executor.

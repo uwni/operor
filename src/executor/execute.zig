@@ -233,3 +233,73 @@ test "executor pipeline creates csv frame sink during dry run" {
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "[SUMMARY]"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "buffer capacity: 64"));
 }
+
+test "executor propagates conditional task expression failures" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.makePath("adapters");
+    try workspace.writeFile("recipes/conditional_fail.yaml",
+        \\instruments: {}
+        \\pipeline:
+        \\  record: all
+        \\tasks:
+        \\  - if: "1 / 0"
+        \\    steps: []
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/conditional_fail.yaml");
+    defer gpa.free(recipe_path);
+
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    try std.testing.expectError(error.DivisionByZero, execute(gpa, .{
+        .adapter_dir = adapter_dir,
+        .recipe_path = recipe_path,
+        .dry_run = true,
+        .io = std.testing.io,
+        .log = &out.writer,
+    }));
+}
+
+test "executor propagates parallel step failures" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.makePath("adapters");
+    try workspace.writeFile("recipes/parallel_fail.yaml",
+        \\instruments: {}
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  out: 0
+        \\tasks:
+        \\  - steps:
+        \\      - parallel:
+        \\          - compute: "1 / 0"
+        \\            assign: out
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/parallel_fail.yaml");
+    defer gpa.free(recipe_path);
+
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    try std.testing.expectError(error.DivisionByZero, execute(gpa, .{
+        .adapter_dir = adapter_dir,
+        .recipe_path = recipe_path,
+        .dry_run = true,
+        .io = std.testing.io,
+        .log = &out.writer,
+    }));
+}

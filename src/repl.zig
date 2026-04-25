@@ -245,7 +245,7 @@ const ReplContext = struct {
 
     fn queryAt(self: *ReplContext, allocator: std.mem.Allocator, idx: usize, payload: []const u8) ![]u8 {
         try self.writeAt(idx, payload);
-        self.connections.items[idx].instrument.waitQueryDelay();
+        try self.connections.items[idx].instrument.waitQueryDelay();
         return self.readAt(allocator, idx);
     }
 
