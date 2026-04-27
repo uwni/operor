@@ -56,28 +56,6 @@ pub fn deinit(self: *Instrument) void {
     self.close(self.instrument) catch {};
 }
 
-/// Streams repeated reads into a writer until VISA reports the response is complete.
-pub fn readToWriter(
-    self: *Instrument,
-    writer: *std.Io.Writer,
-    chunk_buffer: []u8,
-) (bindings.Error || std.Io.Writer.Error)!usize {
-    var total_read: usize = 0;
-
-    while (true) {
-        const result = try self.read(chunk_buffer);
-
-        if (result.data.len > 0) {
-            try writer.writeAll(result.data);
-            total_read += result.data.len;
-        }
-
-        if (!result.more) break;
-    }
-
-    return total_read;
-}
-
 /// Reads a complete response into a newly allocated slice.
 pub fn readToOwned(self: *Instrument, allocator: std.mem.Allocator) bindings.Error![]u8 {
     const chunk_size = self.options.normalizedChunkSize();
@@ -125,63 +103,20 @@ pub fn queryToOwned(self: *Instrument, allocator: std.mem.Allocator, command: []
     return self.readToOwned(allocator);
 }
 
-/// Writes a command and returns the first read chunk directly into `buffer`.
-pub fn queryRaw(self: *Instrument, command: []const u8, buffer: []u8) !ReadResult {
-    try self.write(command);
-    try self.waitQueryDelay();
-    return self.read(buffer);
-}
-
 // ---------------------------------------------------------------------------
-// Async I/O — used by the parallel executor's poll loop.
-// These are only available when the VISA library exposes the async symbols.
+// Async I/O convenience APIs used by the parallel executor's handler loop.
+// These are semantic helpers layered on top of the raw wrapper methods below.
 // ---------------------------------------------------------------------------
 
-pub const AsyncError = error{AsyncNotSupported} || bindings.Error;
-
-/// Returns true when the loaded VISA library supports async I/O primitives.
-pub fn hasAsyncSupport(self: *const Instrument) bool {
-    const vt = self.vtable;
-    return vt.viWriteAsync != null and vt.viReadAsync != null and
-        vt.viEnableEvent != null and vt.viDisableEvent != null and
-        vt.viWaitOnEvent != null and vt.viGetAttribute != null;
+/// Enables VI_EVENT_IO_COMPLETION handler invocation on this session.
+/// Must be called before `installHandler` for handlers to fire.
+pub fn enableHandlerEvents(self: *const Instrument) bindings.Error!void {
+    try self.enableEvent(c.VI_EVENT_IO_COMPLETION, c.VI_HNDLR);
 }
 
-/// Enables VI_EVENT_IO_COMPLETION queuing on this session.
-pub inline fn enableAsyncEvents(self: *const Instrument) AsyncError!void {
-    try self.enableEvent(c.VI_EVENT_IO_COMPLETION, c.VI_QUEUE);
-}
-
-/// Disables VI_EVENT_IO_COMPLETION queuing on this session.
-pub inline fn disableAsyncEvents(self: *const Instrument) AsyncError!void {
-    try self.disableEvent(c.VI_EVENT_IO_COMPLETION, c.VI_QUEUE);
-}
-
-/// Polls for a completed I/O event with timeout (0 = non-blocking).
-/// Returns the event handle on success, or null on timeout.
-pub inline fn waitEvent(self: *const Instrument, timeout_ms: bindings.ViUInt32) AsyncError!?bindings.ViEvent {
-    return self.waitOnEvent(c.VI_EVENT_IO_COMPLETION, timeout_ms);
-}
-
-/// Retrieves the actual byte count from a completed I/O event.
-pub fn eventRetCount(self: *const Instrument, event: bindings.ViEvent) AsyncError!bindings.ViUInt32 {
-    var count: bindings.ViUInt32 = 0;
-    try self.getAttribute(event, c.VI_ATTR_RET_COUNT_32, @ptrCast(&count));
-    return count;
-}
-
-/// Checks whether a completed async read has more data available.
-/// Returns true when the I/O completed with VI_SUCCESS_MAX_CNT (buffer full, more pending).
-pub fn eventIoHasMore(self: *const Instrument, event: bindings.ViEvent) AsyncError!bool {
-    var io_status: bindings.ViStatus = undefined;
-    try self.getAttribute(event, c.VI_ATTR_STATUS, @ptrCast(&io_status));
-    return switch (io_status) {
-        c.VI_SUCCESS_MAX_CNT => true,
-        else => {
-            try bindings.checkStatus(io_status);
-            return false;
-        },
-    };
+/// Disables VI_EVENT_IO_COMPLETION handler invocation on this session.
+pub fn disableHandlerEvents(self: *const Instrument) bindings.Error!void {
+    try self.disableEvent(c.VI_EVENT_IO_COMPLETION, c.VI_HNDLR);
 }
 
 pub fn applyOptions(self: *Instrument) bindings.Error!void {
@@ -235,54 +170,48 @@ fn setAttribute(self: *const Instrument, attr: c.ViAttr, value: ViAttrState) bin
     try bindings.checkStatus(self.vtable.viSetAttribute(self.instrument, attr, value));
 }
 
-fn getAttribute(self: *const Instrument, obj: c.ViObject, attr: c.ViAttr, out: ?*anyopaque) AsyncError!void {
-    const f = self.vtable.viGetAttribute orelse return error.AsyncNotSupported;
-    try bindings.checkStatus(f(obj, attr, out));
+fn getAttribute(self: *const Instrument, obj: c.ViObject, attr: c.ViAttr, out: ?*anyopaque) bindings.Error!void {
+    try bindings.checkStatus(self.vtable.viGetAttribute(obj, attr, out));
 }
 
 /// Submits an asynchronous write. Returns the job ID for later polling.
-pub fn writeAsync(self: *const Instrument, buf: []const u8) AsyncError!bindings.ViJobId {
-    const f = self.vtable.viWriteAsync orelse return error.AsyncNotSupported;
+pub fn writeAsync(self: *const Instrument, buf: []const u8) bindings.Error!bindings.ViJobId {
     var job_id: bindings.ViJobId = undefined;
-    try bindings.checkStatus(f(self.instrument, buf.ptr, @intCast(buf.len), &job_id));
+    try bindings.checkStatus(self.vtable.viWriteAsync(self.instrument, buf.ptr, @intCast(buf.len), &job_id));
     return job_id;
 }
 
 /// Submits an asynchronous read into a caller-provided buffer. Returns the job ID.
-pub fn readAsync(self: *const Instrument, buf: []u8) AsyncError!bindings.ViJobId {
-    const f = self.vtable.viReadAsync orelse return error.AsyncNotSupported;
+pub fn readAsync(self: *const Instrument, buf: []u8) bindings.Error!bindings.ViJobId {
     var job_id: bindings.ViJobId = undefined;
-    try bindings.checkStatus(f(self.instrument, buf.ptr, @intCast(buf.len), &job_id));
+    try bindings.checkStatus(self.vtable.viReadAsync(self.instrument, buf.ptr, @intCast(buf.len), &job_id));
     return job_id;
 }
 
 /// Enables event notification for the given event type and mechanism.
-pub fn enableEvent(self: *const Instrument, event_type: bindings.ViEventType, mechanism: c.ViUInt16) AsyncError!void {
-    const f = self.vtable.viEnableEvent orelse return error.AsyncNotSupported;
-    try bindings.checkStatus(f(self.instrument, event_type, mechanism, c.VI_NULL));
+pub fn enableEvent(self: *const Instrument, event_type: bindings.ViEventType, mechanism: c.ViUInt16) bindings.Error!void {
+    try bindings.checkStatus(self.vtable.viEnableEvent(self.instrument, event_type, mechanism, c.VI_NULL));
 }
 
 /// Disables event notification for the given event type and mechanism.
-pub fn disableEvent(self: *const Instrument, event_type: bindings.ViEventType, mechanism: c.ViUInt16) AsyncError!void {
-    const f = self.vtable.viDisableEvent orelse return error.AsyncNotSupported;
-    try bindings.checkStatus(f(self.instrument, event_type, mechanism));
+pub fn disableEvent(self: *const Instrument, event_type: bindings.ViEventType, mechanism: c.ViUInt16) bindings.Error!void {
+    try bindings.checkStatus(self.vtable.viDisableEvent(self.instrument, event_type, mechanism));
 }
 
-/// Waits for an event of the given type. Returns null on timeout.
-pub fn waitOnEvent(self: *const Instrument, event_type: bindings.ViEventType, timeout_ms: bindings.ViUInt32) AsyncError!?bindings.ViEvent {
-    const f = self.vtable.viWaitOnEvent orelse return error.AsyncNotSupported;
-    var out_event_type: bindings.ViEventType = undefined;
-    var out_context: bindings.ViEvent = undefined;
-    const status = f(self.instrument, event_type, timeout_ms, &out_event_type, &out_context);
-    if (status == c.VI_ERROR_TMO) return null;
-    try bindings.checkStatus(status);
-    return out_context;
+/// Installs a completion handler that fires when async I/O completes.
+/// `user_handle` is passed as-is to the handler on each invocation.
+pub fn installHandler(self: *const Instrument, handler: c.ViHndlr, user_handle: c.ViAddr) bindings.Error!void {
+    try bindings.checkStatus(self.vtable.viInstallHandler(self.instrument, c.VI_EVENT_IO_COMPLETION, handler, user_handle));
+}
+
+/// Uninstalls a previously installed completion handler.
+pub fn uninstallHandler(self: *const Instrument, handler: c.ViHndlr, user_handle: c.ViAddr) bindings.Error!void {
+    try bindings.checkStatus(self.vtable.viUninstallHandler(self.instrument, c.VI_EVENT_IO_COMPLETION, handler, user_handle));
 }
 
 /// Cancels an in-flight async I/O job.
-pub fn terminate(self: *const Instrument, job_id: bindings.ViJobId) AsyncError!void {
-    const f = self.vtable.viTerminate orelse return error.AsyncNotSupported;
-    try bindings.checkStatus(f(self.instrument, c.VI_NULL, job_id));
+pub fn terminate(self: *const Instrument, job_id: bindings.ViJobId) bindings.Error!void {
+    try bindings.checkStatus(self.vtable.viTerminate(self.instrument, c.VI_NULL, job_id));
 }
 
 fn trimReadTermination(out: *std.ArrayList(u8), read_termination: []const u8) void {

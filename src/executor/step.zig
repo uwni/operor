@@ -23,6 +23,15 @@ pub const SavedValue = struct {
     value_owned: []u8,
 };
 
+pub const SavedValues = struct {
+    items: std.ArrayList(SavedValue) = .empty,
+
+    pub fn deinit(self: *SavedValues, allocator: std.mem.Allocator) void {
+        for (self.items.items) |saved| allocator.free(saved.value_owned);
+        self.items.deinit(allocator);
+    }
+};
+
 /// Reusable scratch space for step argument resolution, avoiding per-step HashMap allocation.
 pub const StepScratch = struct {
     temp_arena: std.heap.ArenaAllocator,
@@ -59,22 +68,32 @@ pub fn executeStep(
     scratch: *StepScratch,
     instruments: []session.InstrumentRuntime,
     float_precision: ?u8,
-) !?SavedValue {
+) !SavedValues {
     // Evaluate optional `if` guard.
     if (step.@"if") |*if_expr| {
         const is_true = try if_expr.isTruthy(ctx.varResolver(), allocator);
-        if (!is_true) return null;
+        if (!is_true) return .{};
     }
 
     return switch (step.action) {
-        .instrument_call => |ic| executeInstrumentCall(allocator, instrument.?, &ic, ctx, dry_run, log_sink, scratch, float_precision),
-        .compute => |comp| executeCompute(allocator, &comp, ctx),
+        .instrument_call => |ic| try savedValuesFromOptional(
+            allocator,
+            try executeInstrumentCall(allocator, instrument.?, &ic, ctx, dry_run, log_sink, scratch, float_precision),
+        ),
+        .compute => |comp| try savedValuesFromOptional(allocator, try executeCompute(allocator, &comp, ctx)),
         .sleep => |s| {
             try ctx.io.sleep(.fromNanoseconds(@as(i96, s.duration_ms) * 1_000_000), .awake);
-            return null;
+            return .{};
         },
         .parallel => |p| parallel_mod.executeParallel(allocator, &p, instruments, ctx, dry_run, log_sink, scratch, float_precision),
     };
+}
+
+fn savedValuesFromOptional(allocator: std.mem.Allocator, value: ?SavedValue) !SavedValues {
+    var values: SavedValues = .{};
+    errdefer values.deinit(allocator);
+    if (value) |saved| try values.items.append(allocator, saved);
+    return values;
 }
 
 /// Evaluates a local compute expression and stores the result in the context.
@@ -157,17 +176,13 @@ fn executeInstrumentCall(
     }
 
     const instr = &(instrument.handle orelse unreachable);
-    try instr.write(rendered.bytes);
-
     if (step.command.response != null) {
-        if (instr.options.query_delay_ms > 0) {
-            try ctx.io.sleep(.fromMilliseconds(@as(i64, instr.options.query_delay_ms)), .awake);
-        }
-        const resp = try instr.readToOwned(allocator);
+        const resp = try instr.queryToOwned(allocator, rendered.bytes);
         defer allocator.free(resp);
         return try storeInstrumentResponse(allocator, step, ctx, resp);
     }
 
+    try instr.write(rendered.bytes);
     return null;
 }
 

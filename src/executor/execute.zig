@@ -37,6 +37,8 @@ pub fn execute(allocator: std.mem.Allocator, opts: session.ExecOptions) !void {
     }
 
     const instruments = try allocator.alloc(session.InstrumentRuntime, compiled.instruments.count());
+    errdefer allocator.free(instruments);
+
     var ctx: session.Context = try .init(allocator, opts.io, compiled.initial_values);
 
     defer {

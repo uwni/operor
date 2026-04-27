@@ -47,16 +47,20 @@ pub const Runtime = struct {
         frame_columns: []const []const u8,
         log_writer: *std.Io.Writer,
     ) !Runtime {
+        var log_queue = try sinks.LogQueue.init(allocator, logQueueCapacity(config.buffer_size));
+        errdefer log_queue.deinit();
+
+        var frame_queue = try frame_mod.FrameQueue.init(allocator, config.buffer_size);
+        errdefer frame_queue.deinit();
+
         var runtime = Runtime{
             .allocator = allocator,
             .io = io,
             .config = config,
             .log_writer = log_writer,
-            .log_queue = try sinks.LogQueue.init(allocator, logQueueCapacity(config.buffer_size)),
-            .frame_queue = try frame_mod.FrameQueue.init(allocator, config.buffer_size),
+            .log_queue = log_queue,
+            .frame_queue = frame_queue,
         };
-        errdefer runtime.log_queue.deinit();
-        errdefer runtime.frame_queue.deinit();
 
         if (config.file_path) |path| {
             runtime.file_sink = try sinks.FileSink.init(allocator, io, path, frame_columns);
@@ -233,20 +237,22 @@ pub const Runtime = struct {
     }
 
     fn writeFileSink(self: *Runtime, frame: *const frame_mod.Frame) !void {
-        const sink = &(self.file_sink orelse return);
-        sink.writeFrame(frame) catch |err| {
-            self.asyncLog().print(error_tag ++ " file sink write failed: {s}\n", .{@errorName(err)});
-            return error.FileSinkFailed;
-        };
+        if (self.file_sink) |*sink| {
+            sink.writeFrame(frame) catch |err| {
+                self.asyncLog().print(error_tag ++ " file sink write failed: {s}\n", .{@errorName(err)});
+                return error.FileSinkFailed;
+            };
+        }
     }
 
     fn writeNetworkSink(self: *Runtime, frame: *const frame_mod.Frame) !void {
-        if (self.network_sink == null) return;
-        self.network_sink.?.writeFrame(frame) catch |err| {
-            self.network_sink.?.deinit(self.allocator);
-            self.network_sink = null;
-            self.asyncLog().print(warn_tag ++ " network sink disabled: {s}\n", .{@errorName(err)});
-        };
+        if (self.network_sink) |*sink| {
+            sink.writeFrame(frame) catch |err| {
+                sink.deinit(self.allocator);
+                self.network_sink = null;
+                self.asyncLog().print(warn_tag ++ " network sink disabled: {s}\n", .{@errorName(err)});
+            };
+        }
     }
 };
 

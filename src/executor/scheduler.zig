@@ -108,7 +108,7 @@ fn runTask(
             .compute, .sleep, .parallel => null,
         };
         var async_log = pipeline_runtime.asyncLog();
-        const saved_value = try step_mod.executeStep(
+        var saved_values = try step_mod.executeStep(
             allocator,
             instrument,
             step,
@@ -119,9 +119,11 @@ fn runTask(
             instruments,
             compiled_recipe.float_precision,
         );
-        if (saved_value) |captured| {
+        defer saved_values.deinit(allocator);
+        for (saved_values.items.items) |captured| {
             frame_builder.captureOwned(captured.column, captured.value_owned);
         }
+        saved_values.items.clearRetainingCapacity();
     }
 
     if (frame_builder.finish()) |frame| {

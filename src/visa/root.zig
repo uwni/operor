@@ -11,6 +11,18 @@ pub const loader = @import("loader.zig");
 pub const c = bindings.c;
 /// Re-exported project-level VISA error set.
 pub const Error = bindings.Error;
+/// Re-exported helper for converting raw VISA status codes into Zig errors.
+pub const checkStatus = bindings.checkStatus;
+/// Re-exported VISA session handle type.
+pub const ViSession = bindings.ViSession;
+/// Re-exported VISA status code type.
+pub const ViStatus = bindings.ViStatus;
+/// Re-exported VISA unsigned 32-bit integer type.
+pub const ViUInt32 = bindings.ViUInt32;
+/// Re-exported VISA event type code.
+pub const ViEventType = bindings.ViEventType;
+/// Re-exported VISA event handle type.
+pub const ViEvent = bindings.ViEvent;
 /// Re-exported instrument session option set.
 pub const InstrumentOptions = instrument.InstrumentOptions;
 /// Re-exported fixed-size termination buffer type.

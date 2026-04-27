@@ -21,10 +21,21 @@ pub const AsyncLog = struct {
 
     pub fn writeAll(self: AsyncLog, bytes: []const u8) void {
         const owned = self.allocator.dupe(u8, bytes) catch {
-            const current = self.dropped_count.load(.monotonic);
-            self.dropped_count.store(current + 1, .monotonic);
+            self.recordDrop();
             return;
         };
+        self.enqueueOwned(owned);
+    }
+
+    pub fn print(self: AsyncLog, comptime fmt: []const u8, args: anytype) void {
+        const owned = std.fmt.allocPrint(self.allocator, fmt, args) catch {
+            self.recordDrop();
+            return;
+        };
+        self.enqueueOwned(owned);
+    }
+
+    fn enqueueOwned(self: AsyncLog, owned: []u8) void {
         var message = LogMessage{ .text = owned };
         self.queue.push(&message) catch |err| switch (err) {
             error.BufferOverflow => {
@@ -34,19 +45,8 @@ pub const AsyncLog = struct {
         };
     }
 
-    pub fn print(self: AsyncLog, comptime fmt: []const u8, args: anytype) void {
-        const owned = std.fmt.allocPrint(self.allocator, fmt, args) catch {
-            const current = self.dropped_count.load(.monotonic);
-            self.dropped_count.store(current + 1, .monotonic);
-            return;
-        };
-        var message = LogMessage{ .text = owned };
-        self.queue.push(&message) catch |err| switch (err) {
-            error.BufferOverflow => {
-                message.deinit(self.allocator);
-                return;
-            },
-        };
+    fn recordDrop(self: AsyncLog) void {
+        _ = self.dropped_count.fetchAdd(1, .monotonic);
     }
 
     pub fn logSink(self: *AsyncLog) session.LogSink {
@@ -82,7 +82,6 @@ pub const FileSink = struct {
             .frame_columns = columns_copy,
         };
         errdefer sink.file.close(io);
-        errdefer sink.allocator.free(sink.frame_columns);
 
         try sink.writeHeader();
         return sink;
@@ -133,6 +132,8 @@ pub const NetworkSink = struct {
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, frame_columns: []const []const u8) !NetworkSink {
         const columns_copy = try allocator.dupe([]const u8, frame_columns);
+        errdefer allocator.free(columns_copy);
+
         const addr = try std.Io.net.IpAddress.resolve(io, host, port);
         return .{
             .io = io,

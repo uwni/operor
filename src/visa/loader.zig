@@ -19,14 +19,15 @@ pub const Vtable = struct {
     viWrite: *const fn (c.ViSession, c.ViConstBuf, c.ViUInt32, c.ViPUInt32) callconv(.c) c.ViStatus,
     viSetAttribute: *const fn (c.ViObject, c.ViAttr, c.ViAttrState) callconv(.c) c.ViStatus,
 
-    // Async I/O — null when the VISA library does not provide async support.
-    viWriteAsync: ?*const fn (c.ViSession, c.ViConstBuf, c.ViUInt32, c.ViPJobId) callconv(.c) c.ViStatus = null,
-    viReadAsync: ?*const fn (c.ViSession, c.ViPBuf, c.ViUInt32, c.ViPJobId) callconv(.c) c.ViStatus = null,
-    viEnableEvent: ?*const fn (c.ViSession, c.ViEventType, c.ViUInt16, c.ViEventFilter) callconv(.c) c.ViStatus = null,
-    viDisableEvent: ?*const fn (c.ViSession, c.ViEventType, c.ViUInt16) callconv(.c) c.ViStatus = null,
-    viWaitOnEvent: ?*const fn (c.ViSession, c.ViEventType, c.ViUInt32, c.ViPEventType, c.ViPEvent) callconv(.c) c.ViStatus = null,
-    viTerminate: ?*const fn (c.ViObject, c.ViUInt16, c.ViJobId) callconv(.c) c.ViStatus = null,
-    viGetAttribute: ?*const fn (c.ViObject, c.ViAttr, ?*anyopaque) callconv(.c) c.ViStatus = null,
+    // Async I/O — required; all standard VISA implementations expose these.
+    viWriteAsync: *const fn (c.ViSession, c.ViConstBuf, c.ViUInt32, c.ViPJobId) callconv(.c) c.ViStatus,
+    viReadAsync: *const fn (c.ViSession, c.ViPBuf, c.ViUInt32, c.ViPJobId) callconv(.c) c.ViStatus,
+    viEnableEvent: *const fn (c.ViSession, c.ViEventType, c.ViUInt16, c.ViEventFilter) callconv(.c) c.ViStatus,
+    viDisableEvent: *const fn (c.ViSession, c.ViEventType, c.ViUInt16) callconv(.c) c.ViStatus,
+    viTerminate: *const fn (c.ViObject, c.ViUInt16, c.ViJobId) callconv(.c) c.ViStatus,
+    viGetAttribute: *const fn (c.ViObject, c.ViAttr, ?*anyopaque) callconv(.c) c.ViStatus,
+    viInstallHandler: *const fn (c.ViSession, c.ViEventType, c.ViHndlr, c.ViAddr) callconv(.c) c.ViStatus,
+    viUninstallHandler: *const fn (c.ViSession, c.ViEventType, c.ViHndlr, c.ViAddr) callconv(.c) c.ViStatus,
 };
 
 pub const Error = error{ VisaLibraryNotFound, VisaSymbolMissing };
@@ -129,14 +130,13 @@ fn loadWindows(path: ?[]const u8, diag: ?*LoadDiagnostic) Error!Vtable {
 fn resolveVtable(handle: anytype, diag: ?*LoadDiagnostic) Error!Vtable {
     var vtable: Vtable = undefined;
     inline for (std.meta.fields(Vtable)) |field| {
-        const ti = @typeInfo(field.type);
-        const T = if (ti == .optional) ti.optional.child else field.type;
+        const T = field.type;
         const ptr: ?T = switch (@TypeOf(handle)) {
             *std.DynLib => handle.lookup(T, field.name),
             windows.HMODULE => if (GetProcAddress(handle, field.name)) |raw| @ptrCast(@alignCast(raw)) else null,
             else => unreachable,
         };
-        @field(vtable, field.name) = if (ti == .optional) ptr else ptr orelse {
+        @field(vtable, field.name) = ptr orelse {
             if (diag) |d| d.* = .{ .symbol = field.name };
             return error.VisaSymbolMissing;
         };
