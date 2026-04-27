@@ -70,7 +70,7 @@ pub fn setSlot(self: *Context, slot_idx: usize, value: Value) !void {
         },
         .int => stored.int = switch (value) {
             .int => |i| i,
-            .float => |f| @intFromFloat(f),
+            .float => |f| floatToIntFloor(f),
             else => return error.TypeMismatch,
         },
         .bool => switch (value) {
@@ -132,6 +132,16 @@ pub fn resolveBinding(self: *const Context, binding: expr.VariableBinding) Value
             } },
         },
     };
+}
+
+fn floatToIntFloor(f: f64) !i64 {
+    if (!std.math.isFinite(f)) return error.InvalidNumericConversion;
+
+    const rounded: f64 = @trunc(f);
+    const min_bound: f64 = @floatFromInt(std.math.minInt(i64));
+    const max_bound: f64 = @floatFromInt(std.math.maxInt(i64));
+    if (rounded < min_bound or rounded >= max_bound) return error.InvalidNumericConversion;
+    return @trunc(f);
 }
 
 fn resolveBindingValue(ctx_ptr: *const anyopaque, binding: expr.VariableBinding) ?expr.ResolvedValue {
