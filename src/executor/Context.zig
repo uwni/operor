@@ -70,7 +70,7 @@ pub fn setSlot(self: *Context, slot_idx: usize, value: Value) !void {
         },
         .int => stored.int = switch (value) {
             .int => |i| i,
-            .float => |f| floatToIntFloor(f),
+            .float => |f| try floatToIntFloor(f),
             else => return error.TypeMismatch,
         },
         .bool => switch (value) {
