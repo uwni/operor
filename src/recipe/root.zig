@@ -22,7 +22,7 @@ pub const PipelineMode = recipe_ir.PipelineMode;
 pub const PipelineConfig = recipe_ir.PipelineConfig;
 /// Recipe instrument bound to a adapter and the subset of commands it actually uses.
 pub const PrecompiledInstrument = recipe_ir.PrecompiledInstrument;
-/// Context captured for the most recent precompile failure.
+/// Accumulates user-facing precompile diagnostics.
 pub const PrecompileDiagnostic = diagnostic.PrecompileDiagnostic;
 /// Fully validated recipe ready for preview or execution.
 pub const PrecompiledRecipe = recipe_ir.PrecompiledRecipe;
@@ -49,10 +49,18 @@ pub fn precompilePathFromAdapterDir(
     };
     defer opened.close(io);
 
-    return precompile.precompilePath(allocator, io, recipe_path, opened, &precompile_diagnostic) catch |err| {
-        try precompile_diagnostic.write(log, err);
-        return error.Diagnosed;
+    const compiled = precompile.precompilePath(allocator, io, recipe_path, opened, &precompile_diagnostic) catch |err| switch (err) {
+        error.DiagnosticsFound => {
+            try precompile_diagnostic.writeAll(log);
+            return error.Diagnosed;
+        },
+        else => return err,
     };
+
+    if (precompile_diagnostic.hasWarnings()) {
+        try precompile_diagnostic.writeAll(log);
+    }
+    return compiled;
 }
 
 test {

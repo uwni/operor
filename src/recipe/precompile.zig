@@ -13,6 +13,7 @@ const expr = @import("../expr.zig");
 const max_recipe_size: usize = 512 * 1024;
 
 const SlotTable = std.StringArrayHashMapUnmanaged(void);
+const DiagnosticContext = diagnostic.DiagnosticContext;
 
 pub fn precompilePath(
     allocator: std.mem.Allocator,
@@ -29,19 +30,23 @@ pub fn precompilePath(
     var parse_arena: std.heap.ArenaAllocator = .init(allocator);
     defer parse_arena.deinit();
 
-    const recipe_cfg = try doc_parse.parseFilePath(config.RecipeConfig, parse_arena.allocator(), io, recipe_path, max_recipe_size);
+    const recipe_cfg = doc_parse.parseFilePath(config.RecipeConfig, parse_arena.allocator(), io, recipe_path, max_recipe_size) catch |err|
+        return failRecipeParseWithDiagnostic(diag, err);
 
     if (recipe_cfg.pipeline == null) {
-        diag.reset();
-        return error.MissingPipeline;
+        try diag.add(.fatal, .{}, .missing_pipeline, .{});
+        return error.DiagnosticsFound;
     }
 
-    return try precompileInternal(allocator, io, &recipe_cfg, adapter_dir, diag);
+    return precompileInternal(allocator, io, &recipe_cfg, adapter_dir, diag) catch |err| switch (err) {
+        error.DiagnosticsFound => return error.DiagnosticsFound,
+        else => return err,
+    };
 }
 
 /// Converts a parsed recipe document into the arena-owned runtime form used by preview and execution.
 ///
-/// Precompile walks the recipe in a strict fail-fast order:
+/// Precompile walks the recipe in dependency order while accumulating recoverable diagnostics:
 /// 1. Create the arena that will own the returned recipe plus a temporary adapter cache used only during validation.
 /// 2. Walk `recipe.instruments`, eagerly load every referenced adapter, assign each instrument a dense `instrument_idx`, and copy it into a `PrecompiledInstrument` with an empty per-instrument command cache.
 /// 3. Walk `recipe.tasks`, classify each task (sequential, loop, or conditional), and allocate the arena-owned `Task` and `Step` arrays.
@@ -65,9 +70,7 @@ fn precompileInternal(
     var adapter_arena: std.heap.ArenaAllocator = .init(allocator);
     defer adapter_arena.deinit();
 
-    errdefer precompile_diagnostic.snapshot();
-
-    var slot_map = try buildSlotMap(alloc, recipe);
+    var slot_map = try buildSlotMap(alloc, recipe, precompile_diagnostic);
 
     // 2. Eagerly load every referenced adapter.
     var loaded_adapters = try loadAdapters(adapter_arena.allocator(), io, recipe, adapter_dir, precompile_diagnostic);
@@ -84,17 +87,21 @@ fn precompileInternal(
     const tasks = try precompileTasks(alloc, recipe, &slot_map, &loaded_adapters, &precompiled_instruments, &assign_set, precompile_diagnostic);
 
     // 6. Validate and resolve pipeline record configuration.
-    precompile_diagnostic.reset();
-    const pipeline = try resolvePipelineConfig(alloc, recipe, &slot_map, &assign_set);
+    const pipeline = try resolvePipelineConfig(alloc, recipe, &slot_map, &assign_set, precompile_diagnostic);
 
-    // 7. Assign save_column indices to steps that contribute to recorded frames.
-    assignSaveColumns(tasks, &slot_map, pipeline.record.?.explicit);
-
-    // 8. Parse optional stop_when expression.
+    // 7. Parse optional stop_when expression.
     const stop_when: ?expr.Expression = if (recipe.stop_when) |src|
-        try slot_map.compileExpr(src.source())
+        slot_map.compileExpr(src.source()) catch |err| blk: {
+            try addExpressionDiagnostic(precompile_diagnostic, err, .{}, src.source());
+            break :blk null;
+        }
     else
         null;
+
+    if (precompile_diagnostic.hasFatal()) return error.DiagnosticsFound;
+
+    // 8. Assign save_column indices to steps that contribute to recorded frames.
+    assignSaveColumns(tasks, &slot_map, pipeline.record.?.explicit);
 
     return .{
         .arena = arena,
@@ -106,6 +113,54 @@ fn precompileInternal(
         .float_precision = recipe.float_precision,
         .initial_values = slot_map.varInitialValues(),
     };
+}
+
+fn failRecipeParseWithDiagnostic(diag: *diagnostic.PrecompileDiagnostic, err: anyerror) anyerror {
+    addDocumentDiagnostic(diag, err, .{}) catch |diagnostic_err| return diagnostic_err;
+    return error.DiagnosticsFound;
+}
+
+fn addDocumentDiagnostic(diag: *diagnostic.PrecompileDiagnostic, err: anyerror, context: DiagnosticContext) !void {
+    switch (err) {
+        error.FileNotFound => try diag.add(.fatal, context, .file_not_found, .{}),
+        error.SyntaxError => try diag.add(.fatal, context, .syntax_error, .{}),
+        error.UnsupportedFormat => try diag.add(.fatal, context, .unsupported_format, .{}),
+        error.WrongType => try diag.add(.fatal, context, .wrong_type, .{}),
+        else => return err,
+    }
+}
+
+fn addAdapterDiagnostic(diag: *diagnostic.PrecompileDiagnostic, err: anyerror, context: DiagnosticContext) !void {
+    const adapter_name = context.adapter_name orelse "";
+    switch (err) {
+        error.FileNotFound => try diag.add(.fatal, context, .adapter_not_found, .{ .adapter = adapter_name }),
+        error.SyntaxError => try diag.add(.fatal, context, .syntax_error, .{}),
+        error.UnsupportedFormat => try diag.add(.fatal, context, .unsupported_format, .{}),
+        error.WrongType => try diag.add(.fatal, context, .wrong_type, .{}),
+        error.MissingClosingBrace,
+        error.MissingClosingBracket,
+        error.NestedOptionalGroup,
+        error.EmptyArgument,
+        error.InvalidIdentifier,
+        error.InvalidValueType,
+        => try diag.add(.fatal, context, .invalid_adapter_config, .{ .adapter = adapter_name }),
+        else => return err,
+    }
+}
+
+fn addExpressionDiagnostic(diag: *diagnostic.PrecompileDiagnostic, err: anyerror, context: DiagnosticContext, source: []const u8) !void {
+    if (err == error.OutOfMemory) return err;
+    try diag.add(.fatal, context, .invalid_expression, .{ .source = source });
+}
+
+fn addVarSlotDiagnostic(diag: *diagnostic.PrecompileDiagnostic, err: anyerror, context: DiagnosticContext) !void {
+    const variable_name = context.variable_name orelse "";
+    switch (err) {
+        error.UndeclaredVariable => try diag.add(.fatal, context, .undeclared_variable, .{ .variable = variable_name }),
+        error.AssignToConst => try diag.add(.fatal, context, .assign_to_const, .{ .variable = variable_name }),
+        error.BuiltinVariableConflict => try diag.add(.fatal, context, .builtin_variable_conflict, .{ .variable = variable_name }),
+        else => return err,
+    }
 }
 
 const SlotMap = struct {
@@ -150,6 +205,7 @@ const SlotMap = struct {
 
     /// Validate that `name` refers to a mutable var and return its remapped slot index.
     fn varSlotIndex(self: *const SlotMap, name: []const u8) !usize {
+        if (expr.resolveBuiltin(name) != null) return error.BuiltinVariableConflict;
         const slot = self.slots.getIndex(name) orelse return error.UndeclaredVariable;
         if (slot < self.const_count) return error.AssignToConst;
         return slot - self.const_count;
@@ -688,7 +744,11 @@ fn foldPromoteMinMax(a: expr.Value, b: expr.Value, comptime pick_min: bool) !?ex
 
 /// Validate consts/vars, build the merged slot map (consts first, then vars),
 /// compile initial values, and create the compile-time const resolver.
-fn buildSlotMap(alloc: std.mem.Allocator, recipe: *const config.RecipeConfig) !SlotMap {
+fn buildSlotMap(
+    alloc: std.mem.Allocator,
+    recipe: *const config.RecipeConfig,
+    diag: *diagnostic.PrecompileDiagnostic,
+) !SlotMap {
     const const_keys = if (recipe.consts) |c| c.keys() else &.{};
     const const_vals = if (recipe.consts) |c| c.values() else &.{};
     const var_keys = if (recipe.vars) |v| v.keys() else &.{};
@@ -696,11 +756,17 @@ fn buildSlotMap(alloc: std.mem.Allocator, recipe: *const config.RecipeConfig) !S
 
     // Validate: no name conflicts between consts, vars, and builtins.
     for (const_keys) |name| {
-        if (expr.resolveBuiltin(name) != null) return error.BuiltinVariableConflict;
+        if (expr.resolveBuiltin(name) != null) {
+            try diag.add(.fatal, .{ .variable_name = name }, .builtin_variable_conflict, .{ .variable = name });
+        }
     }
     for (var_keys) |name| {
-        if (expr.resolveBuiltin(name) != null) return error.BuiltinVariableConflict;
-        if (recipe.consts != null and recipe.consts.?.contains(name)) return error.DuplicateVariable;
+        if (expr.resolveBuiltin(name) != null) {
+            try diag.add(.fatal, .{ .variable_name = name }, .builtin_variable_conflict, .{ .variable = name });
+        }
+        if (recipe.consts != null and recipe.consts.?.contains(name)) {
+            try diag.add(.fatal, .{ .variable_name = name }, .duplicate_variable, .{ .variable = name });
+        }
     }
 
     // Build initial values array: consts first, then vars.
@@ -737,9 +803,11 @@ fn loadAdapters(
     while (instrument_it.next()) |entry| {
         const cfg = entry.value_ptr.*;
         _ = getOrParseAdapter(allocator, io, &map, adapter_dir, cfg.adapter) catch |err| {
-            diag.instrument_name = entry.key_ptr.*;
-            diag.adapter_name = cfg.adapter;
-            return err;
+            try addAdapterDiagnostic(diag, err, .{
+                .instrument_name = entry.key_ptr.*,
+                .adapter_name = cfg.adapter,
+            });
+            return error.DiagnosticsFound;
         };
     }
     return map;
@@ -795,30 +863,42 @@ fn precompileTasks(
     assign_set: *std.StringArrayHashMapUnmanaged(void),
     diag: *diagnostic.PrecompileDiagnostic,
 ) ![]recipe_ir.Task {
-    const tasks = try arena_alloc.alloc(recipe_ir.Task, recipe.tasks.len);
+    var tasks: std.ArrayList(recipe_ir.Task) = .empty;
+    errdefer tasks.deinit(arena_alloc);
+
     for (recipe.tasks, 0..) |*task_cfg, task_idx| {
         const steps = try precompileSteps(arena_alloc, task_cfg.steps, slot_map, loaded_adapters, precompiled_instruments, assign_set, task_idx, diag);
 
         if (task_cfg.@"while") |while_src| {
+            const task_context: DiagnosticContext = .{ .task_idx = task_idx };
+            const condition = slot_map.compileExpr(while_src.source()) catch |err| {
+                try addExpressionDiagnostic(diag, err, task_context, while_src.source());
+                continue;
+            };
             // Loop task
-            tasks[task_idx] = .{ .loop = .{
-                .condition = try slot_map.compileExpr(while_src.source()),
+            try tasks.append(arena_alloc, .{ .loop = .{
+                .condition = condition,
                 .steps = steps,
-            } };
+            } });
         } else if (task_cfg.@"if") |guard_src| {
+            const task_context: DiagnosticContext = .{ .task_idx = task_idx };
+            const condition = slot_map.compileExpr(guard_src.source()) catch |err| {
+                try addExpressionDiagnostic(diag, err, task_context, guard_src.source());
+                continue;
+            };
             // Conditional task
-            tasks[task_idx] = .{ .conditional = .{
-                .@"if" = try slot_map.compileExpr(guard_src.source()),
+            try tasks.append(arena_alloc, .{ .conditional = .{
+                .@"if" = condition,
                 .steps = steps,
-            } };
+            } });
         } else {
             // Sequential task
-            tasks[task_idx] = .{ .sequential = .{
+            try tasks.append(arena_alloc, .{ .sequential = .{
                 .steps = steps,
-            } };
+            } });
         }
     }
-    return tasks;
+    return try tasks.toOwnedSlice(arena_alloc);
 }
 
 fn precompileSteps(
@@ -831,10 +911,12 @@ fn precompileSteps(
     task_idx: usize,
     diag: *diagnostic.PrecompileDiagnostic,
 ) ![]recipe_ir.Step {
-    const steps = try arena_alloc.alloc(recipe_ir.Step, step_cfgs.len);
+    var steps: std.ArrayList(recipe_ir.Step) = .empty;
+    errdefer steps.deinit(arena_alloc);
+
     for (step_cfgs, 0..) |*step_cfg, step_idx| {
-        steps[step_idx] = switch (step_cfg.*) {
-            .compute => |*cfg| try precompileComputeStep(
+        const step = switch (step_cfg.*) {
+            .compute => |*cfg| precompileComputeStep(
                 arena_alloc,
                 slot_map,
                 assign_set,
@@ -843,7 +925,7 @@ fn precompileSteps(
                 step_idx,
                 diag,
             ),
-            .call => |*cfg| try precompileCallStep(
+            .call => |*cfg| precompileCallStep(
                 arena_alloc,
                 slot_map,
                 loaded_adapters,
@@ -854,8 +936,8 @@ fn precompileSteps(
                 step_idx,
                 diag,
             ),
-            .sleep_ms => |*cfg| try precompileSleepStep(slot_map, cfg),
-            .parallel => |*cfg| try precompileParallelStep(
+            .sleep_ms => |*cfg| precompileSleepStep(slot_map, cfg, task_idx, step_idx, diag),
+            .parallel => |*cfg| precompileParallelStep(
                 arena_alloc,
                 slot_map,
                 loaded_adapters,
@@ -863,11 +945,18 @@ fn precompileSteps(
                 assign_set,
                 cfg,
                 task_idx,
+                step_idx,
                 diag,
             ),
+        } catch |err| switch (err) {
+            error.DiagnosticsFound => {
+                continue;
+            },
+            else => return err,
         };
+        try steps.append(arena_alloc, step);
     }
-    return steps;
+    return try steps.toOwnedSlice(arena_alloc);
 }
 
 fn precompileComputeStep(
@@ -879,17 +968,26 @@ fn precompileComputeStep(
     step_idx: usize,
     diag: *diagnostic.PrecompileDiagnostic,
 ) !recipe_ir.Step {
-    diag.* = .{ .allocator = diag.allocator, .file_path = diag.file_path, .task_idx = task_idx, .step_idx = step_idx };
+    const step_context: DiagnosticContext = .{ .task_idx = task_idx, .step_idx = step_idx };
 
-    const if_expr = try precompileIf(slot_map, cfg.@"if");
+    const if_expr = try precompileIf(slot_map, diag, step_context, cfg.@"if");
 
-    const save_slot = try slot_map.varSlotIndex(cfg.assign);
+    const assign_context: DiagnosticContext = .{ .task_idx = task_idx, .step_idx = step_idx, .variable_name = cfg.assign };
+    const save_slot = slot_map.varSlotIndex(cfg.assign) catch |err| {
+        try addVarSlotDiagnostic(diag, err, assign_context);
+        return error.DiagnosticsFound;
+    };
     const assign_copy = try arena_alloc.dupe(u8, cfg.assign);
     try assign_set.put(arena_alloc, assign_copy, {});
 
+    const compute_expr = slot_map.compileExpr(cfg.compute) catch |err| {
+        try addExpressionDiagnostic(diag, err, assign_context, cfg.compute);
+        return error.DiagnosticsFound;
+    };
+
     return .{
         .action = .{ .compute = .{
-            .expression = try slot_map.compileExpr(cfg.compute),
+            .expression = compute_expr,
             .save_slot = save_slot,
         } },
         .@"if" = if_expr,
@@ -907,35 +1005,59 @@ fn precompileCallStep(
     step_idx: usize,
     diag: *diagnostic.PrecompileDiagnostic,
 ) !recipe_ir.Step {
-    const dot_pos = std.mem.findScalar(u8, cfg.call, '.') orelse return error.InvalidCallFormat;
+    const step_context: DiagnosticContext = .{ .task_idx = task_idx, .step_idx = step_idx };
+
+    const dot_pos = std.mem.findScalar(u8, cfg.call, '.') orelse {
+        try diag.add(.fatal, step_context, .invalid_call_format, .{ .call = cfg.call });
+        return error.DiagnosticsFound;
+    };
     const instrument_name = cfg.call[0..dot_pos];
     const command_name = cfg.call[dot_pos + 1 ..];
-    if (instrument_name.len == 0 or command_name.len == 0) return error.InvalidCallFormat;
+    if (instrument_name.len == 0 or command_name.len == 0) {
+        try diag.add(.fatal, step_context, .invalid_call_format, .{ .call = cfg.call });
+        return error.DiagnosticsFound;
+    }
 
-    diag.* = .{
-        .allocator = diag.allocator,
-        .file_path = diag.file_path,
+    var call_context: DiagnosticContext = .{
         .task_idx = task_idx,
         .step_idx = step_idx,
         .instrument_name = instrument_name,
         .command_name = command_name,
     };
 
-    const if_expr = try precompileIf(slot_map, cfg.@"if");
+    const if_expr = try precompileIf(slot_map, diag, call_context, cfg.@"if");
 
-    const precompiled_instrument = precompiled_instruments.getPtr(instrument_name) orelse return error.InstrumentNotFound;
+    const precompiled_instrument = precompiled_instruments.getPtr(instrument_name) orelse {
+        try diag.add(.fatal, call_context, .instrument_not_found, .{ .instrument = instrument_name });
+        return error.DiagnosticsFound;
+    };
 
-    diag.adapter_name = precompiled_instrument.adapter_name;
+    call_context.adapter_name = precompiled_instrument.adapter_name;
     const loaded_adapter = loaded_adapters.getPtr(precompiled_instrument.adapter_name).?;
-    const command = try getOrCompileCommand(arena_alloc, precompiled_instrument, loaded_adapter, command_name);
+    const command = getOrCompileCommand(arena_alloc, precompiled_instrument, loaded_adapter, command_name) catch |err| {
+        switch (err) {
+            error.CommandNotFound => try diag.add(.fatal, call_context, .command_not_found, .{
+                .instrument = instrument_name,
+                .command = command_name,
+            }),
+            error.PartialBoolMap => try diag.add(.fatal, call_context, .partial_bool_map, .{}),
+            else => return err,
+        }
+        return error.DiagnosticsFound;
+    };
 
     const call_copy = try arena_alloc.dupe(u8, command_name);
     const instrument_copy = try arena_alloc.dupe(u8, instrument_name);
-    const compiled_args = try compileStepArgs(arena_alloc, command, cfg.args, slot_map, diag);
+    const compiled_args = try compileStepArgs(arena_alloc, command, cfg.args, slot_map, diag, call_context);
 
     var save_slot: ?usize = null;
     if (cfg.assign) |label| {
-        save_slot = try slot_map.varSlotIndex(label);
+        var assign_context = call_context;
+        assign_context.variable_name = label;
+        save_slot = slot_map.varSlotIndex(label) catch |err| {
+            try addVarSlotDiagnostic(diag, err, assign_context);
+            return error.DiagnosticsFound;
+        };
         const duped = try arena_alloc.dupe(u8, label);
         try assign_set.put(arena_alloc, duped, {});
     }
@@ -955,10 +1077,15 @@ fn precompileCallStep(
 
 fn precompileIf(
     slot_map: *const SlotMap,
+    diag: *diagnostic.PrecompileDiagnostic,
+    context: DiagnosticContext,
     if_src_opt: ?config.BooleanExpr,
 ) !?expr.Expression {
     if (if_src_opt) |if_src| {
-        return try slot_map.compileExpr(if_src.source());
+        return slot_map.compileExpr(if_src.source()) catch |err| {
+            try addExpressionDiagnostic(diag, err, context, if_src.source());
+            return error.DiagnosticsFound;
+        };
     }
     return null;
 }
@@ -966,10 +1093,15 @@ fn precompileIf(
 fn precompileSleepStep(
     slot_map: *const SlotMap,
     cfg: *const config.SleepStepConfig,
+    task_idx: usize,
+    step_idx: usize,
+    diag: *diagnostic.PrecompileDiagnostic,
 ) !recipe_ir.Step {
+    const step_context: DiagnosticContext = .{ .task_idx = task_idx, .step_idx = step_idx };
+    const if_expr = try precompileIf(slot_map, diag, step_context, cfg.@"if");
     return .{
         .action = .{ .sleep = .{ .duration_ms = cfg.sleep_ms } },
-        .@"if" = try precompileIf(slot_map, cfg.@"if"),
+        .@"if" = if_expr,
     };
 }
 
@@ -981,11 +1113,17 @@ fn precompileParallelStep(
     assign_set: *std.StringArrayHashMapUnmanaged(void),
     cfg: *const config.ParallelStepConfig,
     task_idx: usize,
+    step_idx: usize,
     diag: *diagnostic.PrecompileDiagnostic,
 ) anyerror!recipe_ir.Step {
+    const step_context: DiagnosticContext = .{ .task_idx = task_idx, .step_idx = step_idx };
+
     // Reject nested parallel steps.
     for (cfg.parallel) |*inner| {
-        if (inner.* == .parallel) return error.NestedParallelStep;
+        if (inner.* == .parallel) {
+            try diag.add(.fatal, step_context, .nested_parallel_step, .{});
+            return error.DiagnosticsFound;
+        }
     }
 
     const inner_steps = try precompileSteps(
@@ -999,9 +1137,10 @@ fn precompileParallelStep(
         diag,
     );
 
+    const if_expr = try precompileIf(slot_map, diag, step_context, cfg.@"if");
     return .{
         .action = .{ .parallel = .{ .steps = inner_steps } },
-        .@"if" = try precompileIf(slot_map, cfg.@"if"),
+        .@"if" = if_expr,
     };
 }
 
@@ -1010,23 +1149,56 @@ fn resolvePipelineConfig(
     recipe: *const config.RecipeConfig,
     slot_map: *const SlotMap,
     assign_set: *const std.StringArrayHashMapUnmanaged(void),
+    diag: *diagnostic.PrecompileDiagnostic,
 ) !recipe_ir.PipelineConfig {
-    const pipeline_cfg = recipe.pipeline orelse return error.MissingPipeline;
-    if (pipeline_cfg.record == null) return error.MissingRecordConfig;
-    var pipeline = try pipeline_cfg.clone(arena_alloc);
+    const empty_columns: []const []const u8 = &.{};
+    const pipeline_cfg = recipe.pipeline orelse {
+        try diag.add(.fatal, .{}, .missing_pipeline, .{});
+        return .{ .record = .{ .explicit = empty_columns } };
+    };
+    if (pipeline_cfg.record == null) {
+        try diag.add(.fatal, .{}, .missing_record_config, .{});
+    }
+
+    var pipeline = pipeline_cfg.clone(arena_alloc) catch |err| {
+        switch (err) {
+            error.InvalidPipelineConfig => try diag.add(.fatal, .{}, .invalid_pipeline_config, .{}),
+            else => return err,
+        }
+        return .{ .record = .{ .explicit = empty_columns } };
+    };
+    if (pipeline.record == null) {
+        pipeline.record = .{ .explicit = empty_columns };
+    }
+
     switch (pipeline.record.?) {
         .all => {
             pipeline.record = .{ .explicit = try arena_alloc.dupe([]const u8, assign_set.keys()) };
         },
         .explicit => |columns| {
+            var seen: std.StringArrayHashMapUnmanaged(void) = .empty;
+            var unique_columns: std.ArrayList([]const u8) = .empty;
+
             for (columns) |name| {
+                const column_context: DiagnosticContext = .{ .variable_name = name };
+                if (seen.getIndex(name) != null) {
+                    try diag.add(.warning, column_context, .duplicate_record_column, .{ .column = name });
+                    continue;
+                }
+                try seen.put(arena_alloc, name, {});
+
+                var valid = true;
                 if (slot_map.resolveName(name) == null) {
-                    return error.UndeclaredVariable;
+                    try diag.add(.fatal, column_context, .undeclared_variable, .{ .variable = name });
+                    valid = false;
                 }
                 if (!assign_set.contains(name)) {
-                    return error.RecordVariableNotFound;
+                    try diag.add(.fatal, column_context, .record_variable_not_found, .{ .variable = name });
+                    valid = false;
                 }
+                if (valid) try unique_columns.append(arena_alloc, name);
             }
+            pipeline.record = .{ .explicit = try unique_columns.toOwnedSlice(arena_alloc) };
         },
     }
     return pipeline;
@@ -1234,13 +1406,22 @@ fn compileStepArgs(
     doc_args: ?std.StringHashMap(config.ArgValueDoc),
     slot_map: *const SlotMap,
     diag: *diagnostic.PrecompileDiagnostic,
+    base_context: DiagnosticContext,
 ) ![]recipe_ir.StepArg {
     const args = try allocator.alloc(recipe_ir.StepArg, command.args.len);
+    var has_error = false;
 
     for (command.args, 0..) |arg, idx| {
         if (doc_args) |wrapper| {
             if (wrapper.get(arg.name)) |doc_arg| {
-                args[idx] = try compileArg(allocator, doc_arg, slot_map);
+                var arg_context = base_context;
+                arg_context.argument_name = arg.name;
+                args[idx] = compileArg(allocator, doc_arg, slot_map) catch |err| blk: {
+                    if (err == error.OutOfMemory) return err;
+                    try diag.add(.fatal, arg_context, .invalid_argument, .{ .argument = arg.name });
+                    has_error = true;
+                    break :blk try makeEmptyStringArg(allocator);
+                };
                 continue;
             }
         }
@@ -1254,20 +1435,26 @@ fn compileStepArgs(
             continue;
         }
 
-        diag.argument_name = arg.name;
-        return error.MissingCommandArgument;
+        var arg_context = base_context;
+        arg_context.argument_name = arg.name;
+        try diag.add(.fatal, arg_context, .missing_command_argument, .{ .argument = arg.name });
+        has_error = true;
+        args[idx] = try makeEmptyStringArg(allocator);
     }
 
     if (doc_args) |wrapper| {
         var it = wrapper.iterator();
         while (it.next()) |entry| {
             if (!command.hasPlaceholder(entry.key_ptr.*)) {
-                diag.argument_name = entry.key_ptr.*;
-                return error.UnexpectedCommandArgument;
+                var arg_context = base_context;
+                arg_context.argument_name = entry.key_ptr.*;
+                try diag.add(.fatal, arg_context, .unexpected_command_argument, .{ .argument = entry.key_ptr.* });
+                has_error = true;
             }
         }
     }
 
+    if (has_error) return error.DiagnosticsFound;
     return args;
 }
 
@@ -1805,7 +1992,7 @@ test "precompile rejects missing instrument references" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.InstrumentNotFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile validates command arguments" {
@@ -1852,8 +2039,8 @@ test "precompile validates command arguments" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.MissingCommandArgument, precompilePath(gpa, std.testing.io, missing_argument_path, dir, null));
-    try std.testing.expectError(error.UnexpectedCommandArgument, precompilePath(gpa, std.testing.io, unexpected_argument_path, dir, null));
+    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, missing_argument_path, dir, null));
+    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, unexpected_argument_path, dir, null));
 }
 
 test "precompile allows omitted optional group arguments" {
@@ -2139,7 +2326,7 @@ test "precompile rejects partial bool arg map" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.PartialBoolMap, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile diagnostic includes step context" {
@@ -2175,16 +2362,17 @@ test "precompile diagnostic includes step context" {
     defer precompile_diagnostic.deinit();
 
     _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &precompile_diagnostic) catch |err| {
-        try std.testing.expectEqual(error.CommandNotFound, err);
+        try std.testing.expectEqual(error.DiagnosticsFound, err);
 
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
 
-        try precompile_diagnostic.write(&out.writer, err);
+        try precompile_diagnostic.writeAll(&out.writer);
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "task 0 step 0"));
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "instrument=d1"));
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "adapter=psu0"));
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "command=missing"));
+        try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "command not found"));
         return;
     };
 
@@ -2274,8 +2462,7 @@ test "precompile compute step rejects missing assign" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    // Untagged StepConfig parsing collapses variant mismatches to a generic type error.
-    try std.testing.expectError(error.WrongType, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile step with if guard" {
@@ -2344,8 +2531,7 @@ test "precompile rejects invalid step (neither call nor compute)" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    // Untagged StepConfig parsing collapses variant mismatches to a generic type error.
-    try std.testing.expectError(error.WrongType, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile rejects record with unknown assign variable" {
@@ -2382,7 +2568,7 @@ test "precompile rejects record with unknown assign variable" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.RecordVariableNotFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile accepts valid record subset" {
@@ -2465,12 +2651,12 @@ test "precompile diagnostic for missing pipeline" {
     defer precompile_diagnostic.deinit();
 
     _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &precompile_diagnostic) catch |err| {
-        try std.testing.expectEqual(error.MissingPipeline, err);
+        try std.testing.expectEqual(error.DiagnosticsFound, err);
 
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
 
-        try precompile_diagnostic.write(&out.writer, err);
+        try precompile_diagnostic.writeAll(&out.writer);
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "missing required 'pipeline'"));
         return;
     };
@@ -2511,12 +2697,12 @@ test "precompile diagnostic for missing record" {
     defer precompile_diagnostic.deinit();
 
     _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &precompile_diagnostic) catch |err| {
-        try std.testing.expectEqual(error.MissingRecordConfig, err);
+        try std.testing.expectEqual(error.DiagnosticsFound, err);
 
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
 
-        try precompile_diagnostic.write(&out.writer, err);
+        try precompile_diagnostic.writeAll(&out.writer);
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "missing required 'record'"));
         return;
     };
@@ -2611,7 +2797,7 @@ test "precompile rejects undeclared variable use" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.UndeclaredVariable, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile rejects undeclared variable in expression" {
@@ -2641,7 +2827,7 @@ test "precompile rejects undeclared variable in expression" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.UndeclaredVariable, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile rejects variable shadowing builtin" {
@@ -2671,7 +2857,7 @@ test "precompile rejects variable shadowing builtin" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.BuiltinVariableConflict, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile sequential task" {
@@ -3071,7 +3257,7 @@ test "precompile rejects assign to const" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.AssignToConst, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile rejects duplicate const and var names" {
@@ -3100,7 +3286,7 @@ test "precompile rejects duplicate const and var names" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.DuplicateVariable, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile does not fold expressions referencing runtime vars" {
