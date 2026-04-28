@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostic = @import("../diagnostic.zig");
 const types = @import("types.zig");
 const ast_mod = @import("ast.zig");
 
@@ -9,7 +10,7 @@ const Ast = ast_mod.Ast;
 
 const AstParser = struct {
     allocator: std.mem.Allocator,
-    diagnostics: *types.Diagnostics,
+    diagnostics: diagnostic.Reporter,
     source: []const u8,
     pos: usize,
 
@@ -288,7 +289,11 @@ const AstParser = struct {
     }
 };
 
-pub fn parseAst(allocator: std.mem.Allocator, source: []const u8, diagnostics: *types.Diagnostics) CompileError!Ast {
+pub fn parseAst(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    diagnostics: diagnostic.Reporter,
+) CompileError!Ast {
     var parser = AstParser{
         .allocator = allocator,
         .diagnostics = diagnostics,

@@ -6,39 +6,65 @@ const adapter_schema = @import("../adapter/schema.zig");
 const parse_mod = @import("../adapter/parse.zig");
 const testing = @import("../testing.zig");
 const config = @import("config.zig");
-const diagnostic = @import("diagnostic.zig");
+const diagnostic = @import("../diagnostic.zig");
 const recipe_ir = @import("compiled.zig");
 const expr = @import("../expr.zig");
 
 const max_recipe_size: usize = 512 * 1024;
 
 const SlotTable = std.StringArrayHashMapUnmanaged(void);
-const DiagnosticContext = diagnostic.DiagnosticContext;
-const ExprSourceKind = diagnostic.ExprSourceKind;
+const DiagnosticContext = diagnostic.Context;
+
+const ExprSourceKind = enum {
+    expression,
+    argument,
+
+    fn sourceKind(self: ExprSourceKind) diagnostic.SourceKind {
+        return switch (self) {
+            .expression => .expression,
+            .argument => .argument_expression,
+        };
+    }
+};
 
 pub fn precompilePath(
     allocator: std.mem.Allocator,
     io: std.Io,
     recipe_path: []const u8,
     adapter_dir: std.Io.Dir,
-    precompile_diagnostic: ?*diagnostic.PrecompileDiagnostic,
+    log: ?*std.Io.Writer,
 ) !recipe_ir.PrecompiledRecipe {
-    var fallback_diag: diagnostic.PrecompileDiagnostic = .init(allocator, recipe_path);
-    defer fallback_diag.deinit();
-    const diag = precompile_diagnostic orelse &fallback_diag;
-    diag.reset();
+    var diagnostics: diagnostic.Diagnostics = .init(allocator, recipe_path);
+    defer diagnostics.deinit();
+    var empty_diagnostics: diagnostic.EmptyDiagnostics = .init();
+    defer empty_diagnostics.deinit();
+    const reporter = if (log != null) diagnostics.reporter() else empty_diagnostics.reporter();
 
-    const recipe_cfg = doc_parse.parseFilePath(config.RecipeConfig, diag.arenaAllocator(), io, recipe_path, max_recipe_size) catch |err|
-        return failRecipeParseWithDiagnostic(diag, err);
+    var precompile_arena: std.heap.ArenaAllocator = .init(allocator);
+    defer precompile_arena.deinit();
+    const precompile_allocator = precompile_arena.allocator();
+    defer if (log) |writer| {
+        diagnostics.writeAll(writer) catch {};
+    };
+
+    var recipe_parse_arena: std.heap.ArenaAllocator = .init(precompile_allocator);
+
+    const recipe_cfg = doc_parse.parseFilePath(config.RecipeConfig, recipe_parse_arena.allocator(), io, recipe_path, max_recipe_size) catch |err| {
+        try addDocumentError(reporter, err, .{});
+        return error.AnalysisFail;
+    };
 
     if (recipe_cfg.pipeline == null) {
-        return diag.fail(.{}, .{ .missing_pipeline = {} });
+        return @as(diagnostic.Error!recipe_ir.PrecompiledRecipe, reporter.fail(null, .{ .missing_pipeline = {} }));
     }
 
-    return precompileInternal(allocator, io, &recipe_cfg, adapter_dir, diag) catch |err| switch (err) {
-        error.AnalysisFail => return error.AnalysisFail,
-        else => return err,
-    };
+    var adapter_cache_arena: std.heap.ArenaAllocator = .init(precompile_allocator);
+
+    var loaded_adapters = try loadAdapters(adapter_cache_arena.allocator(), io, &recipe_cfg, adapter_dir, reporter);
+
+    const compiled = try precompileInternal(allocator, &recipe_cfg, &loaded_adapters, reporter);
+
+    return compiled;
 }
 
 /// Converts a parsed recipe document into the arena-owned runtime form used by preview and execution.
@@ -54,47 +80,40 @@ pub fn precompilePath(
 /// Precompile only validates and reshapes recipe data; it does not perform VISA I/O or talk to hardware.
 fn precompileInternal(
     allocator: std.mem.Allocator,
-    io: std.Io,
     recipe: *const config.RecipeConfig,
-    adapter_dir: std.Io.Dir,
-    precompile_diagnostic: *diagnostic.PrecompileDiagnostic,
+    loaded_adapters: *const std.StringHashMap(Adapter),
+    reporter: diagnostic.Reporter,
 ) !recipe_ir.PrecompiledRecipe {
-    // 1. Create the arena-owned result lifetime and a temporary adapter cache used only while validating the recipe.
+    // 1. Create the arena-owned result lifetime.
     var arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer arena.deinit();
     const alloc = arena.allocator();
 
-    var adapter_arena: std.heap.ArenaAllocator = .init(allocator);
-    defer adapter_arena.deinit();
-
-    var slot_map = try buildSlotMap(alloc, recipe, precompile_diagnostic);
-
-    // 2. Eagerly load every referenced adapter.
-    var loaded_adapters = try loadAdapters(adapter_arena.allocator(), io, recipe, adapter_dir, precompile_diagnostic);
-    defer {
-        var it = loaded_adapters.valueIterator();
-        while (it.next()) |adapter| adapter.deinit();
-    }
+    var slot_map = try buildSlotMap(alloc, recipe, reporter);
 
     // 3. Compile instrument metadata from loaded adapters.
-    var precompiled_instruments = try precompileInstruments(alloc, recipe, &loaded_adapters);
+    var precompiled_instruments = try precompileInstruments(alloc, recipe, loaded_adapters);
 
     // 3-5. Normalize tasks and steps, resolving commands and validating arguments.
     var assign_set: std.StringArrayHashMapUnmanaged(void) = .empty;
-    const tasks = try precompileTasks(alloc, recipe, &slot_map, &loaded_adapters, &precompiled_instruments, &assign_set, precompile_diagnostic);
+    const tasks = try precompileTasks(alloc, recipe, &slot_map, loaded_adapters, &precompiled_instruments, &assign_set, reporter);
 
     // 6. Validate and resolve pipeline record configuration.
-    const pipeline = try resolvePipelineConfig(alloc, recipe, &slot_map, &assign_set, precompile_diagnostic);
+    const pipeline = try resolvePipelineConfig(alloc, recipe, &slot_map, &assign_set, reporter);
 
     // 7. Parse optional stop_when expression.
     var stop_when: ?expr.Expression = null;
+    var stop_when_failed = false;
     if (recipe.stop_when) |src|
-        stop_when = slot_map.compileExpr(precompile_diagnostic, .{}, src.source(), .expression) catch |err| switch (err) {
-            error.AnalysisFail => null,
+        stop_when = slot_map.compileExpr(reporter, .{}, src.source(), .expression) catch |err| switch (err) {
+            error.AnalysisFail => blk: {
+                stop_when_failed = true;
+                break :blk null;
+            },
             else => return err,
         };
 
-    if (precompile_diagnostic.hasFatal()) return error.AnalysisFail;
+    if (stop_when_failed) return error.AnalysisFail;
 
     // 8. Assign save_column indices to steps that contribute to recorded frames.
     assignSaveColumns(tasks, &slot_map, pipeline.record.?.explicit);
@@ -111,19 +130,15 @@ fn precompileInternal(
     };
 }
 
-fn failRecipeParseWithDiagnostic(diag: *diagnostic.PrecompileDiagnostic, err: anyerror) anyerror {
-    addDocumentDiagnostic(diag, err, .{}) catch |diagnostic_err| return diagnostic_err;
-    return error.AnalysisFail;
-}
-
-fn addDocumentDiagnostic(diag: *diagnostic.PrecompileDiagnostic, err: anyerror, context: DiagnosticContext) !void {
-    switch (err) {
-        error.FileNotFound => try diag.add(.fatal, context, .{ .file_not_found = {} }),
-        error.SyntaxError => try diag.add(.fatal, context, .{ .syntax_error = {} }),
-        error.UnsupportedFormat => try diag.add(.fatal, context, .{ .unsupported_format = {} }),
-        error.WrongType => try diag.add(.fatal, context, .{ .wrong_type = {} }),
+fn addDocumentError(diag: diagnostic.Reporter, err: anyerror, context: DiagnosticContext) !void {
+    const message: diagnostic.Message = switch (err) {
+        error.FileNotFound => .{ .file_not_found = {} },
+        error.SyntaxError => .{ .syntax_error = {} },
+        error.UnsupportedFormat => .{ .unsupported_format = {} },
+        error.WrongType => .{ .wrong_type = {} },
         else => return err,
-    }
+    };
+    try diag.withContext(context).withSourceKind(.recipe_document).add(.fatal, null, message);
 }
 
 const SlotMap = struct {
@@ -136,7 +151,7 @@ const SlotMap = struct {
     /// into runtime-ready bytecode with partial constant folding applied.
     fn compileExpr(
         self: *const SlotMap,
-        diag: *diagnostic.PrecompileDiagnostic,
+        diag: diagnostic.Reporter,
         context: DiagnosticContext,
         source: []const u8,
         source_kind: ExprSourceKind,
@@ -144,15 +159,15 @@ const SlotMap = struct {
         var temp_arena: std.heap.ArenaAllocator = .init(self.alloc);
         defer temp_arena.deinit();
 
-        var expr_diags = expr.Diagnostics.init(diag, context, source_kind.sourceKind(), source);
+        const expr_diags = diag.withContext(context).withSource(source_kind.sourceKind(), source);
 
-        var ast = try expr.parseAst(temp_arena.allocator(), source, &expr_diags);
-        try ast.bindVariables(&self.slots, &expr_diags);
+        var ast = try expr.parseAst(temp_arena.allocator(), source, expr_diags);
+        try ast.bindVariables(&self.slots, expr_diags);
 
-        var optimizer = ExprOptimizer.init(self, temp_arena.allocator(), &expr_diags);
+        var optimizer = ExprOptimizer.init(self, temp_arena.allocator(), expr_diags);
         try optimizer.optimize(&ast);
-        try ast.remapBindings(SlotBindingRemapper{ .slot_map = self }, &expr_diags);
-        return try ast.lower(self.alloc, &expr_diags);
+        try ast.remapBindings(SlotBindingRemapper{ .slot_map = self }, expr_diags);
+        return try ast.lower(self.alloc, expr_diags);
     }
 
     /// Look up a name and return the runtime binding (var slot remapped)
@@ -175,20 +190,21 @@ const SlotMap = struct {
     }
 
     /// Validate that `name` refers to a mutable var and return its remapped slot index.
-    fn varSlotIndex(self: *const SlotMap, diag: *diagnostic.PrecompileDiagnostic, context: DiagnosticContext, name: []const u8) !usize {
+    fn varSlotIndex(self: *const SlotMap, diag: diagnostic.Reporter, context: DiagnosticContext, name: []const u8) !usize {
         var variable_context = context;
         variable_context.variable_name = name;
+        const variable_reporter = diag.withContext(variable_context);
 
         if (expr.resolveBuiltin(name) != null) {
-            return diag.fail(variable_context, .{ .builtin_variable_conflict = .{ .variable = name } });
+            return variable_reporter.fail(null, .{ .builtin_variable_conflict = .{ .variable = name } });
         }
 
         const slot = self.slots.getIndex(name) orelse {
-            return diag.fail(variable_context, .{ .unknown_variable = .{ .variable = name } });
+            return variable_reporter.fail(null, .{ .unknown_variable = .{ .variable = name } });
         };
 
         if (slot < self.const_count) {
-            return diag.fail(variable_context, .{ .assign_to_const = .{ .variable = name } });
+            return variable_reporter.fail(null, .{ .assign_to_const = .{ .variable = name } });
         }
 
         return slot - self.const_count;
@@ -221,7 +237,7 @@ const SlotBindingRemapper = struct {
         self: @This(),
         binding: expr.VariableBinding,
         span: expr.Span,
-        diagnostics: *expr.Diagnostics,
+        diagnostics: diagnostic.Reporter,
     ) expr.CompileError!expr.VariableBinding {
         return switch (binding) {
             .builtin => binding,
@@ -236,7 +252,7 @@ const SlotBindingRemapper = struct {
 const ExprOptimizer = struct {
     slot_map: *const SlotMap,
     allocator: std.mem.Allocator,
-    diagnostics: *expr.Diagnostics,
+    diagnostics: diagnostic.Reporter,
 
     const ScalarClass = enum {
         int,
@@ -244,7 +260,7 @@ const ExprOptimizer = struct {
         other,
     };
 
-    fn init(slot_map: *const SlotMap, allocator: std.mem.Allocator, diagnostics: *expr.Diagnostics) ExprOptimizer {
+    fn init(slot_map: *const SlotMap, allocator: std.mem.Allocator, diagnostics: diagnostic.Reporter) ExprOptimizer {
         return .{
             .slot_map = slot_map,
             .allocator = allocator,
@@ -567,23 +583,13 @@ const ExprOptimizer = struct {
         const items = self.constListItems(ref) orelse return null;
         const delimiter = constString(delim) orelse return null;
         var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.allocator);
         for (items, 0..) |item, idx| {
             if (idx > 0) try out.appendSlice(self.allocator, delimiter);
-            switch (item) {
-                .int => |value| {
-                    var buf: [64]u8 = undefined;
-                    const formatted = try std.fmt.bufPrint(&buf, "{d}", .{value});
-                    try out.appendSlice(self.allocator, formatted);
-                },
-                .float => |value| {
-                    var buf: [64]u8 = undefined;
-                    const formatted = try std.fmt.bufPrint(&buf, "{d}", .{value});
-                    try out.appendSlice(self.allocator, formatted);
-                },
-                .bool => |value| try out.appendSlice(self.allocator, if (value) "true" else "false"),
-                .string => |value| try out.appendSlice(self.allocator, value),
-                .list => return self.diagnostics.fail(span, .nested_list_value),
-            }
+            expr.appendResolvedValueText(&out, self.allocator, SlotMap.resolveConstValue(item)) catch |err| switch (err) {
+                error.InvalidExpression => return self.diagnostics.fail(span, .nested_list_value),
+                error.OutOfMemory => return error.OutOfMemory,
+            };
         }
         return try self.newNode(.{ .string = try out.toOwnedSlice(self.allocator) }, span);
     }
@@ -632,7 +638,7 @@ const ExprOptimizer = struct {
 fn buildSlotMap(
     alloc: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
 ) !SlotMap {
     const const_keys = if (recipe.consts) |c| c.keys() else &.{};
     const const_vals = if (recipe.consts) |c| c.values() else &.{};
@@ -640,19 +646,24 @@ fn buildSlotMap(
     const var_vals = if (recipe.vars) |v| v.values() else &.{};
 
     // Validate: no name conflicts between consts, vars, and builtins.
+    var has_error = false;
     for (const_keys) |name| {
         if (expr.resolveBuiltin(name) != null) {
-            try diag.add(.fatal, .{ .variable_name = name }, .{ .builtin_variable_conflict = .{ .variable = name } });
+            try diag.withContext(.{ .variable_name = name }).add(.fatal, null, .{ .builtin_variable_conflict = .{ .variable = name } });
+            has_error = true;
         }
     }
     for (var_keys) |name| {
         if (expr.resolveBuiltin(name) != null) {
-            try diag.add(.fatal, .{ .variable_name = name }, .{ .builtin_variable_conflict = .{ .variable = name } });
+            try diag.withContext(.{ .variable_name = name }).add(.fatal, null, .{ .builtin_variable_conflict = .{ .variable = name } });
+            has_error = true;
         }
         if (recipe.consts != null and recipe.consts.?.contains(name)) {
-            try diag.add(.fatal, .{ .variable_name = name }, .{ .duplicate_variable = .{ .variable = name } });
+            try diag.withContext(.{ .variable_name = name }).add(.fatal, null, .{ .duplicate_variable = .{ .variable = name } });
+            has_error = true;
         }
     }
+    if (has_error) return error.AnalysisFail;
 
     // Build initial values array: consts first, then vars.
     const initial_values = try alloc.alloc(recipe_ir.Value, const_keys.len + var_keys.len);
@@ -681,7 +692,7 @@ fn loadAdapters(
     io: std.Io,
     recipe: *const config.RecipeConfig,
     adapter_dir: std.Io.Dir,
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
 ) !std.StringHashMap(Adapter) {
     var map: std.StringHashMap(Adapter) = .init(allocator);
     var instrument_it = recipe.instruments.iterator();
@@ -740,19 +751,29 @@ fn precompileTasks(
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
     assign_set: *std.StringArrayHashMapUnmanaged(void),
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
 ) ![]recipe_ir.Task {
     var tasks: std.ArrayList(recipe_ir.Task) = .empty;
     errdefer tasks.deinit(arena_alloc);
+    var has_error = false;
 
     for (recipe.tasks, 0..) |*task_cfg, task_idx| {
-        const steps = try precompileSteps(arena_alloc, task_cfg.steps, slot_map, loaded_adapters, precompiled_instruments, assign_set, task_idx, diag);
+        const steps = precompileSteps(arena_alloc, task_cfg.steps, slot_map, loaded_adapters, precompiled_instruments, assign_set, task_idx, diag) catch |err| switch (err) {
+            error.AnalysisFail => {
+                has_error = true;
+                continue;
+            },
+            else => return err,
+        };
 
         if (task_cfg.@"while") |while_src| {
             const task_context: DiagnosticContext = .{ .task_idx = task_idx };
             const condition = slot_map.compileExpr(diag, task_context, while_src.source(), .expression) catch |err| {
                 switch (err) {
-                    error.AnalysisFail => continue,
+                    error.AnalysisFail => {
+                        has_error = true;
+                        continue;
+                    },
                     else => return err,
                 }
             };
@@ -765,7 +786,10 @@ fn precompileTasks(
             const task_context: DiagnosticContext = .{ .task_idx = task_idx };
             const condition = slot_map.compileExpr(diag, task_context, guard_src.source(), .expression) catch |err| {
                 switch (err) {
-                    error.AnalysisFail => continue,
+                    error.AnalysisFail => {
+                        has_error = true;
+                        continue;
+                    },
                     else => return err,
                 }
             };
@@ -781,6 +805,7 @@ fn precompileTasks(
             } });
         }
     }
+    if (has_error) return error.AnalysisFail;
     return try tasks.toOwnedSlice(arena_alloc);
 }
 
@@ -792,10 +817,11 @@ fn precompileSteps(
     precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
     assign_set: *std.StringArrayHashMapUnmanaged(void),
     task_idx: usize,
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
 ) ![]recipe_ir.Step {
     var steps: std.ArrayList(recipe_ir.Step) = .empty;
     errdefer steps.deinit(arena_alloc);
+    var has_error = false;
 
     for (step_cfgs, 0..) |*step_cfg, step_idx| {
         const step = switch (step_cfg.*) {
@@ -833,12 +859,14 @@ fn precompileSteps(
             ),
         } catch |err| switch (err) {
             error.AnalysisFail => {
+                has_error = true;
                 continue;
             },
             else => return err,
         };
         try steps.append(arena_alloc, step);
     }
+    if (has_error) return error.AnalysisFail;
     return try steps.toOwnedSlice(arena_alloc);
 }
 
@@ -849,7 +877,7 @@ fn precompileComputeStep(
     cfg: *const config.ComputeStepConfig,
     task_idx: usize,
     step_idx: usize,
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
 ) !recipe_ir.Step {
     const step_context: DiagnosticContext = .{ .task_idx = task_idx, .step_idx = step_idx };
 
@@ -880,17 +908,17 @@ fn precompileCallStep(
     cfg: *const config.CallStepConfig,
     task_idx: usize,
     step_idx: usize,
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
 ) !recipe_ir.Step {
     const step_context: DiagnosticContext = .{ .task_idx = task_idx, .step_idx = step_idx };
 
     const dot_pos = std.mem.findScalar(u8, cfg.call, '.') orelse {
-        return diag.fail(step_context, .{ .invalid_call_format = .{ .call = cfg.call } });
+        return diag.withContext(step_context).fail(null, .{ .invalid_call_format = .{ .call = cfg.call } });
     };
     const instrument_name = cfg.call[0..dot_pos];
     const command_name = cfg.call[dot_pos + 1 ..];
     if (instrument_name.len == 0 or command_name.len == 0) {
-        return diag.fail(step_context, .{ .invalid_call_format = .{ .call = cfg.call } });
+        return diag.withContext(step_context).fail(null, .{ .invalid_call_format = .{ .call = cfg.call } });
     }
 
     var call_context: DiagnosticContext = .{
@@ -903,13 +931,13 @@ fn precompileCallStep(
     const if_expr = try precompileIf(slot_map, diag, call_context, cfg.@"if");
 
     const precompiled_instrument = precompiled_instruments.getPtr(instrument_name) orelse {
-        return diag.fail(call_context, .{ .instrument_not_found = .{ .instrument = instrument_name } });
+        return diag.withContext(call_context).fail(null, .{ .instrument_not_found = .{ .instrument = instrument_name } });
     };
 
-    call_context.adapter_name = precompiled_instrument.adapter_name;
+    call_context.adapter_name = loaded_adapters.getKey(precompiled_instrument.adapter_name).?;
     const loaded_adapter = loaded_adapters.getPtr(precompiled_instrument.adapter_name).?;
     const command_source = loaded_adapter.commands.get(command_name) orelse {
-        return diag.fail(call_context, .{ .command_not_found = .{
+        return diag.withContext(call_context).fail(null, .{ .command_not_found = .{
             .instrument = instrument_name,
             .command = command_name,
         } });
@@ -944,7 +972,7 @@ fn precompileCallStep(
 
 fn precompileIf(
     slot_map: *const SlotMap,
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
     context: DiagnosticContext,
     if_src_opt: ?config.BooleanExpr,
 ) !?expr.Expression {
@@ -959,7 +987,7 @@ fn precompileSleepStep(
     cfg: *const config.SleepStepConfig,
     task_idx: usize,
     step_idx: usize,
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
 ) !recipe_ir.Step {
     const step_context: DiagnosticContext = .{ .task_idx = task_idx, .step_idx = step_idx };
     const if_expr = try precompileIf(slot_map, diag, step_context, cfg.@"if");
@@ -978,14 +1006,14 @@ fn precompileParallelStep(
     cfg: *const config.ParallelStepConfig,
     task_idx: usize,
     step_idx: usize,
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
 ) anyerror!recipe_ir.Step {
     const step_context: DiagnosticContext = .{ .task_idx = task_idx, .step_idx = step_idx };
 
     // Reject nested parallel steps.
     for (cfg.parallel) |*inner| {
         if (inner.* == .parallel) {
-            return diag.fail(step_context, .{ .nested_parallel_step = {} });
+            return diag.withContext(step_context).fail(null, .{ .nested_parallel_step = {} });
         }
     }
 
@@ -1012,15 +1040,17 @@ fn resolvePipelineConfig(
     recipe: *const config.RecipeConfig,
     slot_map: *const SlotMap,
     assign_set: *const std.StringArrayHashMapUnmanaged(void),
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
 ) !recipe_ir.PipelineConfig {
     const empty_columns: []const []const u8 = &.{};
     const pipeline_cfg = recipe.pipeline orelse {
-        try diag.add(.fatal, .{}, .{ .missing_pipeline = {} });
-        return .{ .record = .{ .explicit = empty_columns } };
+        try diag.add(.fatal, null, .{ .missing_pipeline = {} });
+        return error.AnalysisFail;
     };
+    var has_error = false;
     if (pipeline_cfg.record == null) {
-        try diag.add(.fatal, .{}, .{ .missing_record_config = {} });
+        try diag.add(.fatal, null, .{ .missing_record_config = {} });
+        has_error = true;
     }
 
     try validatePipelineConfig(&pipeline_cfg, diag);
@@ -1039,30 +1069,34 @@ fn resolvePipelineConfig(
 
             for (columns) |name| {
                 const column_context: DiagnosticContext = .{ .variable_name = name };
+                const column_reporter = diag.withContext(column_context);
                 if (seen.getIndex(name) != null) {
-                    try diag.add(.warning, column_context, .{ .duplicate_record_column = .{ .column = name } });
+                    try column_reporter.warn(null, .{ .duplicate_record_column = .{ .column = name } });
                     continue;
                 }
                 try seen.put(arena_alloc, name, {});
 
                 var valid = true;
                 if (slot_map.resolveName(name) == null) {
-                    try diag.add(.fatal, column_context, .{ .unknown_variable = .{ .variable = name } });
+                    try column_reporter.add(.fatal, null, .{ .unknown_variable = .{ .variable = name } });
                     valid = false;
+                    has_error = true;
                 }
                 if (!assign_set.contains(name)) {
-                    try diag.add(.fatal, column_context, .{ .record_variable_not_found = .{ .variable = name } });
+                    try column_reporter.add(.fatal, null, .{ .record_variable_not_found = .{ .variable = name } });
                     valid = false;
+                    has_error = true;
                 }
                 if (valid) try unique_columns.append(arena_alloc, name);
             }
             pipeline.record = .{ .explicit = try unique_columns.toOwnedSlice(arena_alloc) };
         },
     }
+    if (has_error) return error.AnalysisFail;
     return pipeline;
 }
 
-fn validatePipelineConfig(cfg: *const recipe_ir.PipelineConfig, diag: *diagnostic.PrecompileDiagnostic) !void {
+fn validatePipelineConfig(cfg: *const recipe_ir.PipelineConfig, diag: diagnostic.Reporter) !void {
     var has_error = false;
     if (cfg.buffer_size) |size| {
         if (size == 0) has_error = true;
@@ -1078,7 +1112,7 @@ fn validatePipelineConfig(cfg: *const recipe_ir.PipelineConfig, diag: *diagnosti
     }
     if (!has_error) return;
 
-    try diag.add(.fatal, .{}, .{ .invalid_pipeline_config = {} });
+    try diag.add(.fatal, null, .{ .invalid_pipeline_config = {} });
     return error.AnalysisFail;
 }
 
@@ -1139,16 +1173,16 @@ fn getOrParseAdapter(
     adapter_dir: std.Io.Dir,
     instrument_name: []const u8,
     adapter_name: []const u8,
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
 ) !*const Adapter {
     if (loaded_adapters.getPtr(adapter_name)) |loaded| return loaded;
 
     const key = try allocator.dupe(u8, adapter_name);
 
-    var loaded = try parse_mod.parseAdapterInDir(allocator, io, adapter_dir, adapter_name, diag, .{
+    var loaded = try parse_mod.parseAdapterInDir(allocator, io, adapter_dir, adapter_name, diag.withContext(.{
         .instrument_name = instrument_name,
         .adapter_name = adapter_name,
-    });
+    }));
     errdefer loaded.deinit();
 
     try loaded_adapters.put(key, loaded);
@@ -1161,7 +1195,7 @@ fn getOrCompileCommand(
     source: Adapter.Command,
     call: []const u8,
     adapter_bool_format: ?adapter_schema.BoolFormat,
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
     context: DiagnosticContext,
 ) !*const recipe_ir.PrecompiledCommand {
     if (instrument.commands.get(call)) |command| return command;
@@ -1181,7 +1215,7 @@ fn compileCommand(
     source: Adapter.Command,
     instrument: *const recipe_ir.PrecompiledInstrument,
     adapter_bool_format: ?adapter_schema.BoolFormat,
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
     base_context: DiagnosticContext,
 ) !recipe_ir.PrecompiledCommand {
     var arg_entries: std.ArrayList(ArgBuildEntry) = .empty;
@@ -1218,7 +1252,7 @@ fn compileArgFormat(
     source_args: ?std.StringHashMap(adapter_schema.ArgSpec),
     arg_name: []const u8,
     adapter_bool_format: ?adapter_schema.BoolFormat,
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
     context: DiagnosticContext,
 ) !recipe_ir.ArgFormat {
     var format: recipe_ir.ArgFormat = .{};
@@ -1237,7 +1271,7 @@ fn compileArgFormat(
                 .object => |obj| {
                     if (std.mem.eql(u8, obj.type, "bool")) {
                         if ((obj.true == null) != (obj.false == null)) {
-                            return diag.fail(context, .{ .partial_bool_map = {} });
+                            return diag.withContext(context).fail(null, .{ .partial_bool_map = {} });
                         }
                         if (obj.true) |t| {
                             if (format.bool_map) |old| {
@@ -1296,7 +1330,7 @@ fn compileStepArgs(
     command: *const recipe_ir.PrecompiledCommand,
     doc_args: ?std.StringHashMap(config.ArgValueDoc),
     slot_map: *const SlotMap,
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
     base_context: DiagnosticContext,
 ) ![]recipe_ir.StepArg {
     const args = try allocator.alloc(recipe_ir.StepArg, command.args.len);
@@ -1331,7 +1365,7 @@ fn compileStepArgs(
 
         var arg_context = base_context;
         arg_context.argument_name = arg.name;
-        try diag.add(.fatal, arg_context, .{ .missing_command_argument = .{ .argument = arg.name } });
+        try diag.withContext(arg_context).add(.fatal, null, .{ .missing_command_argument = .{ .argument = arg.name } });
         has_error = true;
         args[idx] = try makeEmptyStringArg(allocator);
     }
@@ -1342,7 +1376,7 @@ fn compileStepArgs(
             if (!command.hasPlaceholder(entry.key_ptr.*)) {
                 var arg_context = base_context;
                 arg_context.argument_name = entry.key_ptr.*;
-                try diag.add(.fatal, arg_context, .{ .unexpected_command_argument = .{ .argument = entry.key_ptr.* } });
+                try diag.withContext(arg_context).add(.fatal, null, .{ .unexpected_command_argument = .{ .argument = entry.key_ptr.* } });
                 has_error = true;
             }
         }
@@ -1378,7 +1412,7 @@ fn compileArg(
     allocator: std.mem.Allocator,
     doc_arg: config.ArgValueDoc,
     slot_map: *const SlotMap,
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
     context: DiagnosticContext,
 ) !recipe_ir.StepArg {
     return switch (doc_arg) {
@@ -1445,7 +1479,7 @@ fn compileArgScalar(
     allocator: std.mem.Allocator,
     value: config.ArgScalarDoc,
     slot_map: *const SlotMap,
-    diag: *diagnostic.PrecompileDiagnostic,
+    diag: diagnostic.Reporter,
     context: DiagnosticContext,
 ) !expr.Expression {
     return switch (value) {
@@ -2049,10 +2083,10 @@ test "precompiled command renders via helper" {
     var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
     defer cmd_arena.deinit();
     const alloc = cmd_arena.allocator();
-    var diags: diagnostic.PrecompileDiagnostic = .init(gpa, "<test>");
+    var diags: diagnostic.Diagnostics = .init(gpa, "<test>");
     defer diags.deinit();
 
-    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null, &diags, .{});
+    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null, diags.reporter());
 
     var instrument = recipe_ir.PrecompiledInstrument{
         .adapter_name = "psu",
@@ -2063,7 +2097,7 @@ test "precompiled command renders via helper" {
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, source, &instrument, null, &diags, .{});
+    var compiled = try compileCommand(gpa, source, &instrument, null, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
     try std.testing.expect(compiled.instrument == &instrument);
@@ -2087,10 +2121,10 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
     defer cmd_arena.deinit();
     const alloc = cmd_arena.allocator();
-    var diags: diagnostic.PrecompileDiagnostic = .init(gpa, "<test>");
+    var diags: diagnostic.Diagnostics = .init(gpa, "<test>");
     defer diags.deinit();
 
-    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null, &diags, .{});
+    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null, diags.reporter());
 
     var instrument = recipe_ir.PrecompiledInstrument{
         .adapter_name = "psu",
@@ -2101,7 +2135,7 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, source, &instrument, null, &diags, .{});
+    var compiled = try compileCommand(gpa, source, &instrument, null, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
@@ -2121,10 +2155,10 @@ test "float_precision controls decimal places in rendered command" {
     var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
     defer cmd_arena.deinit();
     const alloc = cmd_arena.allocator();
-    var diags: diagnostic.PrecompileDiagnostic = .init(gpa, "<test>");
+    var diags: diagnostic.Diagnostics = .init(gpa, "<test>");
     defer diags.deinit();
 
-    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null, &diags, .{});
+    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null, diags.reporter());
 
     var instrument = recipe_ir.PrecompiledInstrument{
         .adapter_name = "psu",
@@ -2135,7 +2169,7 @@ test "float_precision controls decimal places in rendered command" {
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, source, &instrument, null, &diags, .{});
+    var compiled = try compileCommand(gpa, source, &instrument, null, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
@@ -2165,10 +2199,10 @@ test "precompiled command applies bool format from adapter defaults" {
     var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
     defer cmd_arena.deinit();
     const alloc = cmd_arena.allocator();
-    var diags: diagnostic.PrecompileDiagnostic = .init(gpa, "<test>");
+    var diags: diagnostic.Diagnostics = .init(gpa, "<test>");
     defer diags.deinit();
 
-    const source = try Adapter.Command.parse(alloc, "OUTP {state}", null, null, &diags, .{});
+    const source = try Adapter.Command.parse(alloc, "OUTP {state}", null, null, diags.reporter());
 
     var instrument = recipe_ir.PrecompiledInstrument{
         .adapter_name = "psu",
@@ -2179,7 +2213,7 @@ test "precompiled command applies bool format from adapter defaults" {
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, source, &instrument, .{ .true = "ON", .false = "OFF" }, &diags, .{});
+    var compiled = try compileCommand(gpa, source, &instrument, .{ .true = "ON", .false = "OFF" }, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
@@ -2264,16 +2298,12 @@ test "precompile diagnostic includes step context" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    var precompile_diagnostic: diagnostic.PrecompileDiagnostic = .init(gpa, recipe_path);
-    defer precompile_diagnostic.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
 
-    _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &precompile_diagnostic) catch |err| {
+    _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &out.writer) catch |err| {
         try std.testing.expectEqual(error.AnalysisFail, err);
 
-        var out: std.Io.Writer.Allocating = .init(gpa);
-        defer out.deinit();
-
-        try precompile_diagnostic.writeAll(&out.writer);
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "task 0 step 0"));
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "instrument=d1"));
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "adapter=psu0"));
@@ -2553,16 +2583,12 @@ test "precompile diagnostic for missing pipeline" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    var precompile_diagnostic: diagnostic.PrecompileDiagnostic = .init(gpa, recipe_path);
-    defer precompile_diagnostic.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
 
-    _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &precompile_diagnostic) catch |err| {
+    _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &out.writer) catch |err| {
         try std.testing.expectEqual(error.AnalysisFail, err);
 
-        var out: std.Io.Writer.Allocating = .init(gpa);
-        defer out.deinit();
-
-        try precompile_diagnostic.writeAll(&out.writer);
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "missing required 'pipeline'"));
         return;
     };
@@ -2599,16 +2625,12 @@ test "precompile diagnostic for missing record" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    var precompile_diagnostic: diagnostic.PrecompileDiagnostic = .init(gpa, recipe_path);
-    defer precompile_diagnostic.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
 
-    _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &precompile_diagnostic) catch |err| {
+    _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &out.writer) catch |err| {
         try std.testing.expectEqual(error.AnalysisFail, err);
 
-        var out: std.Io.Writer.Allocating = .init(gpa);
-        defer out.deinit();
-
-        try precompile_diagnostic.writeAll(&out.writer);
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "missing required 'record'"));
         return;
     };

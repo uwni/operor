@@ -10,38 +10,6 @@ pub const CompileError = error{
     OutOfMemory,
 };
 
-pub const Diagnostics = struct {
-    inner: *diagnostic.Diagnostics,
-    context: diagnostic.Context = .{},
-    source_kind: diagnostic.SourceKind,
-    source: []const u8,
-
-    pub fn init(
-        inner: *diagnostic.Diagnostics,
-        context: diagnostic.Context,
-        source_kind: diagnostic.SourceKind,
-        source: []const u8,
-    ) Diagnostics {
-        return .{
-            .inner = inner,
-            .context = context,
-            .source_kind = source_kind,
-            .source = source,
-        };
-    }
-
-    pub fn fail(self: *Diagnostics, span: Span, message: Message) CompileError {
-        return self.inner.failDiagnostic(.{
-            .severity = .fatal,
-            .context = self.context,
-            .source_kind = self.source_kind,
-            .source = self.source,
-            .span = span,
-            .message = message,
-        });
-    }
-};
-
 /// Expression result: can be a 64-bit integer, a 64-bit float, or a string.
 ///
 /// Promotion rule: `int` → `float` is implicit (lossless widening);
@@ -225,6 +193,33 @@ pub const ResolvedList = struct {
         return self.at_fn(self.ctx, index);
     }
 };
+
+pub const FormatValueError = error{
+    InvalidExpression,
+    OutOfMemory,
+};
+
+pub fn appendResolvedValueText(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    value: ResolvedValue,
+) FormatValueError!void {
+    switch (value) {
+        .int => |v| {
+            var buf: [64]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "{d}", .{v}) catch return error.OutOfMemory;
+            out.appendSlice(allocator, text) catch return error.OutOfMemory;
+        },
+        .float => |v| {
+            var buf: [64]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "{d}", .{v}) catch return error.OutOfMemory;
+            out.appendSlice(allocator, text) catch return error.OutOfMemory;
+        },
+        .bool => |v| out.appendSlice(allocator, if (v) "true" else "false") catch return error.OutOfMemory,
+        .string => |v| out.appendSlice(allocator, v) catch return error.OutOfMemory,
+        .list => return error.InvalidExpression,
+    }
+}
 
 /// Opaque variable resolver: calls the provided function to map bindings to values.
 pub const VarResolver = struct {

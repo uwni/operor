@@ -106,74 +106,84 @@ pub const Diagnostic = struct {
     message: Message,
 };
 
+pub const Reporter = struct {
+    diagnostics: *anyopaque,
+    vtable: *const VTable,
+    context: Context = .{},
+    source_kind: ?SourceKind = null,
+    source: ?[]const u8 = null,
+
+    pub const VTable = struct {
+        add: *const fn (*anyopaque, Diagnostic) error{OutOfMemory}!void,
+    };
+
+    pub fn withContext(self: Reporter, context: Context) Reporter {
+        var out = self;
+        out.context = context;
+        return out;
+    }
+
+    pub fn withSource(self: Reporter, source_kind: SourceKind, source: []const u8) Reporter {
+        var out = self;
+        out.source_kind = source_kind;
+        out.source = source;
+        return out;
+    }
+
+    pub fn withSourceKind(self: Reporter, source_kind: SourceKind) Reporter {
+        var out = self;
+        out.source_kind = source_kind;
+        out.source = null;
+        return out;
+    }
+
+    pub fn add(self: Reporter, severity: Severity, span: ?Span, message: Message) error{OutOfMemory}!void {
+        try self.vtable.add(self.diagnostics, .{
+            .severity = severity,
+            .context = self.context,
+            .source_kind = self.source_kind,
+            .source = self.source,
+            .span = span,
+            .message = message,
+        });
+    }
+
+    pub fn fail(self: Reporter, span: ?Span, message: Message) Error {
+        self.add(.fatal, span, message) catch |err| return err;
+        return error.AnalysisFail;
+    }
+
+    pub fn warn(self: Reporter, span: ?Span, message: Message) error{OutOfMemory}!void {
+        try self.add(.warning, span, message);
+    }
+};
+
 pub const Diagnostics = struct {
     allocator: std.mem.Allocator,
     file_path: []const u8,
     items: std.ArrayList(Diagnostic) = .empty,
-    scratch: std.heap.ArenaAllocator,
 
+    /// Diagnostic payload slices are borrowed and must outlive writeAll.
     pub fn init(allocator: std.mem.Allocator, file_path: []const u8) Diagnostics {
         return .{
             .allocator = allocator,
             .file_path = file_path,
-            .scratch = .init(allocator),
         };
     }
 
     pub fn deinit(self: *Diagnostics) void {
         self.items.deinit(self.allocator);
-        self.scratch.deinit();
     }
 
-    pub fn reset(self: *Diagnostics) void {
-        self.items.clearRetainingCapacity();
-        self.scratch.deinit();
-        self.scratch = .init(self.allocator);
+    pub fn reporter(self: *Diagnostics) Reporter {
+        return .{
+            .diagnostics = @ptrCast(self),
+            .vtable = &reporter_vtable,
+        };
     }
 
-    pub fn arenaAllocator(self: *Diagnostics) std.mem.Allocator {
-        return self.scratch.allocator();
-    }
-
-    pub fn addDiagnostic(self: *Diagnostics, diagnostic: Diagnostic) error{OutOfMemory}!void {
+    pub fn add(self: *Diagnostics, diagnostic: Diagnostic) error{OutOfMemory}!void {
         try self.items.append(self.allocator, diagnostic);
-    }
-
-    pub fn add(
-        self: *Diagnostics,
-        severity: Severity,
-        context: Context,
-        message: Message,
-    ) error{OutOfMemory}!void {
-        try self.addDiagnostic(.{
-            .severity = severity,
-            .context = context,
-            .message = message,
-        });
-    }
-
-    pub fn failDiagnostic(self: *Diagnostics, diagnostic: Diagnostic) error{ OutOfMemory, AnalysisFail } {
-        try self.addDiagnostic(diagnostic);
-        return error.AnalysisFail;
-    }
-
-    pub fn fail(self: *Diagnostics, context: Context, message: Message) error{ OutOfMemory, AnalysisFail } {
-        try self.add(.fatal, context, message);
-        return error.AnalysisFail;
-    }
-
-    pub fn hasWarnings(self: *const Diagnostics) bool {
-        for (self.items.items) |item| {
-            if (item.severity == .warning) return true;
-        }
-        return false;
-    }
-
-    pub fn hasFatal(self: *const Diagnostics) bool {
-        for (self.items.items) |item| {
-            if (item.severity == .fatal) return true;
-        }
-        return false;
     }
 
     pub fn writeAll(self: *const Diagnostics, writer: *std.Io.Writer) !void {
@@ -214,26 +224,70 @@ pub const Diagnostics = struct {
         try writeMessage(writer, item);
         try writer.writeByte('\n');
     }
+
+    const reporter_vtable = Reporter.VTable{ .add = reportAdd };
+
+    fn reportAdd(ctx: *anyopaque, diagnostic: Diagnostic) error{OutOfMemory}!void {
+        const self: *Diagnostics = @ptrCast(@alignCast(ctx));
+        try self.add(diagnostic);
+    }
+};
+
+pub const EmptyDiagnostics = struct {
+    pub fn init() EmptyDiagnostics {
+        return .{};
+    }
+
+    pub fn deinit(_: *EmptyDiagnostics) void {}
+
+    pub fn reporter(self: *EmptyDiagnostics) Reporter {
+        return .{
+            .diagnostics = @ptrCast(self),
+            .vtable = &reporter_vtable,
+        };
+    }
+
+    pub fn writeAll(_: *const EmptyDiagnostics, _: *std.Io.Writer) !void {}
+
+    const reporter_vtable = Reporter.VTable{ .add = reportAdd };
+
+    fn reportAdd(_: *anyopaque, _: Diagnostic) error{OutOfMemory}!void {}
 };
 
 fn writeMessage(writer: *std.Io.Writer, item: Diagnostic) !void {
+    var has_source_prefix = false;
     if (item.source_kind) |source_kind| switch (source_kind) {
-        .expression => try writer.writeAll("invalid expression"),
-        .argument_expression => try writer.writeAll("invalid argument expression"),
-        .adapter_write_template => try writer.writeAll("invalid adapter write template"),
-        .adapter_read_type => try writer.writeAll("invalid adapter read type"),
+        .expression => {
+            try writer.writeAll("invalid expression");
+            has_source_prefix = true;
+        },
+        .argument_expression => {
+            try writer.writeAll("invalid argument expression");
+            has_source_prefix = true;
+        },
+        .adapter_write_template => {
+            try writer.writeAll("invalid adapter write template");
+            has_source_prefix = true;
+        },
+        .adapter_read_type => {
+            try writer.writeAll("invalid adapter read type");
+            has_source_prefix = true;
+        },
         .recipe_document, .adapter_document => {},
     };
     if (item.source) |source| {
-        if (item.source_kind != null) try writer.writeByte(' ');
+        if (has_source_prefix) try writer.writeByte(' ');
         try writer.print("'{s}'", .{source});
+        has_source_prefix = true;
     }
     if (item.span) |span| {
         if (item.source == null or span.start <= item.source.?.len) {
-            try writer.print(" at byte {d}", .{span.start});
+            if (has_source_prefix) try writer.writeByte(' ');
+            try writer.print("at byte {d}", .{span.start});
+            has_source_prefix = true;
         }
     }
-    if (item.source_kind != null or item.source != null or item.span != null) {
+    if (has_source_prefix) {
         try writer.writeAll(": ");
     }
 
@@ -282,4 +336,41 @@ fn writeMessage(writer: *std.Io.Writer, item: Diagnostic) !void {
         .invalid_identifier => |name| try writer.print("template placeholder '{s}' is not a valid identifier", .{name}),
         .invalid_read_type => |tag| try writer.print("read type '{s}' is not supported", .{tag}),
     }
+}
+
+test "document diagnostics do not add duplicate source separator" {
+    const gpa = std.testing.allocator;
+
+    var diagnostics = Diagnostics.init(gpa, "new.yaml");
+    defer diagnostics.deinit();
+
+    try diagnostics.add(.{
+        .severity = .fatal,
+        .source_kind = .recipe_document,
+        .message = .{ .file_not_found = {} },
+    });
+
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    try diagnostics.writeAll(&out.writer);
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "'new.yaml': file not found\n"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, out.written(), 1, ": :"));
+}
+
+test "empty diagnostics has no output" {
+    const gpa = std.testing.allocator;
+
+    var diagnostics = EmptyDiagnostics.init();
+    defer diagnostics.deinit();
+    const reporter = diagnostics.reporter();
+
+    try reporter.add(.warning, null, .{ .duplicate_record_column = .{ .column = "v" } });
+    try std.testing.expectEqual(error.AnalysisFail, reporter.fail(null, .{ .missing_pipeline = {} }));
+
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    try diagnostics.writeAll(&out.writer);
+    try std.testing.expectEqual(@as(usize, 0), out.written().len);
 }

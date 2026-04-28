@@ -111,13 +111,12 @@ pub const Command = struct {
         write_template: []const u8,
         read_value: ?[]const u8,
         description_value: ?[]const u8,
-        diagnostics: *diagnostic.Diagnostics,
-        context: diagnostic.Context,
+        reporter: diagnostic.Reporter,
     ) diagnostic.Error!Command {
         return .{
             .description = if (description_value) |d| try allocator.dupe(u8, d) else null,
-            .response = try parseReadType(read_value, diagnostics, context),
-            .template = try template.parseTemplate(allocator, write_template, diagnostics, context),
+            .response = try parseReadType(read_value, reporter),
+            .template = try template.parseTemplate(allocator, write_template, reporter),
         };
     }
 
@@ -131,16 +130,10 @@ pub const Command = struct {
 
 fn parseReadType(
     read_value: ?[]const u8,
-    diagnostics: *diagnostic.Diagnostics,
-    context: diagnostic.Context,
+    reporter: diagnostic.Reporter,
 ) diagnostic.Error!?Encoding {
     const read = read_value orelse return null;
-    return Encoding.fromString(read) orelse return diagnostics.failDiagnostic(.{
-        .severity = .fatal,
-        .context = context,
-        .source_kind = .adapter_read_type,
-        .source = read,
-        .span = .{ .start = 0, .end = read.len },
-        .message = .{ .invalid_read_type = read },
-    });
+    return Encoding.fromString(read) orelse return reporter
+        .withSource(.adapter_read_type, read)
+        .fail(.{ .start = 0, .end = read.len }, .{ .invalid_read_type = read });
 }

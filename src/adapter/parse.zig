@@ -4,6 +4,7 @@ const diagnostic = @import("../diagnostic.zig");
 const doc_parse = @import("../doc_parse.zig");
 const schema = @import("schema.zig");
 const instrument = @import("../instrument.zig");
+const testing = @import("../testing.zig");
 
 const max_adapter_file_size: usize = 512 * 1024;
 
@@ -28,45 +29,43 @@ pub fn parseAdapterInDir(
     io: std.Io,
     dir: std.Io.Dir,
     file_name: []const u8,
-    diagnostics: *diagnostic.Diagnostics,
-    context: diagnostic.Context,
-) !Adapter {
+    reporter: diagnostic.Reporter,
+) anyerror!Adapter {
     var adapter_arena: std.heap.ArenaAllocator = .init(allocator);
-    errdefer adapter_arena.deinit();
+    errdefer |err| if (err != error.AnalysisFail) adapter_arena.deinit();
     const alloc = adapter_arena.allocator();
-    const document_alloc = diagnostics.arenaAllocator();
 
-    const parsed = doc_parse.parseFileInDir(AdapterDoc, document_alloc, io, dir, file_name, max_adapter_file_size) catch |err|
-        return failDocument(diagnostics, context, file_name, err);
+    const parsed = doc_parse.parseFileInDir(AdapterDoc, alloc, io, dir, file_name, max_adapter_file_size) catch |err| {
+        const message = documentMessage(err) orelse return @as(anyerror!Adapter, err);
+        try failDocument(reporter, file_name, message);
+        return error.AnalysisFail;
+    };
     const path = try dir.realPathFileAlloc(io, file_name, alloc);
 
-    return buildAdapter(&adapter_arena, parsed, path, diagnostics, context);
+    return buildAdapter(&adapter_arena, parsed, path, reporter);
 }
 
-fn failDocument(diagnostics: *diagnostic.Diagnostics, context: diagnostic.Context, file_name: []const u8, err: anyerror) anyerror {
-    const message: diagnostic.Message = switch (err) {
+fn documentMessage(err: anyerror) ?diagnostic.Message {
+    return switch (err) {
         error.FileNotFound => .adapter_not_found,
         error.SyntaxError => .syntax_error,
         error.UnsupportedFormat => .unsupported_format,
         error.WrongType => .wrong_type,
-        else => return err,
+        else => null,
     };
-    return diagnostics.failDiagnostic(.{
-        .severity = .fatal,
-        .context = context,
-        .source_kind = .adapter_document,
-        .source = file_name,
-        .span = .{ .start = 0, .end = file_name.len },
-        .message = message,
-    });
+}
+
+fn failDocument(reporter: diagnostic.Reporter, file_name: []const u8, message: diagnostic.Message) error{OutOfMemory}!void {
+    try reporter
+        .withSource(.adapter_document, file_name)
+        .add(.fatal, .{ .start = 0, .end = file_name.len }, message);
 }
 
 fn buildAdapter(
     adapter_arena: *std.heap.ArenaAllocator,
     parsed: AdapterDoc,
     path: []const u8,
-    diagnostics: *diagnostic.Diagnostics,
-    context: diagnostic.Context,
+    reporter: diagnostic.Reporter,
 ) !Adapter {
     const alloc = adapter_arena.allocator();
 
@@ -74,9 +73,9 @@ fn buildAdapter(
     var it = parsed.commands.iterator();
     while (it.next()) |entry| {
         const cmd_doc = entry.value_ptr.*;
-        var command_context = context;
+        var command_context = reporter.context;
         command_context.command_name = entry.key_ptr.*;
-        var cmd: schema.Command = try .parse(alloc, cmd_doc.write, cmd_doc.read, cmd_doc.description, diagnostics, command_context);
+        var cmd: schema.Command = try .parse(alloc, cmd_doc.write, cmd_doc.read, cmd_doc.description, reporter.withContext(command_context));
         cmd.args = cmd_doc.args;
         try commands.put(entry.key_ptr.*, cmd);
     }
@@ -208,7 +207,54 @@ fn parseTestYaml(allocator: std.mem.Allocator, content: []const u8) !Adapter {
 
     const parsed = try doc_parse.parseByFormat(AdapterDoc, .yaml, alloc, content);
 
-    return buildAdapter(&adapter_arena, parsed, try alloc.dupe(u8, "<test>"), &diagnostics, .{ .adapter_name = "<test>" });
+    return buildAdapter(&adapter_arena, parsed, try alloc.dupe(u8, "<test>"), diagnostics.reporter().withContext(.{ .adapter_name = "<test>" }));
+}
+
+test "parse adapter result owns document data independent of diagnostics" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/psu.yaml",
+        \\metadata:
+        \\  description: owned adapter
+        \\instrument:
+        \\  manufacturer: Acme
+        \\commands:
+        \\  set_voltage:
+        \\    write: "VOLT {voltage}"
+        \\    args:
+        \\      voltage: float
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
+    defer dir.close(std.testing.io);
+
+    var diagnostic_arena: std.heap.ArenaAllocator = .init(gpa);
+    var diagnostics = diagnostic.Diagnostics.init(diagnostic_arena.allocator(), "recipe.yaml");
+
+    var adapter = try parseAdapterInDir(gpa, std.testing.io, dir, "psu.yaml", diagnostics.reporter().withContext(.{ .adapter_name = "psu.yaml" }));
+    defer adapter.deinit();
+
+    diagnostics.deinit();
+    diagnostic_arena.deinit();
+
+    try std.testing.expectEqualStrings("owned adapter", adapter.meta.description.?);
+    try std.testing.expectEqualStrings("Acme", adapter.instrument.manufacturer.?);
+
+    const cmd = adapter.commands.get("set_voltage") orelse return error.TestUnexpectedResult;
+    switch (cmd.template[1]) {
+        .placeholder => |name| try std.testing.expectEqualStrings("voltage", name),
+        else => return error.TestUnexpectedResult,
+    }
+    const args = cmd.args orelse return error.TestUnexpectedResult;
+    switch (args.get("voltage") orelse return error.TestUnexpectedResult) {
+        .string => |name| try std.testing.expectEqualStrings("float", name),
+        .object => return error.TestUnexpectedResult,
+    }
 }
 
 test "parse args string short form" {

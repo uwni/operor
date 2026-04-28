@@ -14,7 +14,7 @@
 ///   - `int` is implicitly promoted to `float` when the other operand is `float`.
 ///   - `float` can **never** be demoted to `int`; float subscripts are rejected.
 ///   - Division (`/`) always produces `float`.
-///   - Comparison and logical operators always produce `int` (0 or 1).
+///   - Comparison and logical operators always produce `bool`.
 ///   - `len()` returns `int`; `min()`/`max()` follow promotion rules.
 const std = @import("std");
 const diagnostic_mod = @import("diagnostic.zig");
@@ -29,7 +29,6 @@ pub const ArithOp = types.ArithOp;
 pub const CmpOp = types.CmpOp;
 pub const EvalError = types.EvalError;
 pub const CompileError = types.CompileError;
-pub const Diagnostics = types.Diagnostics;
 pub const Diagnostic = types.Diagnostic;
 pub const Message = types.Message;
 pub const Span = types.Span;
@@ -44,6 +43,7 @@ pub const promoteArith = types.promoteArith;
 pub const divValues = types.divValues;
 pub const cmpValues = types.cmpValues;
 pub const promoteMinMax = types.promoteMinMax;
+pub const appendResolvedValueText = types.appendResolvedValueText;
 
 pub const Ast = ast_mod.Ast;
 pub const Op = bytecode.Op;
@@ -59,10 +59,10 @@ fn lowerTestExpr(allocator: std.mem.Allocator, source: []const u8) !Expression {
 
     var common_diagnostics = diagnostic_mod.Diagnostics.init(temp_arena.allocator(), "<expr-test>");
     defer common_diagnostics.deinit();
-    var diagnostics = Diagnostics.init(&common_diagnostics, .{}, .expression, source);
+    const diagnostics = common_diagnostics.reporter().withSource(.expression, source);
 
-    var ast = try parseAst(temp_arena.allocator(), source, &diagnostics);
-    return try ast.lower(allocator, &diagnostics);
+    var ast = try parseAst(temp_arena.allocator(), source, diagnostics);
+    return try ast.lower(allocator, diagnostics);
 }
 
 fn lowerBoundTestExpr(allocator: std.mem.Allocator, source: []const u8, slots: anytype) !Expression {
@@ -71,11 +71,11 @@ fn lowerBoundTestExpr(allocator: std.mem.Allocator, source: []const u8, slots: a
 
     var common_diagnostics = diagnostic_mod.Diagnostics.init(temp_arena.allocator(), "<expr-test>");
     defer common_diagnostics.deinit();
-    var diagnostics = Diagnostics.init(&common_diagnostics, .{}, .expression, source);
+    const diagnostics = common_diagnostics.reporter().withSource(.expression, source);
 
-    var ast = try parseAst(temp_arena.allocator(), source, &diagnostics);
-    try ast.bindVariables(slots, &diagnostics);
-    return try ast.lower(allocator, &diagnostics);
+    var ast = try parseAst(temp_arena.allocator(), source, diagnostics);
+    try ast.bindVariables(slots, diagnostics);
+    return try ast.lower(allocator, diagnostics);
 }
 
 /// Test helper: parse + eval in one shot (no variable binding).
@@ -138,8 +138,8 @@ fn testBoundEval(source: []const u8, vars: *const std.StringHashMap([]const u8))
     defer temp_arena.deinit();
     var common_diagnostics = diagnostic_mod.Diagnostics.init(temp_arena.allocator(), "<expr-test>");
     defer common_diagnostics.deinit();
-    var diagnostics = Diagnostics.init(&common_diagnostics, .{}, .expression, source);
-    const ast = try parseAst(temp_arena.allocator(), source, &diagnostics);
+    const diagnostics = common_diagnostics.reporter().withSource(.expression, source);
+    const ast = try parseAst(temp_arena.allocator(), source, diagnostics);
     try collectAstNames(ast.root, &tc, &slots);
     var expr_obj = try lowerBoundTestExpr(std.testing.allocator, source, &slots);
     defer expr_obj.deinit(std.testing.allocator);
@@ -659,4 +659,22 @@ test "expr join() on non-list is error" {
     var e = try lowerBoundTestExpr(std.testing.allocator, "join(${x}, \",\")", &slot_map);
     defer e.deinit(std.testing.allocator);
     try std.testing.expectError(error.InvalidExpression, e.eval(tc.resolver(), std.testing.allocator));
+}
+
+test "expr join() tracks more than four temporary strings" {
+    var tc: ListTestContext = .{};
+    tc.addList("items", &.{ 1.0, 2.0 });
+
+    var slot_map = tc.slots();
+    defer slot_map.deinit(std.testing.allocator);
+
+    const source =
+        \\join(${items}, ",") && join(${items}, ",") && join(${items}, ",") && join(${items}, ",") && join(${items}, ",")
+    ;
+    var e = try lowerBoundTestExpr(std.testing.allocator, source, &slot_map);
+    defer e.deinit(std.testing.allocator);
+
+    var result = try e.eval(tc.resolver(), std.testing.allocator);
+    defer result.deinit();
+    try expectBool(true, result.value);
 }

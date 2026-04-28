@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostic = @import("../diagnostic.zig");
 const types = @import("types.zig");
 const bytecode = @import("bytecode.zig");
 
@@ -94,7 +95,7 @@ pub const Ast = struct {
             }
         }
 
-        pub fn bindVariables(self: *Node, slots: anytype, diagnostics: *types.Diagnostics) CompileError!void {
+        pub fn bindVariables(self: *Node, slots: anytype, diagnostics: diagnostic.Reporter) CompileError!void {
             switch (self.data) {
                 .int, .float, .bool, .string => {},
                 .load_var => |*ref| try bindVariableRef(ref, slots, diagnostics, self.span),
@@ -123,7 +124,7 @@ pub const Ast = struct {
             }
         }
 
-        pub fn remapBindings(self: *Node, mapper: anytype, diagnostics: *types.Diagnostics) CompileError!void {
+        pub fn remapBindings(self: *Node, mapper: anytype, diagnostics: diagnostic.Reporter) CompileError!void {
             switch (self.data) {
                 .int, .float, .bool, .string => {},
                 .load_var => |*ref| try remapVariableRef(ref, mapper, diagnostics, self.span),
@@ -156,7 +157,7 @@ pub const Ast = struct {
             self: *const Node,
             allocator: std.mem.Allocator,
             out: *std.ArrayList(bytecode.Op),
-            diagnostics: *types.Diagnostics,
+            diagnostics: diagnostic.Reporter,
         ) CompileError!void {
             switch (self.data) {
                 .int => |value| try out.append(allocator, .{ .push_int = value }),
@@ -222,7 +223,7 @@ pub const Ast = struct {
             self: *const Node,
             allocator: std.mem.Allocator,
             out: *std.ArrayList(bytecode.Op),
-            diagnostics: *types.Diagnostics,
+            diagnostics: diagnostic.Reporter,
         ) CompileError!void {
             try self.lower(allocator, out, diagnostics);
             if (!self.producesBool()) try out.append(allocator, .to_bool);
@@ -256,18 +257,18 @@ pub const Ast = struct {
         self.* = undefined;
     }
 
-    pub fn bindVariables(self: *Ast, slots: anytype, diagnostics: *types.Diagnostics) CompileError!void {
+    pub fn bindVariables(self: *Ast, slots: anytype, diagnostics: diagnostic.Reporter) CompileError!void {
         try self.root.bindVariables(slots, diagnostics);
     }
 
-    pub fn remapBindings(self: *Ast, mapper: anytype, diagnostics: *types.Diagnostics) CompileError!void {
+    pub fn remapBindings(self: *Ast, mapper: anytype, diagnostics: diagnostic.Reporter) CompileError!void {
         try self.root.remapBindings(mapper, diagnostics);
     }
 
     pub fn lower(
         self: *const Ast,
         allocator: std.mem.Allocator,
-        diagnostics: *types.Diagnostics,
+        diagnostics: diagnostic.Reporter,
     ) CompileError!bytecode.Expression {
         var out: std.ArrayList(bytecode.Op) = .empty;
         errdefer {
@@ -280,7 +281,7 @@ pub const Ast = struct {
     }
 };
 
-fn bindVariableRef(ref: *VariableRef, slots: anytype, diagnostics: *types.Diagnostics, span: Span) CompileError!void {
+fn bindVariableRef(ref: *VariableRef, slots: anytype, diagnostics: diagnostic.Reporter, span: Span) CompileError!void {
     switch (ref.*) {
         .name => |name| {
             const binding: VariableBinding = types.resolveBuiltin(name) orelse .{
@@ -292,7 +293,7 @@ fn bindVariableRef(ref: *VariableRef, slots: anytype, diagnostics: *types.Diagno
     }
 }
 
-fn remapVariableRef(ref: *VariableRef, mapper: anytype, diagnostics: *types.Diagnostics, span: Span) CompileError!void {
+fn remapVariableRef(ref: *VariableRef, mapper: anytype, diagnostics: diagnostic.Reporter, span: Span) CompileError!void {
     switch (ref.*) {
         .binding => |binding| {
             ref.* = .{ .binding = try mapper.remap(binding, span, diagnostics) };
@@ -301,7 +302,7 @@ fn remapVariableRef(ref: *VariableRef, mapper: anytype, diagnostics: *types.Diag
     }
 }
 
-fn expectBinding(ref: VariableRef, diagnostics: *types.Diagnostics, span: Span) CompileError!VariableBinding {
+fn expectBinding(ref: VariableRef, diagnostics: diagnostic.Reporter, span: Span) CompileError!VariableBinding {
     return switch (ref) {
         .binding => |binding| binding,
         .name => diagnostics.fail(span, .unbound_variable),

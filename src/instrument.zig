@@ -67,10 +67,4 @@ pub const Encoding = enum {
     pub fn fromString(tag: []const u8) ?Encoding {
         return map.get(tag);
     }
-
-    /// Converts an optional `read` specification into an encoding enum.
-    pub fn resolveFromReadSpec(read_value: ?[]const u8) !?Encoding {
-        const spec = read_value orelse return null;
-        return fromString(spec) orelse error.InvalidValueType;
-    }
 };

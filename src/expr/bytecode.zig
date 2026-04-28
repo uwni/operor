@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostic = @import("../diagnostic.zig");
 const types = @import("types.zig");
 
 const Value = types.Value;
@@ -38,7 +39,7 @@ pub const Op = union(enum) {
     jump_if_true: u16,
     /// Discard the top of stack.
     pop,
-    /// Replace top of stack with int 0 or 1.
+    /// Replace top of stack with a bool.
     to_bool,
 };
 
@@ -52,7 +53,6 @@ pub const Expression = struct {
     }
 
     pub const max_stack = 64;
-    const max_owned = 4;
 
     pub const EvalResult = struct {
         value: Value,
@@ -84,10 +84,10 @@ pub const Expression = struct {
         var stack: [max_stack]Value = [1]Value{.{ .int = 0 }} ** max_stack;
         var sp: usize = 0;
         var ip: usize = 0;
-        var owned_strings: [max_owned]?[]u8 = .{null} ** max_owned;
-        var owned_count: usize = 0;
-        errdefer for (owned_strings[0..owned_count]) |maybe_str| {
-            if (maybe_str) |s| allocator.free(s);
+        var owned_strings: std.ArrayList([]u8) = .empty;
+        defer owned_strings.deinit(allocator);
+        errdefer for (owned_strings.items) |s| {
+            allocator.free(s);
         };
 
         while (ip < self.ops.len) : (ip += 1) {
@@ -219,12 +219,10 @@ pub const Expression = struct {
                         else => return error.InvalidExpression,
                     };
                     const joined = try joinList(allocator, list, delim);
-                    if (owned_count >= max_owned) {
+                    owned_strings.append(allocator, joined) catch |err| {
                         allocator.free(joined);
-                        return error.OutOfMemory;
-                    }
-                    owned_strings[owned_count] = joined;
-                    owned_count += 1;
+                        return err;
+                    };
                     stack[sp] = .{ .string = joined };
                     sp += 1;
                 },
@@ -233,13 +231,11 @@ pub const Expression = struct {
 
         const result = stack[0];
         var result_owned: ?[]u8 = null;
-        for (owned_strings[0..owned_count]) |maybe_str| {
-            if (maybe_str) |s| {
-                if (result == .string and result.string.ptr == s.ptr) {
-                    result_owned = s;
-                } else {
-                    allocator.free(s);
-                }
+        for (owned_strings.items) |s| {
+            if (result == .string and result.string.ptr == s.ptr) {
+                result_owned = s;
+            } else {
+                allocator.free(s);
             }
         }
         return .{ .value = result, .owned = result_owned, .allocator = allocator };
@@ -259,7 +255,7 @@ pub fn freeOwnedOps(allocator: std.mem.Allocator, ops: []const Op) void {
     };
 }
 
-pub fn validateStackShape(ops: []const Op, span: Span, diagnostics: *types.Diagnostics) CompileError!void {
+pub fn validateStackShape(ops: []const Op, span: Span, diagnostics: diagnostic.Reporter) CompileError!void {
     var depth: usize = 0;
     var max_depth: usize = 0;
     for (ops) |op| {
@@ -301,21 +297,7 @@ fn joinList(allocator: std.mem.Allocator, list: ResolvedList, delimiter: []const
     for (0..list.len) |i| {
         if (i > 0) out.appendSlice(allocator, delimiter) catch return error.OutOfMemory;
         const elem = list.at(i) orelse return error.VariableNotFound;
-        switch (elem) {
-            .int => |v| {
-                var buf: [64]u8 = undefined;
-                const s = std.fmt.bufPrint(&buf, "{d}", .{v}) catch return error.OutOfMemory;
-                out.appendSlice(allocator, s) catch return error.OutOfMemory;
-            },
-            .float => |v| {
-                var buf: [64]u8 = undefined;
-                const s = std.fmt.bufPrint(&buf, "{d}", .{v}) catch return error.OutOfMemory;
-                out.appendSlice(allocator, s) catch return error.OutOfMemory;
-            },
-            .bool => |b| out.appendSlice(allocator, if (b) "true" else "false") catch return error.OutOfMemory,
-            .string => |s| out.appendSlice(allocator, s) catch return error.OutOfMemory,
-            .list => return error.InvalidExpression,
-        }
+        try types.appendResolvedValueText(&out, allocator, elem);
     }
 
     return out.toOwnedSlice(allocator) catch error.OutOfMemory;

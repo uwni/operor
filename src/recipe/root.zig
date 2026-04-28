@@ -1,5 +1,5 @@
 const std = @import("std");
-const diagnostic = @import("diagnostic.zig");
+const diagnostic = @import("../diagnostic.zig");
 const precompile = @import("precompile.zig");
 const recipe_ir = @import("compiled.zig");
 const tty = @import("../tty.zig");
@@ -22,8 +22,8 @@ pub const PipelineMode = recipe_ir.PipelineMode;
 pub const PipelineConfig = recipe_ir.PipelineConfig;
 /// Recipe instrument bound to a adapter and the subset of commands it actually uses.
 pub const PrecompiledInstrument = recipe_ir.PrecompiledInstrument;
-/// Accumulates user-facing precompile diagnostics.
-pub const PrecompileDiagnostic = diagnostic.PrecompileDiagnostic;
+/// Accumulates user-facing diagnostics.
+pub const Diagnostics = diagnostic.Diagnostics;
 /// Fully validated recipe ready for preview or execution.
 pub const PrecompiledRecipe = recipe_ir.PrecompiledRecipe;
 
@@ -35,9 +35,6 @@ pub fn precompilePathFromAdapterDir(
     recipe_path: []const u8,
     log: *std.Io.Writer,
 ) !PrecompiledRecipe {
-    var precompile_diagnostic: PrecompileDiagnostic = .init(allocator, recipe_path);
-    defer precompile_diagnostic.deinit();
-
     const dir = if (std.fs.path.isAbsolute(adapter_dir_path))
         std.Io.Dir.openDirAbsolute(io, adapter_dir_path, .{})
     else
@@ -49,18 +46,10 @@ pub fn precompilePathFromAdapterDir(
     };
     defer opened.close(io);
 
-    const compiled = precompile.precompilePath(allocator, io, recipe_path, opened, &precompile_diagnostic) catch |err| switch (err) {
-        error.AnalysisFail => {
-            try precompile_diagnostic.writeAll(log);
-            return error.Diagnosed;
-        },
+    return precompile.precompilePath(allocator, io, recipe_path, opened, log) catch |err| switch (err) {
+        error.AnalysisFail => return error.Diagnosed,
         else => return err,
     };
-
-    if (precompile_diagnostic.hasWarnings()) {
-        try precompile_diagnostic.writeAll(log);
-    }
-    return compiled;
 }
 
 test {
