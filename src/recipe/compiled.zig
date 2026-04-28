@@ -352,19 +352,6 @@ pub const PipelineConfig = struct {
         cfg: *const PipelineConfig,
         allocator: std.mem.Allocator,
     ) !PipelineConfig {
-        if (cfg.buffer_size) |size| {
-            if (size == 0) return error.InvalidPipelineConfig;
-        }
-        if (cfg.warn_usage_percent) |percent| {
-            if (percent == 0 or percent > 100) return error.InvalidPipelineConfig;
-        }
-        const has_network_host = cfg.network_host != null;
-        const has_network_port = cfg.network_port != null;
-        if (has_network_host != has_network_port) return error.InvalidPipelineConfig;
-        if (cfg.network_port) |port| {
-            if (port == 0) return error.InvalidPipelineConfig;
-        }
-
         const record_copy: ?RecordConfig = if (cfg.record) |record| switch (record) {
             .all => |value| .{ .all = try allocator.dupe(u8, value) },
             .explicit => |columns| blk: {

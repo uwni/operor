@@ -14,6 +14,7 @@ const max_recipe_size: usize = 512 * 1024;
 
 const SlotTable = std.StringArrayHashMapUnmanaged(void);
 const DiagnosticContext = diagnostic.DiagnosticContext;
+const ExprSourceKind = diagnostic.ExprSourceKind;
 
 pub fn precompilePath(
     allocator: std.mem.Allocator,
@@ -27,19 +28,15 @@ pub fn precompilePath(
     const diag = precompile_diagnostic orelse &fallback_diag;
     diag.reset();
 
-    var parse_arena: std.heap.ArenaAllocator = .init(allocator);
-    defer parse_arena.deinit();
-
-    const recipe_cfg = doc_parse.parseFilePath(config.RecipeConfig, parse_arena.allocator(), io, recipe_path, max_recipe_size) catch |err|
+    const recipe_cfg = doc_parse.parseFilePath(config.RecipeConfig, diag.arenaAllocator(), io, recipe_path, max_recipe_size) catch |err|
         return failRecipeParseWithDiagnostic(diag, err);
 
     if (recipe_cfg.pipeline == null) {
-        try diag.add(.fatal, .{}, .missing_pipeline, .{});
-        return error.DiagnosticsFound;
+        return diag.fail(.{}, .{ .missing_pipeline = {} });
     }
 
     return precompileInternal(allocator, io, &recipe_cfg, adapter_dir, diag) catch |err| switch (err) {
-        error.DiagnosticsFound => return error.DiagnosticsFound,
+        error.AnalysisFail => return error.AnalysisFail,
         else => return err,
     };
 }
@@ -90,15 +87,14 @@ fn precompileInternal(
     const pipeline = try resolvePipelineConfig(alloc, recipe, &slot_map, &assign_set, precompile_diagnostic);
 
     // 7. Parse optional stop_when expression.
-    const stop_when: ?expr.Expression = if (recipe.stop_when) |src|
-        slot_map.compileExpr(src.source()) catch |err| blk: {
-            try addExpressionDiagnostic(precompile_diagnostic, err, .{}, src.source());
-            break :blk null;
-        }
-    else
-        null;
+    var stop_when: ?expr.Expression = null;
+    if (recipe.stop_when) |src|
+        stop_when = slot_map.compileExpr(precompile_diagnostic, .{}, src.source(), .expression) catch |err| switch (err) {
+            error.AnalysisFail => null,
+            else => return err,
+        };
 
-    if (precompile_diagnostic.hasFatal()) return error.DiagnosticsFound;
+    if (precompile_diagnostic.hasFatal()) return error.AnalysisFail;
 
     // 8. Assign save_column indices to steps that contribute to recorded frames.
     assignSaveColumns(tasks, &slot_map, pipeline.record.?.explicit);
@@ -117,48 +113,15 @@ fn precompileInternal(
 
 fn failRecipeParseWithDiagnostic(diag: *diagnostic.PrecompileDiagnostic, err: anyerror) anyerror {
     addDocumentDiagnostic(diag, err, .{}) catch |diagnostic_err| return diagnostic_err;
-    return error.DiagnosticsFound;
+    return error.AnalysisFail;
 }
 
 fn addDocumentDiagnostic(diag: *diagnostic.PrecompileDiagnostic, err: anyerror, context: DiagnosticContext) !void {
     switch (err) {
-        error.FileNotFound => try diag.add(.fatal, context, .file_not_found, .{}),
-        error.SyntaxError => try diag.add(.fatal, context, .syntax_error, .{}),
-        error.UnsupportedFormat => try diag.add(.fatal, context, .unsupported_format, .{}),
-        error.WrongType => try diag.add(.fatal, context, .wrong_type, .{}),
-        else => return err,
-    }
-}
-
-fn addAdapterDiagnostic(diag: *diagnostic.PrecompileDiagnostic, err: anyerror, context: DiagnosticContext) !void {
-    const adapter_name = context.adapter_name orelse "";
-    switch (err) {
-        error.FileNotFound => try diag.add(.fatal, context, .adapter_not_found, .{ .adapter = adapter_name }),
-        error.SyntaxError => try diag.add(.fatal, context, .syntax_error, .{}),
-        error.UnsupportedFormat => try diag.add(.fatal, context, .unsupported_format, .{}),
-        error.WrongType => try diag.add(.fatal, context, .wrong_type, .{}),
-        error.MissingClosingBrace,
-        error.MissingClosingBracket,
-        error.NestedOptionalGroup,
-        error.EmptyArgument,
-        error.InvalidIdentifier,
-        error.InvalidValueType,
-        => try diag.add(.fatal, context, .invalid_adapter_config, .{ .adapter = adapter_name }),
-        else => return err,
-    }
-}
-
-fn addExpressionDiagnostic(diag: *diagnostic.PrecompileDiagnostic, err: anyerror, context: DiagnosticContext, source: []const u8) !void {
-    if (err == error.OutOfMemory) return err;
-    try diag.add(.fatal, context, .invalid_expression, .{ .source = source });
-}
-
-fn addVarSlotDiagnostic(diag: *diagnostic.PrecompileDiagnostic, err: anyerror, context: DiagnosticContext) !void {
-    const variable_name = context.variable_name orelse "";
-    switch (err) {
-        error.UndeclaredVariable => try diag.add(.fatal, context, .undeclared_variable, .{ .variable = variable_name }),
-        error.AssignToConst => try diag.add(.fatal, context, .assign_to_const, .{ .variable = variable_name }),
-        error.BuiltinVariableConflict => try diag.add(.fatal, context, .builtin_variable_conflict, .{ .variable = variable_name }),
+        error.FileNotFound => try diag.add(.fatal, context, .{ .file_not_found = {} }),
+        error.SyntaxError => try diag.add(.fatal, context, .{ .syntax_error = {} }),
+        error.UnsupportedFormat => try diag.add(.fatal, context, .{ .unsupported_format = {} }),
+        error.WrongType => try diag.add(.fatal, context, .{ .wrong_type = {} }),
         else => return err,
     }
 }
@@ -171,17 +134,25 @@ const SlotMap = struct {
 
     /// Compile an expression source string, bind variables, and rewrite it
     /// into runtime-ready bytecode with partial constant folding applied.
-    fn compileExpr(self: *const SlotMap, source: []const u8) !expr.Expression {
+    fn compileExpr(
+        self: *const SlotMap,
+        diag: *diagnostic.PrecompileDiagnostic,
+        context: DiagnosticContext,
+        source: []const u8,
+        source_kind: ExprSourceKind,
+    ) !expr.Expression {
         var temp_arena: std.heap.ArenaAllocator = .init(self.alloc);
         defer temp_arena.deinit();
 
-        var ast = try expr.parseAst(temp_arena.allocator(), source);
-        try ast.bindVariables(&self.slots);
+        var expr_diags = expr.Diagnostics.init(diag, context, source_kind.sourceKind(), source);
 
-        var optimizer = ExprOptimizer.init(self, temp_arena.allocator());
+        var ast = try expr.parseAst(temp_arena.allocator(), source, &expr_diags);
+        try ast.bindVariables(&self.slots, &expr_diags);
+
+        var optimizer = ExprOptimizer.init(self, temp_arena.allocator(), &expr_diags);
         try optimizer.optimize(&ast);
-        try ast.remapBindings(SlotBindingRemapper{ .slot_map = self });
-        return try ast.lower(self.alloc);
+        try ast.remapBindings(SlotBindingRemapper{ .slot_map = self }, &expr_diags);
+        return try ast.lower(self.alloc, &expr_diags);
     }
 
     /// Look up a name and return the runtime binding (var slot remapped)
@@ -204,10 +175,22 @@ const SlotMap = struct {
     }
 
     /// Validate that `name` refers to a mutable var and return its remapped slot index.
-    fn varSlotIndex(self: *const SlotMap, name: []const u8) !usize {
-        if (expr.resolveBuiltin(name) != null) return error.BuiltinVariableConflict;
-        const slot = self.slots.getIndex(name) orelse return error.UndeclaredVariable;
-        if (slot < self.const_count) return error.AssignToConst;
+    fn varSlotIndex(self: *const SlotMap, diag: *diagnostic.PrecompileDiagnostic, context: DiagnosticContext, name: []const u8) !usize {
+        var variable_context = context;
+        variable_context.variable_name = name;
+
+        if (expr.resolveBuiltin(name) != null) {
+            return diag.fail(variable_context, .{ .builtin_variable_conflict = .{ .variable = name } });
+        }
+
+        const slot = self.slots.getIndex(name) orelse {
+            return diag.fail(variable_context, .{ .unknown_variable = .{ .variable = name } });
+        };
+
+        if (slot < self.const_count) {
+            return diag.fail(variable_context, .{ .assign_to_const = .{ .variable = name } });
+        }
+
         return slot - self.const_count;
     }
 
@@ -234,11 +217,16 @@ const SlotMap = struct {
 const SlotBindingRemapper = struct {
     slot_map: *const SlotMap,
 
-    pub fn remap(self: @This(), binding: expr.VariableBinding) !expr.VariableBinding {
+    pub fn remap(
+        self: @This(),
+        binding: expr.VariableBinding,
+        span: expr.Span,
+        diagnostics: *expr.Diagnostics,
+    ) expr.CompileError!expr.VariableBinding {
         return switch (binding) {
             .builtin => binding,
             .slot => |slot| if (slot < self.slot_map.const_count)
-                error.InvalidExpression
+                diagnostics.fail(span, .const_runtime_value)
             else
                 .{ .slot = slot - self.slot_map.const_count },
         };
@@ -248,6 +236,7 @@ const SlotBindingRemapper = struct {
 const ExprOptimizer = struct {
     slot_map: *const SlotMap,
     allocator: std.mem.Allocator,
+    diagnostics: *expr.Diagnostics,
 
     const ScalarClass = enum {
         int,
@@ -255,10 +244,11 @@ const ExprOptimizer = struct {
         other,
     };
 
-    fn init(slot_map: *const SlotMap, allocator: std.mem.Allocator) ExprOptimizer {
+    fn init(slot_map: *const SlotMap, allocator: std.mem.Allocator, diagnostics: *expr.Diagnostics) ExprOptimizer {
         return .{
             .slot_map = slot_map,
             .allocator = allocator,
+            .diagnostics = diagnostics,
         };
     }
 
@@ -266,22 +256,22 @@ const ExprOptimizer = struct {
         ast.root = try self.simplify(ast.root);
     }
 
-    fn newNode(self: *ExprOptimizer, value: expr.Ast.Node) !*expr.Ast.Node {
+    fn newNode(self: *ExprOptimizer, data: expr.Ast.Node.Data, span: expr.Span) !*expr.Ast.Node {
         const node = try self.allocator.create(expr.Ast.Node);
-        node.* = value;
+        node.* = .{ .span = span, .data = data };
         return node;
     }
 
     fn simplify(self: *ExprOptimizer, node: *expr.Ast.Node) !*expr.Ast.Node {
-        return switch (node.*) {
+        return switch (node.data) {
             .int, .float, .bool, .string => node,
             .load_var => |ref| blk: {
-                if (try self.constScalarNode(ref)) |const_node| break :blk const_node;
+                if (try self.constScalarNode(ref, node.span)) |const_node| break :blk const_node;
                 break :blk node;
             },
             .load_list_len => |ref| blk: {
                 if (self.constListItems(ref)) |items| {
-                    break :blk try self.newNode(.{ .int = @intCast(items.len) });
+                    break :blk try self.newNode(.{ .int = @intCast(items.len) }, node.span);
                 }
                 break :blk node;
             },
@@ -289,89 +279,83 @@ const ExprOptimizer = struct {
                 const index = try self.simplify(data.index);
                 if (self.constListItems(data.ref)) |items| {
                     if (constInt(index)) |idx| {
-                        break :blk try self.foldConstListElem(items, idx);
+                        break :blk try self.foldConstListElem(items, idx, node.span, index.span);
                     }
                 }
                 if (index == data.index) break :blk node;
-                break :blk try self.newNode(.{ .load_list_elem = .{ .ref = data.ref, .index = index } });
+                break :blk try self.newNode(.{ .load_list_elem = .{ .ref = data.ref, .index = index } }, node.span);
             },
             .call_join => |data| blk: {
                 const delim = try self.simplify(data.delim);
-                if (self.constListItems(data.ref)) |items| {
-                    if (constString(delim)) |text| {
-                        break :blk try self.newNode(.{ .string = try self.joinConstList(text, items) });
-                    }
-                }
+                if (try self.foldConstJoin(data.ref, delim, node.span)) |folded| break :blk folded;
                 if (delim == data.delim) break :blk node;
-                break :blk try self.newNode(.{ .call_join = .{ .ref = data.ref, .delim = delim } });
+                break :blk try self.newNode(.{ .call_join = .{ .ref = data.ref, .delim = delim } }, node.span);
             },
             .unary => |data| blk: {
                 const child = try self.simplify(data.child);
                 if (data.op == .to_bool and child.producesBool()) break :blk child;
                 if (constValue(child)) |value| {
-                    if (try foldUnaryConst(data.op, value)) |folded| {
-                        break :blk try self.newConstNode(folded);
-                    }
+                    const folded = try self.foldConstValue(foldUnaryConst(data.op, value), node.span);
+                    break :blk try self.newConstNode(folded, node.span);
                 }
                 if (child == data.child) break :blk node;
-                break :blk try self.newNode(.{ .unary = .{ .op = data.op, .child = child } });
+                break :blk try self.newNode(.{ .unary = .{ .op = data.op, .child = child } }, node.span);
             },
             .binary => |data| blk: {
                 const lhs = try self.simplify(data.lhs);
                 const rhs = try self.simplify(data.rhs);
                 if (constValue(lhs)) |left_value| {
                     if (constValue(rhs)) |right_value| {
-                        if (try foldBinaryConst(data.op, left_value, right_value)) |folded| {
-                            break :blk try self.newConstNode(folded);
-                        }
+                        const folded = try self.foldConstValue(foldBinaryConst(data.op, left_value, right_value), node.span);
+                        break :blk try self.newConstNode(folded, node.span);
                     }
                 }
                 if (data.op == .add or data.op == .mul) {
-                    if (try self.reassociateBinary(data.op, lhs, rhs)) |rewritten| break :blk rewritten;
+                    if (try self.reassociateBinary(data.op, lhs, rhs, node.span)) |rewritten| break :blk rewritten;
                 }
                 if (lhs == data.lhs and rhs == data.rhs) break :blk node;
-                break :blk try self.newNode(.{ .binary = .{ .op = data.op, .lhs = lhs, .rhs = rhs } });
+                break :blk try self.newNode(.{ .binary = .{ .op = data.op, .lhs = lhs, .rhs = rhs } }, node.span);
             },
             .logical_and => |data| blk: {
                 const lhs = try self.simplify(data.lhs);
                 const rhs = try self.simplify(data.rhs);
                 if (constValue(lhs)) |left_value| {
-                    if (!left_value.isTruthy()) break :blk try self.newNode(.{ .bool = false });
+                    if (!left_value.isTruthy()) break :blk try self.newNode(.{ .bool = false }, node.span);
                     break :blk try self.makeToBool(rhs);
                 }
                 if (constValue(rhs)) |right_value| {
                     if (right_value.isTruthy()) break :blk try self.makeToBool(lhs);
                 }
                 if (lhs == data.lhs and rhs == data.rhs) break :blk node;
-                break :blk try self.newNode(.{ .logical_and = .{ .lhs = lhs, .rhs = rhs } });
+                break :blk try self.newNode(.{ .logical_and = .{ .lhs = lhs, .rhs = rhs } }, node.span);
             },
             .logical_or => |data| blk: {
                 const lhs = try self.simplify(data.lhs);
                 const rhs = try self.simplify(data.rhs);
                 if (constValue(lhs)) |left_value| {
-                    if (left_value.isTruthy()) break :blk try self.newNode(.{ .bool = true });
+                    if (left_value.isTruthy()) break :blk try self.newNode(.{ .bool = true }, node.span);
                     break :blk try self.makeToBool(rhs);
                 }
                 if (constValue(rhs)) |right_value| {
                     if (!right_value.isTruthy()) break :blk try self.makeToBool(lhs);
                 }
                 if (lhs == data.lhs and rhs == data.rhs) break :blk node;
-                break :blk try self.newNode(.{ .logical_or = .{ .lhs = lhs, .rhs = rhs } });
+                break :blk try self.newNode(.{ .logical_or = .{ .lhs = lhs, .rhs = rhs } }, node.span);
             },
         };
     }
 
-    fn newConstNode(self: *ExprOptimizer, value: expr.Value) !*expr.Ast.Node {
+    fn newConstNode(self: *ExprOptimizer, value: expr.Value, span: expr.Span) !*expr.Ast.Node {
         return switch (value) {
-            .int => |v| try self.newNode(.{ .int = v }),
-            .float => |v| try self.newNode(.{ .float = v }),
-            .bool => |v| try self.newNode(.{ .bool = v }),
-            .string => |v| try self.newNode(.{ .string = try self.allocator.dupe(u8, v) }),
+            .int => |v| try self.newNode(.{ .int = v }, span),
+            .float => |v| try self.newNode(.{ .float = v }, span),
+            .bool => |v| try self.newNode(.{ .bool = v }, span),
+            .string => |v| try self.newNode(.{ .string = try self.allocator.dupe(u8, v) }, span),
         };
     }
 
     fn constValue(node: *expr.Ast.Node) ?expr.Value {
-        return switch (node.*) {
+        return switch (node.data) {
             .int => |value| .{ .int = value },
             .float => |value| .{ .float = value },
             .bool => |value| .{ .bool = value },
@@ -381,20 +365,20 @@ const ExprOptimizer = struct {
     }
 
     fn constInt(node: *expr.Ast.Node) ?i64 {
-        return switch (node.*) {
+        return switch (node.data) {
             .int => |value| value,
             else => null,
         };
     }
 
     fn constString(node: *expr.Ast.Node) ?[]const u8 {
-        return switch (node.*) {
+        return switch (node.data) {
             .string => |value| value,
             else => null,
         };
     }
 
-    fn constScalarNode(self: *ExprOptimizer, ref: expr.VariableRef) !?*expr.Ast.Node {
+    fn constScalarNode(self: *ExprOptimizer, ref: expr.VariableRef, span: expr.Span) !?*expr.Ast.Node {
         const binding = switch (ref) {
             .binding => |binding| binding,
             .name => return null,
@@ -404,10 +388,10 @@ const ExprOptimizer = struct {
             .slot => |slot| if (slot >= self.slot_map.const_count)
                 null
             else switch (self.slot_map.initial_values[slot]) {
-                .int => |value| try self.newNode(.{ .int = value }),
-                .float => |value| try self.newNode(.{ .float = value }),
-                .bool => |value| try self.newNode(.{ .bool = value }),
-                .string => |value| try self.newNode(.{ .string = try self.allocator.dupe(u8, value) }),
+                .int => |value| try self.newNode(.{ .int = value }, span),
+                .float => |value| try self.newNode(.{ .float = value }, span),
+                .bool => |value| try self.newNode(.{ .bool = value }, span),
+                .string => |value| try self.newNode(.{ .string = try self.allocator.dupe(u8, value) }, span),
                 .list => null,
             },
         };
@@ -431,12 +415,12 @@ const ExprOptimizer = struct {
 
     fn makeToBool(self: *ExprOptimizer, node: *expr.Ast.Node) !*expr.Ast.Node {
         if (node.producesBool()) return node;
-        if (constValue(node)) |value| return try self.newNode(.{ .bool = value.isTruthy() });
-        return try self.newNode(.{ .unary = .{ .op = .to_bool, .child = node } });
+        if (constValue(node)) |value| return try self.newNode(.{ .bool = value.isTruthy() }, node.span);
+        return try self.newNode(.{ .unary = .{ .op = .to_bool, .child = node } }, node.span);
     }
 
     fn scalarClass(self: *ExprOptimizer, node: *expr.Ast.Node) ScalarClass {
-        return switch (node.*) {
+        return switch (node.data) {
             .int => .int,
             .float => .float,
             .bool, .string => .other,
@@ -481,7 +465,7 @@ const ExprOptimizer = struct {
         };
     }
 
-    fn reassociateBinary(self: *ExprOptimizer, op: expr.Ast.BinaryOp, lhs: *expr.Ast.Node, rhs: *expr.Ast.Node) !?*expr.Ast.Node {
+    fn reassociateBinary(self: *ExprOptimizer, op: expr.Ast.BinaryOp, lhs: *expr.Ast.Node, rhs: *expr.Ast.Node, span: expr.Span) !?*expr.Ast.Node {
         if (op != .add and op != .mul) return null;
 
         var operands: std.ArrayList(*expr.Ast.Node) = .empty;
@@ -536,26 +520,26 @@ const ExprOptimizer = struct {
 
         for (nonconst.items, 0..) |item, idx| {
             if (!drop_identity and idx == insert_pos) {
-                try ordered.append(self.allocator, try self.newNode(.{ .int = aggregate }));
+                try ordered.append(self.allocator, try self.newNode(.{ .int = aggregate }, span));
             }
             try ordered.append(self.allocator, item);
         }
         if (!drop_identity and insert_pos >= nonconst.items.len) {
-            try ordered.append(self.allocator, try self.newNode(.{ .int = aggregate }));
+            try ordered.append(self.allocator, try self.newNode(.{ .int = aggregate }, span));
         }
 
-        if (ordered.items.len == 0) return try self.newNode(.{ .int = aggregate });
+        if (ordered.items.len == 0) return try self.newNode(.{ .int = aggregate }, span);
         if (ordered.items.len == 1) return ordered.items[0];
 
         var current = ordered.items[0];
         for (ordered.items[1..]) |item| {
-            current = try self.newNode(.{ .binary = .{ .op = op, .lhs = current, .rhs = item } });
+            current = try self.newNode(.{ .binary = .{ .op = op, .lhs = current, .rhs = item } }, expr.Span.cover(current.span, item.span));
         }
         return current;
     }
 
     fn collectAssocOperands(self: *ExprOptimizer, out: *std.ArrayList(*expr.Ast.Node), op: expr.Ast.BinaryOp, node: *expr.Ast.Node) !void {
-        switch (node.*) {
+        switch (node.data) {
             .binary => |data| if (data.op == op) {
                 try self.collectAssocOperands(out, op, data.lhs);
                 try self.collectAssocOperands(out, op, data.rhs);
@@ -566,20 +550,22 @@ const ExprOptimizer = struct {
         try out.append(self.allocator, node);
     }
 
-    fn foldConstListElem(self: *ExprOptimizer, items: []const recipe_ir.Value, index: i64) !*expr.Ast.Node {
-        if (index < 0) return error.InvalidExpression;
+    fn foldConstListElem(self: *ExprOptimizer, items: []const recipe_ir.Value, index: i64, span: expr.Span, index_span: expr.Span) !*expr.Ast.Node {
+        if (index < 0) return self.diagnostics.fail(index_span, .{ .negative_list_index = index });
         const idx: usize = @intCast(index);
-        if (idx >= items.len) return error.InvalidExpression;
+        if (idx >= items.len) return self.diagnostics.fail(index_span, .{ .list_index_out_of_bounds = .{ .index = index, .len = items.len } });
         return switch (items[idx]) {
-            .int => |value| try self.newNode(.{ .int = value }),
-            .float => |value| try self.newNode(.{ .float = value }),
-            .bool => |value| try self.newNode(.{ .bool = value }),
-            .string => |value| try self.newNode(.{ .string = try self.allocator.dupe(u8, value) }),
-            .list => error.InvalidExpression,
+            .int => |value| try self.newNode(.{ .int = value }, span),
+            .float => |value| try self.newNode(.{ .float = value }, span),
+            .bool => |value| try self.newNode(.{ .bool = value }, span),
+            .string => |value| try self.newNode(.{ .string = try self.allocator.dupe(u8, value) }, span),
+            .list => self.diagnostics.fail(span, .nested_list_value),
         };
     }
 
-    fn joinConstList(self: *ExprOptimizer, delimiter: []const u8, items: []const recipe_ir.Value) ![]u8 {
+    fn foldConstJoin(self: *ExprOptimizer, ref: expr.VariableRef, delim: *expr.Ast.Node, span: expr.Span) !?*expr.Ast.Node {
+        const items = self.constListItems(ref) orelse return null;
+        const delimiter = constString(delim) orelse return null;
         var out: std.ArrayList(u8) = .empty;
         for (items, 0..) |item, idx| {
             if (idx > 0) try out.appendSlice(self.allocator, delimiter);
@@ -596,151 +582,50 @@ const ExprOptimizer = struct {
                 },
                 .bool => |value| try out.appendSlice(self.allocator, if (value) "true" else "false"),
                 .string => |value| try out.appendSlice(self.allocator, value),
-                .list => return error.InvalidExpression,
+                .list => return self.diagnostics.fail(span, .nested_list_value),
             }
         }
-        return try out.toOwnedSlice(self.allocator);
+        return try self.newNode(.{ .string = try out.toOwnedSlice(self.allocator) }, span);
     }
 
-    fn foldUnaryConst(op: expr.Ast.UnaryOp, value: expr.Value) !?expr.Value {
+    fn foldConstValue(self: *ExprOptimizer, value: expr.EvalError!expr.Value, span: expr.Span) expr.CompileError!expr.Value {
+        return value catch |err| switch (err) {
+            error.InvalidExpression => self.diagnostics.fail(span, .invalid_expression),
+            error.DivisionByZero => self.diagnostics.fail(span, .division_by_zero),
+            error.VariableNotFound => self.diagnostics.fail(span, .unbound_variable),
+            error.OutOfMemory => error.OutOfMemory,
+        };
+    }
+
+    fn foldUnaryConst(op: expr.Ast.UnaryOp, value: expr.Value) expr.EvalError!expr.Value {
         return switch (op) {
             .negate => switch (value) {
                 .int => |v| .{ .int = -v },
                 .float => |v| .{ .float = -v },
-                else => null,
+                else => error.InvalidExpression,
             },
             .not => .{ .bool = !value.isTruthy() },
             .to_bool => .{ .bool = value.isTruthy() },
         };
     }
 
-    fn foldBinaryConst(op: expr.Ast.BinaryOp, lhs: expr.Value, rhs: expr.Value) !?expr.Value {
+    fn foldBinaryConst(op: expr.Ast.BinaryOp, lhs: expr.Value, rhs: expr.Value) expr.EvalError!expr.Value {
         return switch (op) {
-            .add => foldPromoteArith(lhs, rhs, .add),
-            .sub => foldPromoteArith(lhs, rhs, .sub),
-            .mul => foldPromoteArith(lhs, rhs, .mul),
-            .div => foldDiv(lhs, rhs),
-            .cmp_gt => .{ .bool = try foldCmpValues(lhs, rhs, .gt) },
-            .cmp_lt => .{ .bool = try foldCmpValues(lhs, rhs, .lt) },
-            .cmp_ge => .{ .bool = try foldCmpValues(lhs, rhs, .ge) },
-            .cmp_le => .{ .bool = try foldCmpValues(lhs, rhs, .le) },
-            .cmp_eq => .{ .bool = try foldCmpValues(lhs, rhs, .eq) },
-            .cmp_ne => .{ .bool = try foldCmpValues(lhs, rhs, .ne) },
-            .call_min => foldPromoteMinMax(lhs, rhs, true),
-            .call_max => foldPromoteMinMax(lhs, rhs, false),
+            .add => try expr.promoteArith(lhs, rhs, .add),
+            .sub => try expr.promoteArith(lhs, rhs, .sub),
+            .mul => try expr.promoteArith(lhs, rhs, .mul),
+            .div => try expr.divValues(lhs, rhs),
+            .cmp_gt => .{ .bool = try expr.cmpValues(lhs, rhs, .gt) },
+            .cmp_lt => .{ .bool = try expr.cmpValues(lhs, rhs, .lt) },
+            .cmp_ge => .{ .bool = try expr.cmpValues(lhs, rhs, .ge) },
+            .cmp_le => .{ .bool = try expr.cmpValues(lhs, rhs, .le) },
+            .cmp_eq => .{ .bool = try expr.cmpValues(lhs, rhs, .eq) },
+            .cmp_ne => .{ .bool = try expr.cmpValues(lhs, rhs, .ne) },
+            .call_min => try expr.promoteMinMax(lhs, rhs, true),
+            .call_max => try expr.promoteMinMax(lhs, rhs, false),
         };
     }
 };
-
-const FoldArithOp = enum {
-    add,
-    sub,
-    mul,
-};
-
-const FoldCmpOp = enum {
-    gt,
-    lt,
-    ge,
-    le,
-    eq,
-    ne,
-};
-
-fn foldPromoteArith(a: expr.Value, b: expr.Value, comptime op: FoldArithOp) !?expr.Value {
-    return switch (a) {
-        .string, .bool => null,
-        .int => |ai| switch (b) {
-            .string, .bool => null,
-            .int => |bi| .{ .int = switch (op) {
-                .add => ai + bi,
-                .sub => ai - bi,
-                .mul => ai * bi,
-            } },
-            .float => |bf| blk: {
-                const af: f64 = @floatFromInt(ai);
-                break :blk .{ .float = switch (op) {
-                    .add => af + bf,
-                    .sub => af - bf,
-                    .mul => af * bf,
-                } };
-            },
-        },
-        .float => |af| switch (b) {
-            .string, .bool => null,
-            .int, .float => blk: {
-                const bf = b.toFloat();
-                break :blk .{ .float = switch (op) {
-                    .add => af + bf,
-                    .sub => af - bf,
-                    .mul => af * bf,
-                } };
-            },
-        },
-    };
-}
-
-fn foldDiv(a: expr.Value, b: expr.Value) !?expr.Value {
-    if (a == .string or a == .bool or b == .string or b == .bool) return null;
-    const rf = b.toFloat();
-    if (rf == 0.0) return null;
-    return .{ .float = a.toFloat() / rf };
-}
-
-fn foldCmpValues(a: expr.Value, b: expr.Value, op: FoldCmpOp) !bool {
-    return switch (a) {
-        .string => |sa| switch (b) {
-            .string => |sb| {
-                const order = std.mem.order(u8, sa, sb);
-                return switch (op) {
-                    .eq => order == .eq,
-                    .ne => order != .eq,
-                    .lt => order == .lt,
-                    .le => order != .gt,
-                    .gt => order == .gt,
-                    .ge => order != .lt,
-                };
-            },
-            else => return error.InvalidExpression,
-        },
-        else => switch (b) {
-            .string => return error.InvalidExpression,
-            else => {
-                const l = a.toFloat();
-                const r = b.toFloat();
-                return switch (op) {
-                    .gt => l > r,
-                    .lt => l < r,
-                    .ge => l >= r,
-                    .le => l <= r,
-                    .eq => l == r,
-                    .ne => l != r,
-                };
-            },
-        },
-    };
-}
-
-fn foldPromoteMinMax(a: expr.Value, b: expr.Value, comptime pick_min: bool) !?expr.Value {
-    return switch (a) {
-        .string, .bool => null,
-        .int => |ai| switch (b) {
-            .string, .bool => null,
-            .int => |bi| .{ .int = if (pick_min) @min(ai, bi) else @max(ai, bi) },
-            .float => |bf| blk: {
-                const af: f64 = @floatFromInt(ai);
-                break :blk .{ .float = if (pick_min) @min(af, bf) else @max(af, bf) };
-            },
-        },
-        .float => |af| switch (b) {
-            .string, .bool => null,
-            .int, .float => blk: {
-                const bf = b.toFloat();
-                break :blk .{ .float = if (pick_min) @min(af, bf) else @max(af, bf) };
-            },
-        },
-    };
-}
 
 /// Validate consts/vars, build the merged slot map (consts first, then vars),
 /// compile initial values, and create the compile-time const resolver.
@@ -757,15 +642,15 @@ fn buildSlotMap(
     // Validate: no name conflicts between consts, vars, and builtins.
     for (const_keys) |name| {
         if (expr.resolveBuiltin(name) != null) {
-            try diag.add(.fatal, .{ .variable_name = name }, .builtin_variable_conflict, .{ .variable = name });
+            try diag.add(.fatal, .{ .variable_name = name }, .{ .builtin_variable_conflict = .{ .variable = name } });
         }
     }
     for (var_keys) |name| {
         if (expr.resolveBuiltin(name) != null) {
-            try diag.add(.fatal, .{ .variable_name = name }, .builtin_variable_conflict, .{ .variable = name });
+            try diag.add(.fatal, .{ .variable_name = name }, .{ .builtin_variable_conflict = .{ .variable = name } });
         }
         if (recipe.consts != null and recipe.consts.?.contains(name)) {
-            try diag.add(.fatal, .{ .variable_name = name }, .duplicate_variable, .{ .variable = name });
+            try diag.add(.fatal, .{ .variable_name = name }, .{ .duplicate_variable = .{ .variable = name } });
         }
     }
 
@@ -802,13 +687,7 @@ fn loadAdapters(
     var instrument_it = recipe.instruments.iterator();
     while (instrument_it.next()) |entry| {
         const cfg = entry.value_ptr.*;
-        _ = getOrParseAdapter(allocator, io, &map, adapter_dir, cfg.adapter) catch |err| {
-            try addAdapterDiagnostic(diag, err, .{
-                .instrument_name = entry.key_ptr.*,
-                .adapter_name = cfg.adapter,
-            });
-            return error.DiagnosticsFound;
-        };
+        _ = try getOrParseAdapter(allocator, io, &map, adapter_dir, entry.key_ptr.*, cfg.adapter, diag);
     }
     return map;
 }
@@ -871,9 +750,11 @@ fn precompileTasks(
 
         if (task_cfg.@"while") |while_src| {
             const task_context: DiagnosticContext = .{ .task_idx = task_idx };
-            const condition = slot_map.compileExpr(while_src.source()) catch |err| {
-                try addExpressionDiagnostic(diag, err, task_context, while_src.source());
-                continue;
+            const condition = slot_map.compileExpr(diag, task_context, while_src.source(), .expression) catch |err| {
+                switch (err) {
+                    error.AnalysisFail => continue,
+                    else => return err,
+                }
             };
             // Loop task
             try tasks.append(arena_alloc, .{ .loop = .{
@@ -882,9 +763,11 @@ fn precompileTasks(
             } });
         } else if (task_cfg.@"if") |guard_src| {
             const task_context: DiagnosticContext = .{ .task_idx = task_idx };
-            const condition = slot_map.compileExpr(guard_src.source()) catch |err| {
-                try addExpressionDiagnostic(diag, err, task_context, guard_src.source());
-                continue;
+            const condition = slot_map.compileExpr(diag, task_context, guard_src.source(), .expression) catch |err| {
+                switch (err) {
+                    error.AnalysisFail => continue,
+                    else => return err,
+                }
             };
             // Conditional task
             try tasks.append(arena_alloc, .{ .conditional = .{
@@ -949,7 +832,7 @@ fn precompileSteps(
                 diag,
             ),
         } catch |err| switch (err) {
-            error.DiagnosticsFound => {
+            error.AnalysisFail => {
                 continue;
             },
             else => return err,
@@ -973,17 +856,11 @@ fn precompileComputeStep(
     const if_expr = try precompileIf(slot_map, diag, step_context, cfg.@"if");
 
     const assign_context: DiagnosticContext = .{ .task_idx = task_idx, .step_idx = step_idx, .variable_name = cfg.assign };
-    const save_slot = slot_map.varSlotIndex(cfg.assign) catch |err| {
-        try addVarSlotDiagnostic(diag, err, assign_context);
-        return error.DiagnosticsFound;
-    };
+    const save_slot = try slot_map.varSlotIndex(diag, assign_context, cfg.assign);
     const assign_copy = try arena_alloc.dupe(u8, cfg.assign);
     try assign_set.put(arena_alloc, assign_copy, {});
 
-    const compute_expr = slot_map.compileExpr(cfg.compute) catch |err| {
-        try addExpressionDiagnostic(diag, err, assign_context, cfg.compute);
-        return error.DiagnosticsFound;
-    };
+    const compute_expr = try slot_map.compileExpr(diag, assign_context, cfg.compute, .expression);
 
     return .{
         .action = .{ .compute = .{
@@ -1008,14 +885,12 @@ fn precompileCallStep(
     const step_context: DiagnosticContext = .{ .task_idx = task_idx, .step_idx = step_idx };
 
     const dot_pos = std.mem.findScalar(u8, cfg.call, '.') orelse {
-        try diag.add(.fatal, step_context, .invalid_call_format, .{ .call = cfg.call });
-        return error.DiagnosticsFound;
+        return diag.fail(step_context, .{ .invalid_call_format = .{ .call = cfg.call } });
     };
     const instrument_name = cfg.call[0..dot_pos];
     const command_name = cfg.call[dot_pos + 1 ..];
     if (instrument_name.len == 0 or command_name.len == 0) {
-        try diag.add(.fatal, step_context, .invalid_call_format, .{ .call = cfg.call });
-        return error.DiagnosticsFound;
+        return diag.fail(step_context, .{ .invalid_call_format = .{ .call = cfg.call } });
     }
 
     var call_context: DiagnosticContext = .{
@@ -1028,23 +903,18 @@ fn precompileCallStep(
     const if_expr = try precompileIf(slot_map, diag, call_context, cfg.@"if");
 
     const precompiled_instrument = precompiled_instruments.getPtr(instrument_name) orelse {
-        try diag.add(.fatal, call_context, .instrument_not_found, .{ .instrument = instrument_name });
-        return error.DiagnosticsFound;
+        return diag.fail(call_context, .{ .instrument_not_found = .{ .instrument = instrument_name } });
     };
 
     call_context.adapter_name = precompiled_instrument.adapter_name;
     const loaded_adapter = loaded_adapters.getPtr(precompiled_instrument.adapter_name).?;
-    const command = getOrCompileCommand(arena_alloc, precompiled_instrument, loaded_adapter, command_name) catch |err| {
-        switch (err) {
-            error.CommandNotFound => try diag.add(.fatal, call_context, .command_not_found, .{
-                .instrument = instrument_name,
-                .command = command_name,
-            }),
-            error.PartialBoolMap => try diag.add(.fatal, call_context, .partial_bool_map, .{}),
-            else => return err,
-        }
-        return error.DiagnosticsFound;
+    const command_source = loaded_adapter.commands.get(command_name) orelse {
+        return diag.fail(call_context, .{ .command_not_found = .{
+            .instrument = instrument_name,
+            .command = command_name,
+        } });
     };
+    const command = try getOrCompileCommand(arena_alloc, precompiled_instrument, command_source, command_name, loaded_adapter.instrument.bool_format, diag, call_context);
 
     const call_copy = try arena_alloc.dupe(u8, command_name);
     const instrument_copy = try arena_alloc.dupe(u8, instrument_name);
@@ -1054,10 +924,7 @@ fn precompileCallStep(
     if (cfg.assign) |label| {
         var assign_context = call_context;
         assign_context.variable_name = label;
-        save_slot = slot_map.varSlotIndex(label) catch |err| {
-            try addVarSlotDiagnostic(diag, err, assign_context);
-            return error.DiagnosticsFound;
-        };
+        save_slot = try slot_map.varSlotIndex(diag, assign_context, label);
         const duped = try arena_alloc.dupe(u8, label);
         try assign_set.put(arena_alloc, duped, {});
     }
@@ -1082,10 +949,7 @@ fn precompileIf(
     if_src_opt: ?config.BooleanExpr,
 ) !?expr.Expression {
     if (if_src_opt) |if_src| {
-        return slot_map.compileExpr(if_src.source()) catch |err| {
-            try addExpressionDiagnostic(diag, err, context, if_src.source());
-            return error.DiagnosticsFound;
-        };
+        return try slot_map.compileExpr(diag, context, if_src.source(), .expression);
     }
     return null;
 }
@@ -1121,8 +985,7 @@ fn precompileParallelStep(
     // Reject nested parallel steps.
     for (cfg.parallel) |*inner| {
         if (inner.* == .parallel) {
-            try diag.add(.fatal, step_context, .nested_parallel_step, .{});
-            return error.DiagnosticsFound;
+            return diag.fail(step_context, .{ .nested_parallel_step = {} });
         }
     }
 
@@ -1153,20 +1016,15 @@ fn resolvePipelineConfig(
 ) !recipe_ir.PipelineConfig {
     const empty_columns: []const []const u8 = &.{};
     const pipeline_cfg = recipe.pipeline orelse {
-        try diag.add(.fatal, .{}, .missing_pipeline, .{});
+        try diag.add(.fatal, .{}, .{ .missing_pipeline = {} });
         return .{ .record = .{ .explicit = empty_columns } };
     };
     if (pipeline_cfg.record == null) {
-        try diag.add(.fatal, .{}, .missing_record_config, .{});
+        try diag.add(.fatal, .{}, .{ .missing_record_config = {} });
     }
 
-    var pipeline = pipeline_cfg.clone(arena_alloc) catch |err| {
-        switch (err) {
-            error.InvalidPipelineConfig => try diag.add(.fatal, .{}, .invalid_pipeline_config, .{}),
-            else => return err,
-        }
-        return .{ .record = .{ .explicit = empty_columns } };
-    };
+    try validatePipelineConfig(&pipeline_cfg, diag);
+    var pipeline = try pipeline_cfg.clone(arena_alloc);
     if (pipeline.record == null) {
         pipeline.record = .{ .explicit = empty_columns };
     }
@@ -1182,18 +1040,18 @@ fn resolvePipelineConfig(
             for (columns) |name| {
                 const column_context: DiagnosticContext = .{ .variable_name = name };
                 if (seen.getIndex(name) != null) {
-                    try diag.add(.warning, column_context, .duplicate_record_column, .{ .column = name });
+                    try diag.add(.warning, column_context, .{ .duplicate_record_column = .{ .column = name } });
                     continue;
                 }
                 try seen.put(arena_alloc, name, {});
 
                 var valid = true;
                 if (slot_map.resolveName(name) == null) {
-                    try diag.add(.fatal, column_context, .undeclared_variable, .{ .variable = name });
+                    try diag.add(.fatal, column_context, .{ .unknown_variable = .{ .variable = name } });
                     valid = false;
                 }
                 if (!assign_set.contains(name)) {
-                    try diag.add(.fatal, column_context, .record_variable_not_found, .{ .variable = name });
+                    try diag.add(.fatal, column_context, .{ .record_variable_not_found = .{ .variable = name } });
                     valid = false;
                 }
                 if (valid) try unique_columns.append(arena_alloc, name);
@@ -1202,6 +1060,26 @@ fn resolvePipelineConfig(
         },
     }
     return pipeline;
+}
+
+fn validatePipelineConfig(cfg: *const recipe_ir.PipelineConfig, diag: *diagnostic.PrecompileDiagnostic) !void {
+    var has_error = false;
+    if (cfg.buffer_size) |size| {
+        if (size == 0) has_error = true;
+    }
+    if (cfg.warn_usage_percent) |percent| {
+        if (percent == 0 or percent > 100) has_error = true;
+    }
+    const has_network_host = cfg.network_host != null;
+    const has_network_port = cfg.network_port != null;
+    if (has_network_host != has_network_port) has_error = true;
+    if (cfg.network_port) |port| {
+        if (port == 0) has_error = true;
+    }
+    if (!has_error) return;
+
+    try diag.add(.fatal, .{}, .{ .invalid_pipeline_config = {} });
+    return error.AnalysisFail;
 }
 
 fn assignSaveColumns(tasks: []recipe_ir.Task, slot_map: *const SlotMap, columns: []const []const u8) void {
@@ -1259,13 +1137,18 @@ fn getOrParseAdapter(
     io: std.Io,
     loaded_adapters: *std.StringHashMap(Adapter),
     adapter_dir: std.Io.Dir,
+    instrument_name: []const u8,
     adapter_name: []const u8,
+    diag: *diagnostic.PrecompileDiagnostic,
 ) !*const Adapter {
     if (loaded_adapters.getPtr(adapter_name)) |loaded| return loaded;
 
     const key = try allocator.dupe(u8, adapter_name);
 
-    var loaded = try parse_mod.parseAdapterInDir(allocator, io, adapter_dir, adapter_name);
+    var loaded = try parse_mod.parseAdapterInDir(allocator, io, adapter_dir, adapter_name, diag, .{
+        .instrument_name = instrument_name,
+        .adapter_name = adapter_name,
+    });
     errdefer loaded.deinit();
 
     try loaded_adapters.put(key, loaded);
@@ -1275,14 +1158,16 @@ fn getOrParseAdapter(
 fn getOrCompileCommand(
     allocator: std.mem.Allocator,
     instrument: *recipe_ir.PrecompiledInstrument,
-    loaded_adapter: *const Adapter,
+    source: Adapter.Command,
     call: []const u8,
+    adapter_bool_format: ?adapter_schema.BoolFormat,
+    diag: *diagnostic.PrecompileDiagnostic,
+    context: DiagnosticContext,
 ) !*const recipe_ir.PrecompiledCommand {
     if (instrument.commands.get(call)) |command| return command;
 
-    const source = loaded_adapter.commands.get(call) orelse return error.CommandNotFound;
     const key = try allocator.dupe(u8, call);
-    const compiled_value = try compileCommand(allocator, source, instrument, loaded_adapter.instrument.bool_format);
+    const compiled_value = try compileCommand(allocator, source, instrument, adapter_bool_format, diag, context);
 
     const compiled = try allocator.create(recipe_ir.PrecompiledCommand);
     compiled.* = compiled_value;
@@ -1296,17 +1181,21 @@ fn compileCommand(
     source: Adapter.Command,
     instrument: *const recipe_ir.PrecompiledInstrument,
     adapter_bool_format: ?adapter_schema.BoolFormat,
+    diag: *diagnostic.PrecompileDiagnostic,
+    base_context: DiagnosticContext,
 ) !recipe_ir.PrecompiledCommand {
     var arg_entries: std.ArrayList(ArgBuildEntry) = .empty;
     const segments = try compileSegments(allocator, source.template, &arg_entries, false);
 
     const args = try allocator.alloc(recipe_ir.CommandArg, arg_entries.items.len);
     for (arg_entries.items, 0..) |entry, idx| {
+        var arg_context = base_context;
+        arg_context.argument_name = entry.name;
         args[idx] = .{
             .name = entry.name,
             .is_optional = !entry.required,
             .default = try compileArgDefault(allocator, source.args, entry.name),
-            .format = try compileArgFormat(allocator, source.args, entry.name, adapter_bool_format),
+            .format = try compileArgFormat(allocator, source.args, entry.name, adapter_bool_format, diag, arg_context),
         };
     }
     arg_entries.deinit(allocator);
@@ -1329,6 +1218,8 @@ fn compileArgFormat(
     source_args: ?std.StringHashMap(adapter_schema.ArgSpec),
     arg_name: []const u8,
     adapter_bool_format: ?adapter_schema.BoolFormat,
+    diag: *diagnostic.PrecompileDiagnostic,
+    context: DiagnosticContext,
 ) !recipe_ir.ArgFormat {
     var format: recipe_ir.ArgFormat = .{};
 
@@ -1346,7 +1237,7 @@ fn compileArgFormat(
                 .object => |obj| {
                     if (std.mem.eql(u8, obj.type, "bool")) {
                         if ((obj.true == null) != (obj.false == null)) {
-                            return error.PartialBoolMap;
+                            return diag.fail(context, .{ .partial_bool_map = {} });
                         }
                         if (obj.true) |t| {
                             if (format.bool_map) |old| {
@@ -1416,11 +1307,14 @@ fn compileStepArgs(
             if (wrapper.get(arg.name)) |doc_arg| {
                 var arg_context = base_context;
                 arg_context.argument_name = arg.name;
-                args[idx] = compileArg(allocator, doc_arg, slot_map) catch |err| blk: {
-                    if (err == error.OutOfMemory) return err;
-                    try diag.add(.fatal, arg_context, .invalid_argument, .{ .argument = arg.name });
-                    has_error = true;
-                    break :blk try makeEmptyStringArg(allocator);
+                args[idx] = compileArg(allocator, doc_arg, slot_map, diag, arg_context) catch |err| blk: {
+                    switch (err) {
+                        error.AnalysisFail => {
+                            has_error = true;
+                            break :blk try makeEmptyStringArg(allocator);
+                        },
+                        else => return err,
+                    }
                 };
                 continue;
             }
@@ -1437,7 +1331,7 @@ fn compileStepArgs(
 
         var arg_context = base_context;
         arg_context.argument_name = arg.name;
-        try diag.add(.fatal, arg_context, .missing_command_argument, .{ .argument = arg.name });
+        try diag.add(.fatal, arg_context, .{ .missing_command_argument = .{ .argument = arg.name } });
         has_error = true;
         args[idx] = try makeEmptyStringArg(allocator);
     }
@@ -1448,13 +1342,13 @@ fn compileStepArgs(
             if (!command.hasPlaceholder(entry.key_ptr.*)) {
                 var arg_context = base_context;
                 arg_context.argument_name = entry.key_ptr.*;
-                try diag.add(.fatal, arg_context, .unexpected_command_argument, .{ .argument = entry.key_ptr.* });
+                try diag.add(.fatal, arg_context, .{ .unexpected_command_argument = .{ .argument = entry.key_ptr.* } });
                 has_error = true;
             }
         }
     }
 
-    if (has_error) return error.DiagnosticsFound;
+    if (has_error) return error.AnalysisFail;
     return args;
 }
 
@@ -1484,13 +1378,15 @@ fn compileArg(
     allocator: std.mem.Allocator,
     doc_arg: config.ArgValueDoc,
     slot_map: *const SlotMap,
+    diag: *diagnostic.PrecompileDiagnostic,
+    context: DiagnosticContext,
 ) !recipe_ir.StepArg {
     return switch (doc_arg) {
-        .scalar => |scalar| .{ .scalar = try compileArgScalar(allocator, scalar, slot_map) },
+        .scalar => |scalar| .{ .scalar = try compileArgScalar(allocator, scalar, slot_map, diag, context) },
         .list => |items| blk: {
             const out = try allocator.alloc(expr.Expression, items.len);
             for (items, 0..) |item, idx| {
-                out[idx] = try compileArgScalar(allocator, item, slot_map);
+                out[idx] = try compileArgScalar(allocator, item, slot_map, diag, context);
             }
             break :blk .{ .list = out };
         },
@@ -1549,11 +1445,13 @@ fn compileArgScalar(
     allocator: std.mem.Allocator,
     value: config.ArgScalarDoc,
     slot_map: *const SlotMap,
+    diag: *diagnostic.PrecompileDiagnostic,
+    context: DiagnosticContext,
 ) !expr.Expression {
     return switch (value) {
         .string => |text| {
             if (std.mem.indexOf(u8, text, "${") != null) {
-                return slot_map.compileExpr(text);
+                return slot_map.compileExpr(diag, context, text, .argument);
             }
             return makeLiteralExpr(allocator, .{ .push_string = try allocator.dupe(u8, text) });
         },
@@ -1992,7 +1890,7 @@ test "precompile rejects missing instrument references" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile validates command arguments" {
@@ -2039,8 +1937,8 @@ test "precompile validates command arguments" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, missing_argument_path, dir, null));
-    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, unexpected_argument_path, dir, null));
+    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, missing_argument_path, dir, null));
+    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, unexpected_argument_path, dir, null));
 }
 
 test "precompile allows omitted optional group arguments" {
@@ -2151,8 +2049,10 @@ test "precompiled command renders via helper" {
     var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
     defer cmd_arena.deinit();
     const alloc = cmd_arena.allocator();
+    var diags: diagnostic.PrecompileDiagnostic = .init(gpa, "<test>");
+    defer diags.deinit();
 
-    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null);
+    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null, &diags, .{});
 
     var instrument = recipe_ir.PrecompiledInstrument{
         .adapter_name = "psu",
@@ -2163,7 +2063,7 @@ test "precompiled command renders via helper" {
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, source, &instrument, null);
+    var compiled = try compileCommand(gpa, source, &instrument, null, &diags, .{});
     defer compiled.deinit(gpa);
 
     try std.testing.expect(compiled.instrument == &instrument);
@@ -2187,8 +2087,10 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
     defer cmd_arena.deinit();
     const alloc = cmd_arena.allocator();
+    var diags: diagnostic.PrecompileDiagnostic = .init(gpa, "<test>");
+    defer diags.deinit();
 
-    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null);
+    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null, &diags, .{});
 
     var instrument = recipe_ir.PrecompiledInstrument{
         .adapter_name = "psu",
@@ -2199,7 +2101,7 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, source, &instrument, null);
+    var compiled = try compileCommand(gpa, source, &instrument, null, &diags, .{});
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
@@ -2219,8 +2121,10 @@ test "float_precision controls decimal places in rendered command" {
     var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
     defer cmd_arena.deinit();
     const alloc = cmd_arena.allocator();
+    var diags: diagnostic.PrecompileDiagnostic = .init(gpa, "<test>");
+    defer diags.deinit();
 
-    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null);
+    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null, &diags, .{});
 
     var instrument = recipe_ir.PrecompiledInstrument{
         .adapter_name = "psu",
@@ -2231,7 +2135,7 @@ test "float_precision controls decimal places in rendered command" {
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, source, &instrument, null);
+    var compiled = try compileCommand(gpa, source, &instrument, null, &diags, .{});
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
@@ -2261,8 +2165,10 @@ test "precompiled command applies bool format from adapter defaults" {
     var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
     defer cmd_arena.deinit();
     const alloc = cmd_arena.allocator();
+    var diags: diagnostic.PrecompileDiagnostic = .init(gpa, "<test>");
+    defer diags.deinit();
 
-    const source = try Adapter.Command.parse(alloc, "OUTP {state}", null, null);
+    const source = try Adapter.Command.parse(alloc, "OUTP {state}", null, null, &diags, .{});
 
     var instrument = recipe_ir.PrecompiledInstrument{
         .adapter_name = "psu",
@@ -2273,7 +2179,7 @@ test "precompiled command applies bool format from adapter defaults" {
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, source, &instrument, .{ .true = "ON", .false = "OFF" });
+    var compiled = try compileCommand(gpa, source, &instrument, .{ .true = "ON", .false = "OFF" }, &diags, .{});
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
@@ -2326,7 +2232,7 @@ test "precompile rejects partial bool arg map" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile diagnostic includes step context" {
@@ -2362,7 +2268,7 @@ test "precompile diagnostic includes step context" {
     defer precompile_diagnostic.deinit();
 
     _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &precompile_diagnostic) catch |err| {
-        try std.testing.expectEqual(error.DiagnosticsFound, err);
+        try std.testing.expectEqual(error.AnalysisFail, err);
 
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
@@ -2462,7 +2368,7 @@ test "precompile compute step rejects missing assign" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile step with if guard" {
@@ -2531,7 +2437,7 @@ test "precompile rejects invalid step (neither call nor compute)" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile rejects record with unknown assign variable" {
@@ -2568,7 +2474,7 @@ test "precompile rejects record with unknown assign variable" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile accepts valid record subset" {
@@ -2651,7 +2557,7 @@ test "precompile diagnostic for missing pipeline" {
     defer precompile_diagnostic.deinit();
 
     _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &precompile_diagnostic) catch |err| {
-        try std.testing.expectEqual(error.DiagnosticsFound, err);
+        try std.testing.expectEqual(error.AnalysisFail, err);
 
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
@@ -2697,7 +2603,7 @@ test "precompile diagnostic for missing record" {
     defer precompile_diagnostic.deinit();
 
     _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &precompile_diagnostic) catch |err| {
-        try std.testing.expectEqual(error.DiagnosticsFound, err);
+        try std.testing.expectEqual(error.AnalysisFail, err);
 
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
@@ -2797,7 +2703,7 @@ test "precompile rejects undeclared variable use" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile rejects undeclared variable in expression" {
@@ -2827,7 +2733,7 @@ test "precompile rejects undeclared variable in expression" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile rejects variable shadowing builtin" {
@@ -2857,7 +2763,7 @@ test "precompile rejects variable shadowing builtin" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile sequential task" {
@@ -3257,7 +3163,7 @@ test "precompile rejects assign to const" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile rejects duplicate const and var names" {
@@ -3286,7 +3192,7 @@ test "precompile rejects duplicate const and var names" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.DiagnosticsFound, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
 test "precompile does not fold expressions referencing runtime vars" {

@@ -1,6 +1,7 @@
 const Context = @This();
 const std = @import("std");
 const expr = @import("../expr.zig");
+const diagnostic = @import("../diagnostic.zig");
 const recipe_compiled = @import("../recipe/compiled.zig");
 
 pub const Value = recipe_compiled.Value;
@@ -246,9 +247,13 @@ test "Context exposes built-ins alongside stored values" {
     defer empty_slots.deinit(testing.allocator);
     var temp_arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer temp_arena.deinit();
-    var ast = try expr_mod.parseAst(temp_arena.allocator(), "$ITER + $TASK_IDX");
-    try ast.bindVariables(&empty_slots);
-    var expr_obj = try ast.lower(testing.allocator);
+    const source = "$ITER + $TASK_IDX";
+    var common_diagnostics = diagnostic.Diagnostics.init(temp_arena.allocator(), "<test>");
+    defer common_diagnostics.deinit();
+    var diagnostics = expr_mod.Diagnostics.init(&common_diagnostics, .{}, .expression, source);
+    var ast = try expr_mod.parseAst(temp_arena.allocator(), source, &diagnostics);
+    try ast.bindVariables(&empty_slots, &diagnostics);
+    var expr_obj = try ast.lower(testing.allocator, &diagnostics);
     defer expr_obj.deinit(testing.allocator);
     const eval_result = try expr_obj.eval(ctx.varResolver(), testing.allocator);
     try testing.expectEqual(@as(i64, 9), eval_result.value.int);
@@ -295,9 +300,13 @@ test "Context list round-trip through setSlot and varResolver" {
 
     var temp_arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer temp_arena.deinit();
-    var ast = try expr_mod.parseAst(temp_arena.allocator(), "${arr}[${idx}]");
-    try ast.bindVariables(&slots);
-    var e = try ast.lower(testing.allocator);
+    const source = "${arr}[${idx}]";
+    var common_diagnostics = diagnostic.Diagnostics.init(temp_arena.allocator(), "<test>");
+    defer common_diagnostics.deinit();
+    var diagnostics = expr_mod.Diagnostics.init(&common_diagnostics, .{}, .expression, source);
+    var ast = try expr_mod.parseAst(temp_arena.allocator(), source, &diagnostics);
+    try ast.bindVariables(&slots, &diagnostics);
+    var e = try ast.lower(testing.allocator, &diagnostics);
     defer e.deinit(testing.allocator);
     const eval_result = try e.eval(ctx.varResolver(), testing.allocator);
     try testing.expectApproxEqAbs(@as(f64, 10.0), eval_result.value.float, 1e-9);

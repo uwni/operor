@@ -50,7 +50,7 @@ pub fn precompilePathFromAdapterDir(
     defer opened.close(io);
 
     const compiled = precompile.precompilePath(allocator, io, recipe_path, opened, &precompile_diagnostic) catch |err| switch (err) {
-        error.DiagnosticsFound => {
+        error.AnalysisFail => {
             try precompile_diagnostic.writeAll(log);
             return error.Diagnosed;
         },

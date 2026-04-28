@@ -3,12 +3,12 @@ const types = @import("types.zig");
 
 const Value = types.Value;
 const EvalError = types.EvalError;
+const CompileError = types.CompileError;
+const Span = types.Span;
 const VariableBinding = types.VariableBinding;
 const ResolvedValue = types.ResolvedValue;
 const ResolvedList = types.ResolvedList;
 const VarResolver = types.VarResolver;
-
-const CmpOp = enum { gt, lt, ge, le, eq, ne };
 
 pub const Op = union(enum) {
     push_int: i64,
@@ -25,7 +25,7 @@ pub const Op = union(enum) {
     sub,
     mul,
     div,
-    cmp: CmpOp,
+    cmp: types.CmpOp,
     negate,
     not,
     call_min,
@@ -144,34 +144,31 @@ pub const Expression = struct {
                     const b = stack[sp - 1];
                     const a = stack[sp - 2];
                     sp -= 1;
-                    stack[sp - 1] = try promoteArith(a, b, .add);
+                    stack[sp - 1] = try types.promoteArith(a, b, .add);
                 },
                 .sub => {
                     const b = stack[sp - 1];
                     const a = stack[sp - 2];
                     sp -= 1;
-                    stack[sp - 1] = try promoteArith(a, b, .sub);
+                    stack[sp - 1] = try types.promoteArith(a, b, .sub);
                 },
                 .mul => {
                     const b = stack[sp - 1];
                     const a = stack[sp - 2];
                     sp -= 1;
-                    stack[sp - 1] = try promoteArith(a, b, .mul);
+                    stack[sp - 1] = try types.promoteArith(a, b, .mul);
                 },
                 .div => {
                     const b = stack[sp - 1];
                     const a = stack[sp - 2];
-                    if (a == .string or a == .bool or b == .string or b == .bool) return error.InvalidExpression;
                     sp -= 1;
-                    const rf = b.toFloat();
-                    if (rf == 0.0) return error.DivisionByZero;
-                    stack[sp - 1] = .{ .float = a.toFloat() / rf };
+                    stack[sp - 1] = try types.divValues(a, b);
                 },
                 .cmp => |op| {
                     const b = stack[sp - 1];
                     const a = stack[sp - 2];
                     sp -= 1;
-                    stack[sp - 1] = .{ .bool = try cmpValues(a, b, op) };
+                    stack[sp - 1] = .{ .bool = try types.cmpValues(a, b, op) };
                 },
                 .negate => {
                     const v = stack[sp - 1];
@@ -189,13 +186,13 @@ pub const Expression = struct {
                     const b = stack[sp - 1];
                     const a = stack[sp - 2];
                     sp -= 1;
-                    stack[sp - 1] = try promoteMinMax(a, b, true);
+                    stack[sp - 1] = try types.promoteMinMax(a, b, true);
                 },
                 .call_max => {
                     const b = stack[sp - 1];
                     const a = stack[sp - 2];
                     sp -= 1;
-                    stack[sp - 1] = try promoteMinMax(a, b, false);
+                    stack[sp - 1] = try types.promoteMinMax(a, b, false);
                 },
                 .jump_if_false => |skip| {
                     const v = stack[sp - 1];
@@ -262,7 +259,7 @@ pub fn freeOwnedOps(allocator: std.mem.Allocator, ops: []const Op) void {
     };
 }
 
-pub fn validateStackShape(ops: []const Op) EvalError!void {
+pub fn validateStackShape(ops: []const Op, span: Span, diagnostics: *types.Diagnostics) CompileError!void {
     var depth: usize = 0;
     var max_depth: usize = 0;
     for (ops) |op| {
@@ -270,109 +267,21 @@ pub fn validateStackShape(ops: []const Op) EvalError!void {
             .push_int, .push_float, .push_string, .push_bool, .load_var, .load_list_len => depth += 1,
             .load_list_elem, .call_join => {},
             .add, .sub, .mul, .div, .cmp, .call_min, .call_max => {
-                if (depth < 2) return error.InvalidExpression;
+                if (depth < 2) return diagnostics.fail(span, .invalid_stack_shape);
                 depth -= 1;
             },
             .negate, .not, .to_bool, .jump_if_false, .jump_if_true => {
-                if (depth < 1) return error.InvalidExpression;
+                if (depth < 1) return diagnostics.fail(span, .invalid_stack_shape);
             },
             .pop => {
-                if (depth < 1) return error.InvalidExpression;
+                if (depth < 1) return diagnostics.fail(span, .invalid_stack_shape);
                 depth -= 1;
             },
         }
         if (depth > max_depth) max_depth = depth;
     }
-    if (depth != 1) return error.InvalidExpression;
-    if (max_depth > Expression.max_stack) return error.StackOverflow;
-}
-
-fn promoteArith(a: Value, b: Value, comptime op: enum { add, sub, mul }) EvalError!Value {
-    return switch (a) {
-        .string, .bool => error.InvalidExpression,
-        .int => |ai| switch (b) {
-            .string, .bool => error.InvalidExpression,
-            .int => |bi| .{ .int = switch (op) {
-                .add => ai + bi,
-                .sub => ai - bi,
-                .mul => ai * bi,
-            } },
-            .float => |bf| blk: {
-                const af: f64 = @floatFromInt(ai);
-                break :blk .{ .float = switch (op) {
-                    .add => af + bf,
-                    .sub => af - bf,
-                    .mul => af * bf,
-                } };
-            },
-        },
-        .float => |af| switch (b) {
-            .string, .bool => error.InvalidExpression,
-            .int, .float => blk: {
-                const bf = b.toFloat();
-                break :blk .{ .float = switch (op) {
-                    .add => af + bf,
-                    .sub => af - bf,
-                    .mul => af * bf,
-                } };
-            },
-        },
-    };
-}
-
-fn cmpValues(a: Value, b: Value, op: CmpOp) EvalError!bool {
-    return switch (a) {
-        .string => |sa| switch (b) {
-            .string => |sb| {
-                const order = std.mem.order(u8, sa, sb);
-                return switch (op) {
-                    .eq => order == .eq,
-                    .ne => order != .eq,
-                    .lt => order == .lt,
-                    .le => order != .gt,
-                    .gt => order == .gt,
-                    .ge => order != .lt,
-                };
-            },
-            else => error.InvalidExpression,
-        },
-        else => switch (b) {
-            .string => error.InvalidExpression,
-            else => {
-                const l = a.toFloat();
-                const r = b.toFloat();
-                return switch (op) {
-                    .gt => l > r,
-                    .lt => l < r,
-                    .ge => l >= r,
-                    .le => l <= r,
-                    .eq => l == r,
-                    .ne => l != r,
-                };
-            },
-        },
-    };
-}
-
-fn promoteMinMax(a: Value, b: Value, comptime pick_min: bool) EvalError!Value {
-    return switch (a) {
-        .string, .bool => error.InvalidExpression,
-        .int => |ai| switch (b) {
-            .string, .bool => error.InvalidExpression,
-            .int => |bi| .{ .int = if (pick_min) @min(ai, bi) else @max(ai, bi) },
-            .float => |bf| blk: {
-                const af: f64 = @floatFromInt(ai);
-                break :blk .{ .float = if (pick_min) @min(af, bf) else @max(af, bf) };
-            },
-        },
-        .float => |af| switch (b) {
-            .string, .bool => error.InvalidExpression,
-            .int, .float => blk: {
-                const bf = b.toFloat();
-                break :blk .{ .float = if (pick_min) @min(af, bf) else @max(af, bf) };
-            },
-        },
-    };
+    if (depth != 1) return diagnostics.fail(span, .invalid_stack_shape);
+    if (max_depth > Expression.max_stack) return diagnostics.fail(span, .stack_too_deep);
 }
 
 fn resolveScalar(val: ResolvedValue) EvalError!Value {

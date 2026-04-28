@@ -2,7 +2,9 @@ const std = @import("std");
 const types = @import("types.zig");
 const bytecode = @import("bytecode.zig");
 
-const EvalError = types.EvalError;
+const CompileError = types.CompileError;
+const Span = types.Span;
+const VariableBinding = types.VariableBinding;
 const VariableRef = types.VariableRef;
 
 pub const Ast = struct {
@@ -29,41 +31,46 @@ pub const Ast = struct {
         call_max,
     };
 
-    pub const Node = union(enum) {
-        int: i64,
-        float: f64,
-        bool: bool,
-        string: []const u8,
-        load_var: VariableRef,
-        load_list_len: VariableRef,
-        load_list_elem: struct {
-            ref: VariableRef,
-            index: *Node,
-        },
-        call_join: struct {
-            ref: VariableRef,
-            delim: *Node,
-        },
-        unary: struct {
-            op: UnaryOp,
-            child: *Node,
-        },
-        binary: struct {
-            op: BinaryOp,
-            lhs: *Node,
-            rhs: *Node,
-        },
-        logical_and: struct {
-            lhs: *Node,
-            rhs: *Node,
-        },
-        logical_or: struct {
-            lhs: *Node,
-            rhs: *Node,
-        },
+    pub const Node = struct {
+        span: Span,
+        data: Data,
+
+        pub const Data = union(enum) {
+            int: i64,
+            float: f64,
+            bool: bool,
+            string: []const u8,
+            load_var: VariableRef,
+            load_list_len: VariableRef,
+            load_list_elem: struct {
+                ref: VariableRef,
+                index: *Node,
+            },
+            call_join: struct {
+                ref: VariableRef,
+                delim: *Node,
+            },
+            unary: struct {
+                op: UnaryOp,
+                child: *Node,
+            },
+            binary: struct {
+                op: BinaryOp,
+                lhs: *Node,
+                rhs: *Node,
+            },
+            logical_and: struct {
+                lhs: *Node,
+                rhs: *Node,
+            },
+            logical_or: struct {
+                lhs: *Node,
+                rhs: *Node,
+            },
+        };
 
         pub fn deinit(self: *Node, allocator: std.mem.Allocator) void {
-            switch (self.*) {
+            switch (self.data) {
                 .int, .float, .bool, .string, .load_var, .load_list_len => {},
                 .load_list_elem => |data| {
                     destroyNode(allocator, data.index);
@@ -87,82 +94,87 @@ pub const Ast = struct {
             }
         }
 
-        pub fn bindVariables(self: *Node, slots: anytype) !void {
-            switch (self.*) {
+        pub fn bindVariables(self: *Node, slots: anytype, diagnostics: *types.Diagnostics) CompileError!void {
+            switch (self.data) {
                 .int, .float, .bool, .string => {},
-                .load_var => |*ref| try types.bindBorrowedVariableRef(ref, slots),
-                .load_list_len => |*ref| try types.bindBorrowedVariableRef(ref, slots),
+                .load_var => |*ref| try bindVariableRef(ref, slots, diagnostics, self.span),
+                .load_list_len => |*ref| try bindVariableRef(ref, slots, diagnostics, self.span),
                 .load_list_elem => |*data| {
-                    try types.bindBorrowedVariableRef(&data.ref, slots);
-                    try data.index.bindVariables(slots);
+                    try bindVariableRef(&data.ref, slots, diagnostics, self.span);
+                    try data.index.bindVariables(slots, diagnostics);
                 },
                 .call_join => |*data| {
-                    try types.bindBorrowedVariableRef(&data.ref, slots);
-                    try data.delim.bindVariables(slots);
+                    try bindVariableRef(&data.ref, slots, diagnostics, self.span);
+                    try data.delim.bindVariables(slots, diagnostics);
                 },
-                .unary => |*data| try data.child.bindVariables(slots),
+                .unary => |*data| try data.child.bindVariables(slots, diagnostics),
                 .binary => |*data| {
-                    try data.lhs.bindVariables(slots);
-                    try data.rhs.bindVariables(slots);
+                    try data.lhs.bindVariables(slots, diagnostics);
+                    try data.rhs.bindVariables(slots, diagnostics);
                 },
                 .logical_and => |*data| {
-                    try data.lhs.bindVariables(slots);
-                    try data.rhs.bindVariables(slots);
+                    try data.lhs.bindVariables(slots, diagnostics);
+                    try data.rhs.bindVariables(slots, diagnostics);
                 },
                 .logical_or => |*data| {
-                    try data.lhs.bindVariables(slots);
-                    try data.rhs.bindVariables(slots);
+                    try data.lhs.bindVariables(slots, diagnostics);
+                    try data.rhs.bindVariables(slots, diagnostics);
                 },
             }
         }
 
-        pub fn remapBindings(self: *Node, mapper: anytype) !void {
-            switch (self.*) {
+        pub fn remapBindings(self: *Node, mapper: anytype, diagnostics: *types.Diagnostics) CompileError!void {
+            switch (self.data) {
                 .int, .float, .bool, .string => {},
-                .load_var => |*ref| try types.remapBoundVariableRef(ref, mapper),
-                .load_list_len => |*ref| try types.remapBoundVariableRef(ref, mapper),
+                .load_var => |*ref| try remapVariableRef(ref, mapper, diagnostics, self.span),
+                .load_list_len => |*ref| try remapVariableRef(ref, mapper, diagnostics, self.span),
                 .load_list_elem => |*data| {
-                    try types.remapBoundVariableRef(&data.ref, mapper);
-                    try data.index.remapBindings(mapper);
+                    try remapVariableRef(&data.ref, mapper, diagnostics, self.span);
+                    try data.index.remapBindings(mapper, diagnostics);
                 },
                 .call_join => |*data| {
-                    try types.remapBoundVariableRef(&data.ref, mapper);
-                    try data.delim.remapBindings(mapper);
+                    try remapVariableRef(&data.ref, mapper, diagnostics, self.span);
+                    try data.delim.remapBindings(mapper, diagnostics);
                 },
-                .unary => |*data| try data.child.remapBindings(mapper),
+                .unary => |*data| try data.child.remapBindings(mapper, diagnostics),
                 .binary => |*data| {
-                    try data.lhs.remapBindings(mapper);
-                    try data.rhs.remapBindings(mapper);
+                    try data.lhs.remapBindings(mapper, diagnostics);
+                    try data.rhs.remapBindings(mapper, diagnostics);
                 },
                 .logical_and => |*data| {
-                    try data.lhs.remapBindings(mapper);
-                    try data.rhs.remapBindings(mapper);
+                    try data.lhs.remapBindings(mapper, diagnostics);
+                    try data.rhs.remapBindings(mapper, diagnostics);
                 },
                 .logical_or => |*data| {
-                    try data.lhs.remapBindings(mapper);
-                    try data.rhs.remapBindings(mapper);
+                    try data.lhs.remapBindings(mapper, diagnostics);
+                    try data.rhs.remapBindings(mapper, diagnostics);
                 },
             }
         }
 
-        pub fn lower(self: *const Node, allocator: std.mem.Allocator, out: *std.ArrayList(bytecode.Op)) EvalError!void {
-            switch (self.*) {
+        pub fn lower(
+            self: *const Node,
+            allocator: std.mem.Allocator,
+            out: *std.ArrayList(bytecode.Op),
+            diagnostics: *types.Diagnostics,
+        ) CompileError!void {
+            switch (self.data) {
                 .int => |value| try out.append(allocator, .{ .push_int = value }),
                 .float => |value| try out.append(allocator, .{ .push_float = value }),
                 .bool => |value| try out.append(allocator, .{ .push_bool = value }),
                 .string => |value| try out.append(allocator, .{ .push_string = try allocator.dupe(u8, value) }),
-                .load_var => |ref| try out.append(allocator, .{ .load_var = ref.binding }),
-                .load_list_len => |ref| try out.append(allocator, .{ .load_list_len = ref.binding }),
+                .load_var => |ref| try out.append(allocator, .{ .load_var = try expectBinding(ref, diagnostics, self.span) }),
+                .load_list_len => |ref| try out.append(allocator, .{ .load_list_len = try expectBinding(ref, diagnostics, self.span) }),
                 .load_list_elem => |data| {
-                    try data.index.lower(allocator, out);
-                    try out.append(allocator, .{ .load_list_elem = data.ref.binding });
+                    try data.index.lower(allocator, out, diagnostics);
+                    try out.append(allocator, .{ .load_list_elem = try expectBinding(data.ref, diagnostics, self.span) });
                 },
                 .call_join => |data| {
-                    try data.delim.lower(allocator, out);
-                    try out.append(allocator, .{ .call_join = data.ref.binding });
+                    try data.delim.lower(allocator, out, diagnostics);
+                    try out.append(allocator, .{ .call_join = try expectBinding(data.ref, diagnostics, self.span) });
                 },
                 .unary => |data| {
-                    try data.child.lower(allocator, out);
+                    try data.child.lower(allocator, out, diagnostics);
                     try out.append(allocator, switch (data.op) {
                         .negate => .negate,
                         .not => .not,
@@ -170,8 +182,8 @@ pub const Ast = struct {
                     });
                 },
                 .binary => |data| {
-                    try data.lhs.lower(allocator, out);
-                    try data.rhs.lower(allocator, out);
+                    try data.lhs.lower(allocator, out, diagnostics);
+                    try data.rhs.lower(allocator, out, diagnostics);
                     try out.append(allocator, switch (data.op) {
                         .add => .add,
                         .sub => .sub,
@@ -188,31 +200,36 @@ pub const Ast = struct {
                     });
                 },
                 .logical_and => |data| {
-                    try data.lhs.lowerAsBool(allocator, out);
+                    try data.lhs.lowerAsBool(allocator, out, diagnostics);
                     const jump_pos = out.items.len;
                     try out.append(allocator, .{ .jump_if_false = 0 });
                     try out.append(allocator, .pop);
-                    try data.rhs.lowerAsBool(allocator, out);
+                    try data.rhs.lowerAsBool(allocator, out, diagnostics);
                     out.items[jump_pos] = .{ .jump_if_false = @intCast(out.items.len - jump_pos - 1) };
                 },
                 .logical_or => |data| {
-                    try data.lhs.lowerAsBool(allocator, out);
+                    try data.lhs.lowerAsBool(allocator, out, diagnostics);
                     const jump_pos = out.items.len;
                     try out.append(allocator, .{ .jump_if_true = 0 });
                     try out.append(allocator, .pop);
-                    try data.rhs.lowerAsBool(allocator, out);
+                    try data.rhs.lowerAsBool(allocator, out, diagnostics);
                     out.items[jump_pos] = .{ .jump_if_true = @intCast(out.items.len - jump_pos - 1) };
                 },
             }
         }
 
-        pub fn lowerAsBool(self: *const Node, allocator: std.mem.Allocator, out: *std.ArrayList(bytecode.Op)) EvalError!void {
-            try self.lower(allocator, out);
+        pub fn lowerAsBool(
+            self: *const Node,
+            allocator: std.mem.Allocator,
+            out: *std.ArrayList(bytecode.Op),
+            diagnostics: *types.Diagnostics,
+        ) CompileError!void {
+            try self.lower(allocator, out, diagnostics);
             if (!self.producesBool()) try out.append(allocator, .to_bool);
         }
 
         pub fn producesBool(self: *const Node) bool {
-            return switch (self.*) {
+            return switch (self.data) {
                 .bool => true,
                 .unary => |data| switch (data.op) {
                     .not, .to_bool => true,
@@ -239,25 +256,57 @@ pub const Ast = struct {
         self.* = undefined;
     }
 
-    pub fn bindVariables(self: *Ast, slots: anytype) !void {
-        try self.root.bindVariables(slots);
+    pub fn bindVariables(self: *Ast, slots: anytype, diagnostics: *types.Diagnostics) CompileError!void {
+        try self.root.bindVariables(slots, diagnostics);
     }
 
-    pub fn remapBindings(self: *Ast, mapper: anytype) !void {
-        try self.root.remapBindings(mapper);
+    pub fn remapBindings(self: *Ast, mapper: anytype, diagnostics: *types.Diagnostics) CompileError!void {
+        try self.root.remapBindings(mapper, diagnostics);
     }
 
-    pub fn lower(self: *const Ast, allocator: std.mem.Allocator) EvalError!bytecode.Expression {
+    pub fn lower(
+        self: *const Ast,
+        allocator: std.mem.Allocator,
+        diagnostics: *types.Diagnostics,
+    ) CompileError!bytecode.Expression {
         var out: std.ArrayList(bytecode.Op) = .empty;
         errdefer {
             bytecode.freeOwnedOps(allocator, out.items);
             out.deinit(allocator);
         }
-        try self.root.lower(allocator, &out);
-        try bytecode.validateStackShape(out.items);
+        try self.root.lower(allocator, &out, diagnostics);
+        try bytecode.validateStackShape(out.items, self.root.span, diagnostics);
         return .{ .ops = try out.toOwnedSlice(allocator) };
     }
 };
+
+fn bindVariableRef(ref: *VariableRef, slots: anytype, diagnostics: *types.Diagnostics, span: Span) CompileError!void {
+    switch (ref.*) {
+        .name => |name| {
+            const binding: VariableBinding = types.resolveBuiltin(name) orelse .{
+                .slot = slots.getIndex(name) orelse return diagnostics.fail(span, .{ .unknown_variable = .{ .variable = name } }),
+            };
+            ref.* = .{ .binding = binding };
+        },
+        .binding => {},
+    }
+}
+
+fn remapVariableRef(ref: *VariableRef, mapper: anytype, diagnostics: *types.Diagnostics, span: Span) CompileError!void {
+    switch (ref.*) {
+        .binding => |binding| {
+            ref.* = .{ .binding = try mapper.remap(binding, span, diagnostics) };
+        },
+        .name => return diagnostics.fail(span, .unbound_variable),
+    }
+}
+
+fn expectBinding(ref: VariableRef, diagnostics: *types.Diagnostics, span: Span) CompileError!VariableBinding {
+    return switch (ref) {
+        .binding => |binding| binding,
+        .name => diagnostics.fail(span, .unbound_variable),
+    };
+}
 
 pub fn destroyNode(allocator: std.mem.Allocator, node: *Ast.Node) void {
     node.deinit(allocator);

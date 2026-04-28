@@ -64,13 +64,13 @@ pub const Encoding = enum {
         .{ "bool", .bool },
     });
 
-    fn parseFromString(tag: []const u8) !Encoding {
-        return map.get(tag) orelse error.InvalidValueType;
+    pub fn fromString(tag: []const u8) ?Encoding {
+        return map.get(tag);
     }
 
     /// Converts an optional `read` specification into an encoding enum.
     pub fn resolveFromReadSpec(read_value: ?[]const u8) !?Encoding {
         const spec = read_value orelse return null;
-        return try parseFromString(spec);
+        return fromString(spec) orelse error.InvalidValueType;
     }
 };

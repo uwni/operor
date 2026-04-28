@@ -1,6 +1,7 @@
 /// Utilities for parsing and rendering command templates, e.g. "VOLT {voltage} {channels}".
 /// The template is parsed into segments, which are either literal strings or placeholders.
 const std = @import("std");
+const diagnostic = @import("../diagnostic.zig");
 
 /// A command template segment: literal, placeholder, or optional group.
 pub const Segment = union(enum) {
@@ -14,22 +15,25 @@ pub const Segment = union(enum) {
     optional: []const Segment,
 };
 
-/// Errors that can occur while parsing a template string into segments.
-pub const TemplateParseError = error{
-    MissingClosingBrace,
-    MissingClosingBracket,
-    NestedOptionalGroup,
-    InvalidIdentifier,
-    EmptyArgument,
-    OutOfMemory,
-};
-
 /// Parse a command template string into owned segments of literals and placeholders.
-pub fn parseTemplate(allocator: std.mem.Allocator, tem_str: []const u8) TemplateParseError![]Segment {
-    return parseTemplateInner(allocator, tem_str, false);
+pub fn parseTemplate(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    diagnostics: *diagnostic.Diagnostics,
+    context: diagnostic.Context,
+) diagnostic.Error![]Segment {
+    return parseTemplateInner(allocator, source, source, 0, false, diagnostics, context);
 }
 
-fn parseTemplateInner(allocator: std.mem.Allocator, tem_str: []const u8, in_optional: bool) TemplateParseError![]Segment {
+fn parseTemplateInner(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    tem_str: []const u8,
+    source_offset: usize,
+    in_optional: bool,
+    diagnostics: *diagnostic.Diagnostics,
+    context: diagnostic.Context,
+) diagnostic.Error![]Segment {
     // Upper bound: the densest packing alternates single-char literals with
     // minimal placeholders `{x}`, e.g. `a{b}c{d}e` → 9 bytes, 5 segments.
     // Each segment consumes at least 2 bytes of input (1-char literal or `{x}`),
@@ -47,7 +51,7 @@ fn parseTemplateInner(allocator: std.mem.Allocator, tem_str: []const u8, in_opti
     while (i < tem_str.len) : (i += 1) {
         switch (tem_str[i]) {
             '[' => {
-                if (in_optional) return error.NestedOptionalGroup;
+                if (in_optional) return fail(diagnostics, context, source, .at(source_offset + i), .nested_optional_group);
 
                 if (i > literal_start) {
                     try segments.append(allocator, .{ .literal = try allocator.dupe(u8, tem_str[literal_start..i]) });
@@ -62,9 +66,22 @@ fn parseTemplateInner(allocator: std.mem.Allocator, tem_str: []const u8, in_opti
                         if (depth == 0) break;
                     }
                 }
-                if (depth != 0) return error.MissingClosingBracket;
+                if (depth != 0) {
+                    return fail(diagnostics, context, source, .{
+                        .start = source_offset + i,
+                        .end = source.len,
+                    }, .missing_closing_bracket);
+                }
 
-                const inner_segments = try parseTemplateInner(allocator, tem_str[i + 1 .. close_idx], true);
+                const inner_segments = try parseTemplateInner(
+                    allocator,
+                    source,
+                    tem_str[i + 1 .. close_idx],
+                    source_offset + i + 1,
+                    true,
+                    diagnostics,
+                    context,
+                );
                 try segments.append(allocator, .{ .optional = inner_segments });
 
                 i = close_idx;
@@ -77,11 +94,26 @@ fn parseTemplateInner(allocator: std.mem.Allocator, tem_str: []const u8, in_opti
 
                 var close_idx = i + 1;
                 while (close_idx < tem_str.len and tem_str[close_idx] != '}') : (close_idx += 1) {}
-                if (close_idx == tem_str.len) return error.MissingClosingBrace;
+                if (close_idx == tem_str.len) {
+                    return fail(diagnostics, context, source, .{
+                        .start = source_offset + i,
+                        .end = source.len,
+                    }, .missing_closing_brace);
+                }
 
                 const inner = std.mem.trim(u8, tem_str[i + 1 .. close_idx], " \t\r\n");
-                if (inner.len == 0) return error.EmptyArgument;
-                if (!isIdentifier(inner)) return error.InvalidIdentifier;
+                if (inner.len == 0) {
+                    return fail(diagnostics, context, source, .{
+                        .start = source_offset + i + 1,
+                        .end = source_offset + close_idx,
+                    }, .empty_argument);
+                }
+                if (!isIdentifier(inner)) {
+                    return fail(diagnostics, context, source, .{
+                        .start = source_offset + i + 1,
+                        .end = source_offset + close_idx,
+                    }, .{ .invalid_identifier = inner });
+                }
                 try segments.append(allocator, .{ .placeholder = try allocator.dupe(u8, inner) });
 
                 i = close_idx;
@@ -96,6 +128,23 @@ fn parseTemplateInner(allocator: std.mem.Allocator, tem_str: []const u8, in_opti
     }
 
     return segments.toOwnedSlice(allocator);
+}
+
+fn fail(
+    diagnostics: *diagnostic.Diagnostics,
+    context: diagnostic.Context,
+    source: []const u8,
+    span: diagnostic.Span,
+    message: diagnostic.Message,
+) diagnostic.Error {
+    return diagnostics.failDiagnostic(.{
+        .severity = .fatal,
+        .context = context,
+        .source_kind = .adapter_write_template,
+        .source = source,
+        .span = span,
+        .message = message,
+    });
 }
 
 /// Frees all owned data within segments, then the slice itself.
@@ -124,29 +173,50 @@ fn isIdentifier(name: []const u8) bool {
 
 test "parse template segments" {
     const gpa = std.testing.allocator;
-    const segments = try parseTemplate(gpa, "VOLT {voltage} {channels}");
+    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
+    defer diagnostics.deinit();
+
+    const segments = try parseTemplate(gpa, "VOLT {voltage} {channels}", &diagnostics, .{});
     defer freeSegments(gpa, segments);
     try std.testing.expectEqual(@as(usize, 4), segments.len);
 }
 
 test "parse template error: missing closing brace" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.MissingClosingBrace, parseTemplate(gpa, "VOLT {voltage} {"));
+    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
+    defer diagnostics.deinit();
+
+    try std.testing.expectError(error.AnalysisFail, parseTemplate(gpa, "VOLT {voltage} {", &diagnostics, .{}));
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.items.len);
+    try std.testing.expectEqual(diagnostic.Message.missing_closing_brace, diagnostics.items.items[0].message);
 }
 
 test "parse template error: empty argument" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.EmptyArgument, parseTemplate(gpa, "VOLT {} done"));
+    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
+    defer diagnostics.deinit();
+
+    try std.testing.expectError(error.AnalysisFail, parseTemplate(gpa, "VOLT {} done", &diagnostics, .{}));
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.items.len);
+    try std.testing.expectEqual(diagnostic.Message.empty_argument, diagnostics.items.items[0].message);
 }
 
 test "parse template error: invalid identifier" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.InvalidIdentifier, parseTemplate(gpa, "VOLT {123bad}"));
+    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
+    defer diagnostics.deinit();
+
+    try std.testing.expectError(error.AnalysisFail, parseTemplate(gpa, "VOLT {123bad}", &diagnostics, .{}));
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.items.len);
+    try std.testing.expectEqualStrings("123bad", diagnostics.items.items[0].message.invalid_identifier);
 }
 
 test "parse template with optional group" {
     const gpa = std.testing.allocator;
-    const segments = try parseTemplate(gpa, "OUTP {state}[,(@{channels})]");
+    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
+    defer diagnostics.deinit();
+
+    const segments = try parseTemplate(gpa, "OUTP {state}[,(@{channels})]", &diagnostics, .{});
     defer freeSegments(gpa, segments);
     // "OUTP ", {state}, optional[",(@", {channels}, ")"]
     try std.testing.expectEqual(@as(usize, 3), segments.len);
@@ -156,10 +226,20 @@ test "parse template with optional group" {
 
 test "parse template error: missing closing bracket" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.MissingClosingBracket, parseTemplate(gpa, "OUTP [,(@{ch})"));
+    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
+    defer diagnostics.deinit();
+
+    try std.testing.expectError(error.AnalysisFail, parseTemplate(gpa, "OUTP [,(@{ch})", &diagnostics, .{}));
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.items.len);
+    try std.testing.expectEqual(diagnostic.Message.missing_closing_bracket, diagnostics.items.items[0].message);
 }
 
 test "parse template error: nested optional group" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.NestedOptionalGroup, parseTemplate(gpa, "OUTP [[{a}]]"));
+    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
+    defer diagnostics.deinit();
+
+    try std.testing.expectError(error.AnalysisFail, parseTemplate(gpa, "OUTP [[{a}]]", &diagnostics, .{}));
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.items.len);
+    try std.testing.expectEqual(diagnostic.Message.nested_optional_group, diagnostics.items.items[0].message);
 }

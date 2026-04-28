@@ -260,13 +260,14 @@ test "executor propagates conditional task expression failures" {
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
 
-    try std.testing.expectError(error.DivisionByZero, execute(gpa, .{
+    try std.testing.expectError(error.Diagnosed, execute(gpa, .{
         .adapter_dir = adapter_dir,
         .recipe_path = recipe_path,
         .dry_run = true,
         .io = std.testing.io,
         .log = &out.writer,
     }));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "division by zero"));
 }
 
 test "executor propagates parallel step failures" {
@@ -297,11 +298,12 @@ test "executor propagates parallel step failures" {
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
 
-    try std.testing.expectError(error.DivisionByZero, execute(gpa, .{
+    try std.testing.expectError(error.Diagnosed, execute(gpa, .{
         .adapter_dir = adapter_dir,
         .recipe_path = recipe_path,
         .dry_run = true,
         .io = std.testing.io,
         .log = &out.writer,
     }));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "division by zero"));
 }

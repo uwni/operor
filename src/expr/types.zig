@@ -1,4 +1,46 @@
 const std = @import("std");
+const diagnostic = @import("../diagnostic.zig");
+
+pub const Span = diagnostic.Span;
+pub const Message = diagnostic.Message;
+pub const Diagnostic = diagnostic.Diagnostic;
+
+pub const CompileError = error{
+    AnalysisFail,
+    OutOfMemory,
+};
+
+pub const Diagnostics = struct {
+    inner: *diagnostic.Diagnostics,
+    context: diagnostic.Context = .{},
+    source_kind: diagnostic.SourceKind,
+    source: []const u8,
+
+    pub fn init(
+        inner: *diagnostic.Diagnostics,
+        context: diagnostic.Context,
+        source_kind: diagnostic.SourceKind,
+        source: []const u8,
+    ) Diagnostics {
+        return .{
+            .inner = inner,
+            .context = context,
+            .source_kind = source_kind,
+            .source = source,
+        };
+    }
+
+    pub fn fail(self: *Diagnostics, span: Span, message: Message) CompileError {
+        return self.inner.failDiagnostic(.{
+            .severity = .fatal,
+            .context = self.context,
+            .source_kind = self.source_kind,
+            .source = self.source,
+            .span = span,
+            .message = message,
+        });
+    }
+};
 
 /// Expression result: can be a 64-bit integer, a 64-bit float, or a string.
 ///
@@ -32,16 +74,122 @@ pub const Value = union(enum) {
     }
 };
 
+pub const ArithOp = enum {
+    add,
+    sub,
+    mul,
+};
+
+pub const CmpOp = enum {
+    gt,
+    lt,
+    ge,
+    le,
+    eq,
+    ne,
+};
+
 pub const EvalError = error{
     InvalidExpression,
-    UnexpectedToken,
-    UnmatchedParen,
     DivisionByZero,
     VariableNotFound,
-    InvalidNumber,
     OutOfMemory,
-    StackOverflow,
 };
+
+pub fn promoteArith(a: Value, b: Value, comptime op: ArithOp) EvalError!Value {
+    return switch (a) {
+        .string, .bool => error.InvalidExpression,
+        .int => |ai| switch (b) {
+            .string, .bool => error.InvalidExpression,
+            .int => |bi| .{ .int = switch (op) {
+                .add => ai + bi,
+                .sub => ai - bi,
+                .mul => ai * bi,
+            } },
+            .float => |bf| blk: {
+                const af: f64 = @floatFromInt(ai);
+                break :blk .{ .float = switch (op) {
+                    .add => af + bf,
+                    .sub => af - bf,
+                    .mul => af * bf,
+                } };
+            },
+        },
+        .float => |af| switch (b) {
+            .string, .bool => error.InvalidExpression,
+            .int, .float => blk: {
+                const bf = b.toFloat();
+                break :blk .{ .float = switch (op) {
+                    .add => af + bf,
+                    .sub => af - bf,
+                    .mul => af * bf,
+                } };
+            },
+        },
+    };
+}
+
+pub fn divValues(a: Value, b: Value) EvalError!Value {
+    if (a == .string or a == .bool or b == .string or b == .bool) return error.InvalidExpression;
+    const rf = b.toFloat();
+    if (rf == 0.0) return error.DivisionByZero;
+    return .{ .float = a.toFloat() / rf };
+}
+
+pub fn cmpValues(a: Value, b: Value, op: CmpOp) EvalError!bool {
+    return switch (a) {
+        .string => |sa| switch (b) {
+            .string => |sb| {
+                const order = std.mem.order(u8, sa, sb);
+                return switch (op) {
+                    .eq => order == .eq,
+                    .ne => order != .eq,
+                    .lt => order == .lt,
+                    .le => order != .gt,
+                    .gt => order == .gt,
+                    .ge => order != .lt,
+                };
+            },
+            else => error.InvalidExpression,
+        },
+        else => switch (b) {
+            .string => error.InvalidExpression,
+            else => {
+                const l = a.toFloat();
+                const r = b.toFloat();
+                return switch (op) {
+                    .gt => l > r,
+                    .lt => l < r,
+                    .ge => l >= r,
+                    .le => l <= r,
+                    .eq => l == r,
+                    .ne => l != r,
+                };
+            },
+        },
+    };
+}
+
+pub fn promoteMinMax(a: Value, b: Value, comptime pick_min: bool) EvalError!Value {
+    return switch (a) {
+        .string, .bool => error.InvalidExpression,
+        .int => |ai| switch (b) {
+            .string, .bool => error.InvalidExpression,
+            .int => |bi| .{ .int = if (pick_min) @min(ai, bi) else @max(ai, bi) },
+            .float => |bf| blk: {
+                const af: f64 = @floatFromInt(ai);
+                break :blk .{ .float = if (pick_min) @min(af, bf) else @max(af, bf) };
+            },
+        },
+        .float => |af| switch (b) {
+            .string, .bool => error.InvalidExpression,
+            .int, .float => blk: {
+                const bf = b.toFloat();
+                break :blk .{ .float = if (pick_min) @min(af, bf) else @max(af, bf) };
+            },
+        },
+    };
+}
 
 pub const BuiltinVar = enum {
     iter,
@@ -105,25 +253,4 @@ pub fn resolveBuiltin(name: []const u8) ?VariableBinding {
     if (std.mem.eql(u8, name, "$TASK_IDX")) return .{ .builtin = .task_idx };
     if (std.mem.eql(u8, name, "$ELAPSED_MS")) return .{ .builtin = .elapsed_ms };
     return null;
-}
-
-pub fn bindBorrowedVariableRef(ref: *VariableRef, slots: anytype) !void {
-    switch (ref.*) {
-        .name => |name| {
-            const binding: VariableBinding = resolveBuiltin(name) orelse .{
-                .slot = slots.getIndex(name) orelse return error.UndeclaredVariable,
-            };
-            ref.* = .{ .binding = binding };
-        },
-        .binding => return error.AlreadyBound,
-    }
-}
-
-pub fn remapBoundVariableRef(ref: *VariableRef, mapper: anytype) !void {
-    switch (ref.*) {
-        .binding => |binding| {
-            ref.* = .{ .binding = try mapper.remap(binding) };
-        },
-        .name => return error.UnboundVariable,
-    }
 }

@@ -17,6 +17,7 @@
 ///   - Comparison and logical operators always produce `int` (0 or 1).
 ///   - `len()` returns `int`; `min()`/`max()` follow promotion rules.
 const std = @import("std");
+const diagnostic_mod = @import("diagnostic.zig");
 
 const types = @import("expr/types.zig");
 const ast_mod = @import("expr/ast.zig");
@@ -24,7 +25,14 @@ const bytecode = @import("expr/bytecode.zig");
 const parse_ast_mod = @import("expr/parse_ast.zig");
 
 pub const Value = types.Value;
+pub const ArithOp = types.ArithOp;
+pub const CmpOp = types.CmpOp;
 pub const EvalError = types.EvalError;
+pub const CompileError = types.CompileError;
+pub const Diagnostics = types.Diagnostics;
+pub const Diagnostic = types.Diagnostic;
+pub const Message = types.Message;
+pub const Span = types.Span;
 pub const BuiltinVar = types.BuiltinVar;
 pub const VariableBinding = types.VariableBinding;
 pub const VariableRef = types.VariableRef;
@@ -32,6 +40,10 @@ pub const ResolvedValue = types.ResolvedValue;
 pub const ResolvedList = types.ResolvedList;
 pub const VarResolver = types.VarResolver;
 pub const resolveBuiltin = types.resolveBuiltin;
+pub const promoteArith = types.promoteArith;
+pub const divValues = types.divValues;
+pub const cmpValues = types.cmpValues;
+pub const promoteMinMax = types.promoteMinMax;
 
 pub const Ast = ast_mod.Ast;
 pub const Op = bytecode.Op;
@@ -41,25 +53,33 @@ pub const parseAst = parse_ast_mod.parseAst;
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
-fn lowerTestExpr(allocator: std.mem.Allocator, source: []const u8) EvalError!Expression {
+fn lowerTestExpr(allocator: std.mem.Allocator, source: []const u8) !Expression {
     var temp_arena = std.heap.ArenaAllocator.init(allocator);
     defer temp_arena.deinit();
 
-    var ast = try parseAst(temp_arena.allocator(), source);
-    return try ast.lower(allocator);
+    var common_diagnostics = diagnostic_mod.Diagnostics.init(temp_arena.allocator(), "<expr-test>");
+    defer common_diagnostics.deinit();
+    var diagnostics = Diagnostics.init(&common_diagnostics, .{}, .expression, source);
+
+    var ast = try parseAst(temp_arena.allocator(), source, &diagnostics);
+    return try ast.lower(allocator, &diagnostics);
 }
 
 fn lowerBoundTestExpr(allocator: std.mem.Allocator, source: []const u8, slots: anytype) !Expression {
     var temp_arena = std.heap.ArenaAllocator.init(allocator);
     defer temp_arena.deinit();
 
-    var ast = try parseAst(temp_arena.allocator(), source);
-    try ast.bindVariables(slots);
-    return try ast.lower(allocator);
+    var common_diagnostics = diagnostic_mod.Diagnostics.init(temp_arena.allocator(), "<expr-test>");
+    defer common_diagnostics.deinit();
+    var diagnostics = Diagnostics.init(&common_diagnostics, .{}, .expression, source);
+
+    var ast = try parseAst(temp_arena.allocator(), source, &diagnostics);
+    try ast.bindVariables(slots, &diagnostics);
+    return try ast.lower(allocator, &diagnostics);
 }
 
 /// Test helper: parse + eval in one shot (no variable binding).
-fn testEval(allocator: std.mem.Allocator, source: []const u8, resolver: VarResolver) EvalError!Value {
+fn testEval(allocator: std.mem.Allocator, source: []const u8, resolver: VarResolver) !Value {
     var expr_obj = try lowerTestExpr(allocator, source);
     defer expr_obj.deinit(allocator);
     const result = try expr_obj.eval(resolver, allocator);
@@ -116,7 +136,10 @@ fn testBoundEval(source: []const u8, vars: *const std.StringHashMap([]const u8))
     defer slots.deinit(std.testing.allocator);
     var temp_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer temp_arena.deinit();
-    const ast = try parseAst(temp_arena.allocator(), source);
+    var common_diagnostics = diagnostic_mod.Diagnostics.init(temp_arena.allocator(), "<expr-test>");
+    defer common_diagnostics.deinit();
+    var diagnostics = Diagnostics.init(&common_diagnostics, .{}, .expression, source);
+    const ast = try parseAst(temp_arena.allocator(), source, &diagnostics);
     try collectAstNames(ast.root, &tc, &slots);
     var expr_obj = try lowerBoundTestExpr(std.testing.allocator, source, &slots);
     defer expr_obj.deinit(std.testing.allocator);
@@ -130,7 +153,7 @@ fn collectAstNames(
     tc: *TestContext,
     slots: *std.StringArrayHashMapUnmanaged(void),
 ) !void {
-    switch (node.*) {
+    switch (node.data) {
         .load_var => |ref| switch (ref) {
             .name => |name| try addAstName(tc, slots, name),
             .binding => {},
@@ -309,7 +332,7 @@ test "expr missing variable" {
 }
 
 test "expr unmatched paren" {
-    try std.testing.expectError(error.UnmatchedParen, testEval(std.testing.allocator, "(1 + 2", VarResolver.none()));
+    try std.testing.expectError(error.AnalysisFail, testEval(std.testing.allocator, "(1 + 2", VarResolver.none()));
 }
 
 test "expr negative literal" {
@@ -505,7 +528,7 @@ test "expr len() in arithmetic" {
     try expectInt(3, (try e.eval(tc.resolver(), std.testing.allocator)).value);
 }
 
-test "expr stack overflow rejected at parse time" {
+test "expr stack overflow records diagnostic" {
     var buf: [1024]u8 = undefined;
     var pos: usize = 0;
     for (0..Expression.max_stack + 1) |_| {
@@ -519,7 +542,7 @@ test "expr stack overflow rejected at parse time" {
         pos += 1;
     }
     const src = buf[0..pos];
-    try std.testing.expectError(error.StackOverflow, lowerTestExpr(std.testing.allocator, src));
+    try std.testing.expectError(error.AnalysisFail, lowerTestExpr(std.testing.allocator, src));
 }
 
 test "expr string literal" {

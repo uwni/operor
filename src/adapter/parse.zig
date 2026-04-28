@@ -1,5 +1,6 @@
 const std = @import("std");
 const Adapter = @import("Adapter.zig");
+const diagnostic = @import("../diagnostic.zig");
 const doc_parse = @import("../doc_parse.zig");
 const schema = @import("schema.zig");
 const instrument = @import("../instrument.zig");
@@ -22,25 +23,60 @@ const CommandDoc = struct {
 };
 
 /// Parses a adapter document from an already-open directory.
-pub fn parseAdapterInDir(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, file_name: []const u8) !Adapter {
+pub fn parseAdapterInDir(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    file_name: []const u8,
+    diagnostics: *diagnostic.Diagnostics,
+    context: diagnostic.Context,
+) !Adapter {
     var adapter_arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer adapter_arena.deinit();
     const alloc = adapter_arena.allocator();
+    const document_alloc = diagnostics.arenaAllocator();
 
-    const parsed = try doc_parse.parseFileInDir(AdapterDoc, alloc, io, dir, file_name, max_adapter_file_size);
+    const parsed = doc_parse.parseFileInDir(AdapterDoc, document_alloc, io, dir, file_name, max_adapter_file_size) catch |err|
+        return failDocument(diagnostics, context, file_name, err);
     const path = try dir.realPathFileAlloc(io, file_name, alloc);
 
-    return buildAdapter(&adapter_arena, parsed, path);
+    return buildAdapter(&adapter_arena, parsed, path, diagnostics, context);
 }
 
-fn buildAdapter(adapter_arena: *std.heap.ArenaAllocator, parsed: AdapterDoc, path: []const u8) !Adapter {
+fn failDocument(diagnostics: *diagnostic.Diagnostics, context: diagnostic.Context, file_name: []const u8, err: anyerror) anyerror {
+    const message: diagnostic.Message = switch (err) {
+        error.FileNotFound => .adapter_not_found,
+        error.SyntaxError => .syntax_error,
+        error.UnsupportedFormat => .unsupported_format,
+        error.WrongType => .wrong_type,
+        else => return err,
+    };
+    return diagnostics.failDiagnostic(.{
+        .severity = .fatal,
+        .context = context,
+        .source_kind = .adapter_document,
+        .source = file_name,
+        .span = .{ .start = 0, .end = file_name.len },
+        .message = message,
+    });
+}
+
+fn buildAdapter(
+    adapter_arena: *std.heap.ArenaAllocator,
+    parsed: AdapterDoc,
+    path: []const u8,
+    diagnostics: *diagnostic.Diagnostics,
+    context: diagnostic.Context,
+) !Adapter {
     const alloc = adapter_arena.allocator();
 
     var commands: std.StringHashMap(schema.Command) = .init(alloc);
     var it = parsed.commands.iterator();
     while (it.next()) |entry| {
         const cmd_doc = entry.value_ptr.*;
-        var cmd: schema.Command = try .parse(alloc, cmd_doc.write, cmd_doc.read, cmd_doc.description);
+        var command_context = context;
+        command_context.command_name = entry.key_ptr.*;
+        var cmd: schema.Command = try .parse(alloc, cmd_doc.write, cmd_doc.read, cmd_doc.description, diagnostics, command_context);
         cmd.args = cmd_doc.args;
         try commands.put(entry.key_ptr.*, cmd);
     }
@@ -167,10 +203,12 @@ fn parseTestYaml(allocator: std.mem.Allocator, content: []const u8) !Adapter {
     var adapter_arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer adapter_arena.deinit();
     const alloc = adapter_arena.allocator();
+    var diagnostics = diagnostic.Diagnostics.init(alloc, "<test>");
+    defer diagnostics.deinit();
 
     const parsed = try doc_parse.parseByFormat(AdapterDoc, .yaml, alloc, content);
 
-    return buildAdapter(&adapter_arena, parsed, try alloc.dupe(u8, "<test>"));
+    return buildAdapter(&adapter_arena, parsed, try alloc.dupe(u8, "<test>"), &diagnostics, .{ .adapter_name = "<test>" });
 }
 
 test "parse args string short form" {
