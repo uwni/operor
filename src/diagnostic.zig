@@ -53,6 +53,7 @@ pub const Message = union(enum) {
     missing_record_config,
     invalid_pipeline_config,
     nested_parallel_step,
+    duplicate_parallel_instrument: struct { instrument: []const u8 },
     adapter_not_found,
     instrument_not_found: struct { instrument: []const u8 },
     command_not_found: struct {
@@ -301,6 +302,7 @@ fn writeMessage(writer: *std.Io.Writer, item: Diagnostic) !void {
         .missing_record_config => try writer.writeAll("pipeline is missing required 'record' field"),
         .invalid_pipeline_config => try writer.writeAll("invalid pipeline configuration"),
         .nested_parallel_step => try writer.writeAll("parallel steps cannot be nested"),
+        .duplicate_parallel_instrument => |p| try writer.print("parallel steps cannot use instrument '{s}' more than once", .{p.instrument}),
         .adapter_not_found => try writer.writeAll("adapter not found"),
         .instrument_not_found => |p| try writer.print("instrument '{s}' is not declared in recipe", .{p.instrument}),
         .command_not_found => |p| try writer.print("command not found in adapter: '{s}.{s}'", .{ p.instrument, p.command }),

@@ -1027,12 +1027,44 @@ fn precompileParallelStep(
         task_idx,
         diag,
     );
+    try validateParallelUniqueInstruments(
+        arena_alloc,
+        inner_steps,
+        precompiled_instruments.count(),
+        step_context,
+        diag,
+    );
 
     const if_expr = try precompileIf(slot_map, diag, step_context, cfg.@"if");
     return .{
         .action = .{ .parallel = .{ .steps = inner_steps } },
         .@"if" = if_expr,
     };
+}
+
+fn validateParallelUniqueInstruments(
+    allocator: std.mem.Allocator,
+    steps: []const recipe_ir.Step,
+    instrument_count: usize,
+    context: DiagnosticContext,
+    diag: diagnostic.Reporter,
+) !void {
+    var seen = try std.DynamicBitSetUnmanaged.initEmpty(allocator, instrument_count);
+    defer seen.deinit(allocator);
+
+    for (steps) |*step| {
+        switch (step.action) {
+            .instrument_call => |ic| {
+                if (seen.isSet(ic.instrument_idx)) {
+                    var duplicate_context = context;
+                    duplicate_context.instrument_name = ic.instrument;
+                    return diag.withContext(duplicate_context).fail(null, .{ .duplicate_parallel_instrument = .{ .instrument = ic.instrument } });
+                }
+                seen.set(ic.instrument_idx);
+            },
+            else => {},
+        }
+    }
 }
 
 fn resolvePipelineConfig(
@@ -1847,6 +1879,57 @@ const vendor_psu_adapter =
     \\  set_voltage:
     \\    write: "VOLT {voltage},(@{channels})"
 ;
+
+test "precompile rejects duplicate instrument in parallel block" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/psu0.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  set_voltage:
+        \\    write: "VOLT {voltage}"
+        \\  output_on:
+        \\    write: "OUTP ON"
+    );
+    try workspace.writeFile("recipes/duplicate_parallel_instrument.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu0.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\vars: {}
+        \\tasks:
+        \\  - steps:
+        \\      - parallel:
+        \\          - call: d1.set_voltage
+        \\            args:
+        \\              voltage: 5
+        \\          - call: d1.output_on
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/duplicate_parallel_instrument.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
+    defer dir.close(std.testing.io);
+
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &out.writer) catch |err| {
+        try std.testing.expectEqual(error.AnalysisFail, err);
+        try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "parallel steps cannot use instrument 'd1' more than once"));
+        return;
+    };
+
+    return error.TestUnexpectedResult;
+}
 
 test "precompile stores only referenced commands" {
     const gpa = std.testing.allocator;

@@ -136,17 +136,6 @@ pub fn executeParallel(
     const steps = parallel.steps;
     if (steps.len == 0) return .{};
 
-    // --- Duplicate instrument check ---
-    for (steps, 0..) |*s, i| {
-        const idx_i = instrumentIdx(s) orelse continue;
-        for (steps[i + 1 ..]) |*t| {
-            const idx_j = instrumentIdx(t) orelse continue;
-            if (idx_i == idx_j) {
-                return error.DuplicateInstrumentInParallel;
-            }
-        }
-    }
-
     if (dry_run) {
         return executeSequential(allocator, parallel, instruments, ctx, dry_run, log_sink, scratch, float_precision);
     }
