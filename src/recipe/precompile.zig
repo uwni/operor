@@ -101,12 +101,10 @@ fn precompileInternal(
     var precompiled_instruments = try precompileInstruments(arena, recipe, loaded_adapters);
 
     // 3-5. Normalize tasks and steps, resolving commands and validating arguments.
-    var assign_set: std.StringArrayHashMapUnmanaged(void) = .empty;
-    defer assign_set.deinit(scratch_alloc);
-    const tasks = try precompileTasks(scratch_alloc, arena, recipe, &slot_map, loaded_adapters, &precompiled_instruments, &assign_set, reporter);
+    const tasks = try precompileTasks(scratch_alloc, arena, recipe, &slot_map, loaded_adapters, &precompiled_instruments, reporter);
 
     // 6. Validate and resolve pipeline record configuration.
-    const pipeline = try resolvePipelineConfig(scratch_alloc, arena, recipe, &slot_map, &assign_set, reporter);
+    const record_resolution = try resolvePipelineConfig(scratch_alloc, arena, recipe, &slot_map, reporter);
 
     // 7. Parse optional stop_when expression.
     var stop_when: ?expr.Expression = null;
@@ -122,14 +120,12 @@ fn precompileInternal(
 
     if (stop_when_failed) return error.AnalysisFail;
 
-    // 8. Assign save_column indices to steps that contribute to recorded frames.
-    assignSaveColumns(tasks, &slot_map, pipeline.record.?.explicit);
-
     return .{
         .arena = result_arena,
         .instruments = precompiled_instruments,
         .tasks = tasks,
-        .pipeline = pipeline,
+        .pipeline = record_resolution.pipeline,
+        .record_bindings = record_resolution.bindings,
         .stop_when = stop_when,
         .expected_iterations = recipe.expected_iterations,
         .float_precision = recipe.float_precision,
@@ -203,6 +199,11 @@ const SlotMap = struct {
     /// Returns only the var portion of initial_values (excluding consts).
     fn varInitialValues(self: *const SlotMap) []const recipe_ir.Value {
         return self.initial_values[self.const_count..];
+    }
+
+    /// Returns recipe var names in runtime slot order.
+    fn varNames(self: *const SlotMap) []const []const u8 {
+        return self.slots.keys()[self.const_count..];
     }
 
     /// Validate that `name` refers to a mutable var and return its remapped slot index.
@@ -772,7 +773,6 @@ fn precompileTasks(
     slot_map: *const SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
-    assign_set: *std.StringArrayHashMapUnmanaged(void),
     diag: diagnostic.Reporter,
 ) ![]recipe_ir.Task {
     var tasks: std.ArrayList(recipe_ir.Task) = .empty;
@@ -780,7 +780,7 @@ fn precompileTasks(
     var has_error = false;
 
     for (recipe.tasks, 0..) |*task_cfg, task_idx| {
-        const steps = precompileSteps(scratch_alloc, arena, task_cfg.steps, slot_map, loaded_adapters, precompiled_instruments, assign_set, task_idx, diag) catch |err| switch (err) {
+        const steps = precompileSteps(scratch_alloc, arena, task_cfg.steps, slot_map, loaded_adapters, precompiled_instruments, task_idx, diag) catch |err| switch (err) {
             error.AnalysisFail => {
                 has_error = true;
                 continue;
@@ -838,7 +838,6 @@ fn precompileSteps(
     slot_map: *const SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
-    assign_set: *std.StringArrayHashMapUnmanaged(void),
     task_idx: usize,
     diag: diagnostic.Reporter,
 ) ![]recipe_ir.Step {
@@ -849,10 +848,8 @@ fn precompileSteps(
     for (step_cfgs, 0..) |*step_cfg, step_idx| {
         const step = switch (step_cfg.*) {
             .compute => |*cfg| precompileComputeStep(
-                scratch_alloc,
                 arena,
                 slot_map,
-                assign_set,
                 cfg,
                 task_idx,
                 step_idx,
@@ -864,7 +861,6 @@ fn precompileSteps(
                 slot_map,
                 loaded_adapters,
                 precompiled_instruments,
-                assign_set,
                 cfg,
                 task_idx,
                 step_idx,
@@ -877,7 +873,6 @@ fn precompileSteps(
                 slot_map,
                 loaded_adapters,
                 precompiled_instruments,
-                assign_set,
                 cfg,
                 task_idx,
                 step_idx,
@@ -897,10 +892,8 @@ fn precompileSteps(
 }
 
 fn precompileComputeStep(
-    scratch_alloc: std.mem.Allocator,
     arena: std.mem.Allocator,
     slot_map: *const SlotMap,
-    assign_set: *std.StringArrayHashMapUnmanaged(void),
     cfg: *const config.ComputeStepConfig,
     task_idx: usize,
     step_idx: usize,
@@ -912,7 +905,6 @@ fn precompileComputeStep(
 
     const assign_context: DiagnosticContext = .{ .task_idx = task_idx, .step_idx = step_idx, .variable_name = cfg.assign };
     const save_slot = try slot_map.varSlotIndex(diag, assign_context, cfg.assign);
-    try assign_set.put(scratch_alloc, cfg.assign, {});
 
     const compute_expr = try slot_map.compileExpr(arena, diag, assign_context, cfg.compute, .expression);
 
@@ -931,7 +923,6 @@ fn precompileCallStep(
     slot_map: *const SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
-    assign_set: *std.StringArrayHashMapUnmanaged(void),
     cfg: *const config.CallStepConfig,
     task_idx: usize,
     step_idx: usize,
@@ -980,7 +971,6 @@ fn precompileCallStep(
         var assign_context = call_context;
         assign_context.variable_name = label;
         save_slot = try slot_map.varSlotIndex(diag, assign_context, label);
-        try assign_set.put(scratch_alloc, label, {});
     }
 
     return .{
@@ -1031,7 +1021,6 @@ fn precompileParallelStep(
     slot_map: *const SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
-    assign_set: *std.StringArrayHashMapUnmanaged(void),
     cfg: *const config.ParallelStepConfig,
     task_idx: usize,
     step_idx: usize,
@@ -1053,7 +1042,6 @@ fn precompileParallelStep(
         slot_map,
         loaded_adapters,
         precompiled_instruments,
-        assign_set,
         task_idx,
         diag,
     );
@@ -1097,15 +1085,20 @@ fn validateParallelUniqueInstruments(
     }
 }
 
+const RecordResolution = struct {
+    pipeline: recipe_ir.PipelineConfig,
+    bindings: []const expr.VariableBinding,
+};
+
 fn resolvePipelineConfig(
     scratch_alloc: std.mem.Allocator,
     arena: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
     slot_map: *const SlotMap,
-    assign_set: *const std.StringArrayHashMapUnmanaged(void),
     diag: diagnostic.Reporter,
-) !recipe_ir.PipelineConfig {
+) !RecordResolution {
     const empty_columns: []const []const u8 = &.{};
+    const empty_bindings: []const expr.VariableBinding = &.{};
     const pipeline_cfg = recipe.pipeline orelse {
         try diag.add(.fatal, null, .{ .missing_pipeline = {} });
         return error.AnalysisFail;
@@ -1117,19 +1110,21 @@ fn resolvePipelineConfig(
     }
 
     try validatePipelineConfig(&pipeline_cfg, diag);
-    var pipeline = try pipeline_cfg.clone(arena);
-    if (pipeline.record == null) {
-        pipeline.record = .{ .explicit = empty_columns };
-    }
+    var pipeline = try clonePipelineConfigWithoutRecord(arena, &pipeline_cfg);
+    var bindings: []const expr.VariableBinding = empty_bindings;
 
-    switch (pipeline.record.?) {
+    const record_cfg: recipe_ir.RecordConfig = pipeline_cfg.record orelse .{ .explicit = empty_columns };
+    switch (record_cfg) {
         .all => {
-            pipeline.record = .{ .explicit = try cloneStringList(arena, assign_set.keys()) };
+            const all = try resolveAllRecordSources(arena, slot_map);
+            pipeline.record = .{ .explicit = all.columns };
+            bindings = all.bindings;
         },
         .explicit => |columns| {
             var seen: std.StringArrayHashMapUnmanaged(void) = .empty;
             defer seen.deinit(scratch_alloc);
             var unique_columns: std.ArrayList([]const u8) = .empty;
+            var unique_bindings: std.ArrayList(expr.VariableBinding) = .empty;
 
             for (columns) |name| {
                 const column_context: DiagnosticContext = .{ .variable_name = name };
@@ -1140,24 +1135,84 @@ fn resolvePipelineConfig(
                 }
                 try seen.put(scratch_alloc, name, {});
 
-                var valid = true;
-                if (slot_map.resolveName(name) == null) {
-                    try column_reporter.add(.fatal, null, .{ .unknown_variable = .{ .variable = name } });
-                    valid = false;
-                    has_error = true;
-                }
-                if (!assign_set.contains(name)) {
-                    try column_reporter.add(.fatal, null, .{ .record_variable_not_found = .{ .variable = name } });
-                    valid = false;
-                    has_error = true;
-                }
-                if (valid) try unique_columns.append(arena, name);
+                const binding = resolveRecordSource(slot_map, column_reporter, name) catch |err| switch (err) {
+                    error.AnalysisFail => {
+                        has_error = true;
+                        continue;
+                    },
+                    else => return err,
+                };
+                try unique_columns.append(arena, try arena.dupe(u8, name));
+                try unique_bindings.append(arena, binding);
             }
             pipeline.record = .{ .explicit = try unique_columns.toOwnedSlice(arena) };
+            bindings = try unique_bindings.toOwnedSlice(arena);
         },
     }
     if (has_error) return error.AnalysisFail;
-    return pipeline;
+    return .{
+        .pipeline = pipeline,
+        .bindings = bindings,
+    };
+}
+
+const AllRecordSources = struct {
+    columns: []const []const u8,
+    bindings: []const expr.VariableBinding,
+};
+
+fn resolveAllRecordSources(arena: std.mem.Allocator, slot_map: *const SlotMap) !AllRecordSources {
+    const var_names = slot_map.varNames();
+    const total = var_names.len + expr.BuiltinVar.vars.len;
+    const columns = try arena.alloc([]const u8, total);
+    const bindings = try arena.alloc(expr.VariableBinding, total);
+
+    var out_idx: usize = 0;
+    for (var_names, 0..) |name, slot| {
+        columns[out_idx] = try arena.dupe(u8, name);
+        bindings[out_idx] = .{ .slot = slot };
+        out_idx += 1;
+    }
+    inline for (expr.BuiltinVar.vars) |builtin| {
+        columns[out_idx] = try arena.dupe(u8, builtin.name());
+        bindings[out_idx] = .{ .builtin = builtin };
+        out_idx += 1;
+    }
+
+    return .{
+        .columns = columns,
+        .bindings = bindings,
+    };
+}
+
+fn resolveRecordSource(
+    slot_map: *const SlotMap,
+    diag: diagnostic.Reporter,
+    name: []const u8,
+) diagnostic.Error!expr.VariableBinding {
+    const resolved = slot_map.resolveName(name) orelse {
+        try diag.add(.fatal, null, .{ .unknown_variable = .{ .variable = name } });
+        return error.AnalysisFail;
+    };
+    return switch (resolved) {
+        .binding => |binding| binding,
+        .const_value => {
+            try diag.add(.fatal, null, .{ .record_const_not_recordable = .{ .variable = name } });
+            return error.AnalysisFail;
+        },
+    };
+}
+
+fn clonePipelineConfigWithoutRecord(arena: std.mem.Allocator, cfg: *const recipe_ir.PipelineConfig) !recipe_ir.PipelineConfig {
+    return .{
+        .buffer_size = cfg.buffer_size,
+        .warn_usage_percent = cfg.warn_usage_percent,
+        .mode = cfg.mode,
+        .file_path = if (cfg.file_path) |path| try arena.dupe(u8, path) else null,
+        .network_host = if (cfg.network_host) |host| try arena.dupe(u8, host) else null,
+        .network_port = cfg.network_port,
+        .record = null,
+    };
 }
 
 fn validatePipelineConfig(cfg: *const recipe_ir.PipelineConfig, diag: diagnostic.Reporter) !void {
@@ -1180,40 +1235,6 @@ fn validatePipelineConfig(cfg: *const recipe_ir.PipelineConfig, diag: diagnostic
     return error.AnalysisFail;
 }
 
-fn assignSaveColumns(tasks: []recipe_ir.Task, slot_map: *const SlotMap, columns: []const []const u8) void {
-    const var_keys = slot_map.slots.keys()[slot_map.const_count..];
-    for (tasks) |*task| {
-        for (task.steps()) |*step| {
-            assignStepSaveColumn(step, var_keys, columns);
-        }
-    }
-}
-
-fn assignStepSaveColumn(step: *recipe_ir.Step, var_keys: []const []const u8, columns: []const []const u8) void {
-    switch (step.action) {
-        .instrument_call => |*ic| {
-            ic.save_column = if (ic.save_slot) |slot| slotToColumn(var_keys, slot, columns) else null;
-        },
-        .compute => |*comp| {
-            comp.save_column = slotToColumn(var_keys, comp.save_slot, columns);
-        },
-        .sleep => {},
-        .parallel => |par| {
-            for (par.steps) |*inner| {
-                assignStepSaveColumn(inner, var_keys, columns);
-            }
-        },
-    }
-}
-
-fn slotToColumn(var_keys: []const []const u8, save_slot: usize, columns: []const []const u8) ?usize {
-    const name = var_keys[save_slot];
-    for (columns, 0..) |col_name, col_idx| {
-        if (std.mem.eql(u8, col_name, name)) return col_idx;
-    }
-    return null;
-}
-
 fn cloneOptionalBytes(arena: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     if (bytes.len == 0) return "";
     return arena.dupe(u8, bytes);
@@ -1228,14 +1249,6 @@ fn cloneBoolTextMap(
         .true_text = try arena.dupe(u8, src.true),
         .false_text = try arena.dupe(u8, src.false),
     };
-}
-
-fn cloneStringList(arena: std.mem.Allocator, source: []const []const u8) ![]const []const u8 {
-    const out = try arena.alloc([]const u8, source.len);
-    for (source, 0..) |item, idx| {
-        out[idx] = try arena.dupe(u8, item);
-    }
-    return out;
 }
 
 fn getOrParseAdapter(
@@ -2491,10 +2504,12 @@ test "precompile compute step" {
     // Second step: compute
     switch (compiled.tasks[0].steps()[1].action) {
         .compute => |comp| {
-            try std.testing.expect(comp.save_column != null);
+            try std.testing.expectEqual(@as(usize, 1), comp.save_slot);
         },
         else => return error.TestUnexpectedResult,
     }
+    try std.testing.expectEqual(@as(usize, 5), compiled.record_bindings.len);
+    try std.testing.expectEqual(expr.VariableBinding{ .slot = 1 }, compiled.record_bindings[1]);
 }
 
 test "precompile compute step rejects missing assign" {
@@ -2596,7 +2611,7 @@ test "precompile rejects invalid step (neither call nor compute)" {
     try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
 }
 
-test "precompile rejects record with unknown assign variable" {
+test "precompile accepts record with declared unassigned variable" {
     const gpa = std.testing.allocator;
 
     var workspace: testing.TestWorkspace = .init(gpa);
@@ -2630,7 +2645,59 @@ test "precompile rejects record with unknown assign variable" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    var compiled = try precompilePath(gpa, std.testing.io, recipe_path, dir, null);
+    defer compiled.deinit();
+
+    switch (compiled.pipeline.record.?) {
+        .explicit => |columns| {
+            try std.testing.expectEqual(@as(usize, 2), columns.len);
+            try std.testing.expectEqualStrings("voltage", columns[0]);
+            try std.testing.expectEqualStrings("nonexistent", columns[1]);
+        },
+        .all => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 2), compiled.record_bindings.len);
+    try std.testing.expectEqual(expr.VariableBinding{ .slot = 0 }, compiled.record_bindings[0]);
+    try std.testing.expectEqual(expr.VariableBinding{ .slot = 1 }, compiled.record_bindings[1]);
+}
+
+test "precompile rejects record column referencing const" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.makePath("adapters");
+    try workspace.writeFile("recipes/record_const.yaml",
+        \\instruments: {}
+        \\pipeline:
+        \\  record: [limit]
+        \\consts:
+        \\  limit: 10
+        \\tasks:
+        \\  - steps: []
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/record_const.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
+    defer dir.close(std.testing.io);
+
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &out.writer) catch |err| {
+        try std.testing.expectEqual(error.AnalysisFail, err);
+        try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "pipeline record references const 'limit'"));
+        try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "consts are compile-time values and cannot be recorded"));
+        try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "Declare it in 'vars'"));
+        return;
+    };
+
+    return error.TestUnexpectedResult;
 }
 
 test "precompile accepts valid record subset" {
@@ -2806,12 +2873,21 @@ test "precompile expands record all into explicit assign list" {
     const record = compiled.pipeline.record orelse return error.TestUnexpectedResult;
     switch (record) {
         .explicit => |columns| {
-            try std.testing.expectEqual(@as(usize, 2), columns.len);
+            try std.testing.expectEqual(@as(usize, 5), columns.len);
             try std.testing.expectEqualStrings("voltage", columns[0]);
             try std.testing.expectEqualStrings("doubled", columns[1]);
+            try std.testing.expectEqualStrings("$ITER", columns[2]);
+            try std.testing.expectEqualStrings("$TASK_IDX", columns[3]);
+            try std.testing.expectEqualStrings("$ELAPSED_MS", columns[4]);
         },
         .all => return error.TestUnexpectedResult,
     }
+    try std.testing.expectEqual(@as(usize, 5), compiled.record_bindings.len);
+    try std.testing.expectEqual(expr.VariableBinding{ .slot = 0 }, compiled.record_bindings[0]);
+    try std.testing.expectEqual(expr.VariableBinding{ .slot = 1 }, compiled.record_bindings[1]);
+    try std.testing.expectEqual(expr.VariableBinding{ .builtin = .iter }, compiled.record_bindings[2]);
+    try std.testing.expectEqual(expr.VariableBinding{ .builtin = .task_idx }, compiled.record_bindings[3]);
+    try std.testing.expectEqual(expr.VariableBinding{ .builtin = .elapsed_ms }, compiled.record_bindings[4]);
 }
 
 test "precompile rejects undeclared variable use" {

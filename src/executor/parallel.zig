@@ -4,7 +4,6 @@ const session = @import("session.zig");
 const step_mod = @import("step.zig");
 const visa = @import("../visa/root.zig");
 
-const SavedValue = step_mod.SavedValue;
 const ns_per_ms: i96 = 1_000_000;
 
 const Completion = struct {
@@ -93,8 +92,6 @@ const SessionState = struct {
     read_accum: std.ArrayList(u8) = .empty,
     /// Timestamp (ns) when a time-based wait started (sleep or query delay).
     wait_start_ns: i96 = 0,
-    /// Saved value produced by this step (if any).
-    result: ?SavedValue = null,
     /// Rendered command bytes kept alive until write completes.
     rendered_command: ?[]u8 = null,
 };
@@ -132,12 +129,12 @@ pub fn executeParallel(
     log_sink: session.LogSink,
     scratch: *step_mod.StepScratch,
     float_precision: ?u8,
-) !step_mod.SavedValues {
+) !void {
     const steps = parallel.steps;
-    if (steps.len == 0) return .{};
+    if (steps.len == 0) return;
 
     if (dry_run) {
-        return executeSequential(allocator, parallel, instruments, ctx, dry_run, log_sink, scratch, float_precision);
+        return try executeSequential(allocator, parallel, instruments, ctx, dry_run, log_sink, scratch, float_precision);
     }
 
     // --- Initialize session states ---
@@ -164,7 +161,6 @@ pub fn executeParallel(
             if (st.read_chunk_buf) |buf| allocator.free(buf);
             st.read_accum.deinit(allocator);
             if (st.rendered_command) |cmd| allocator.free(cmd);
-            if (st.result) |saved| allocator.free(saved.value_owned);
         }
         allocator.free(states);
     }
@@ -182,7 +178,7 @@ pub fn executeParallel(
         switch (s.action) {
             .compute => {
                 const comp = &s.action.compute;
-                states[i].result = try step_mod.executeCompute(allocator, comp, ctx);
+                try step_mod.executeCompute(allocator, comp, ctx);
             },
             .sleep => {
                 states[i].phase = .sleep_waiting;
@@ -260,17 +256,6 @@ pub fn executeParallel(
 
         try waitForProgress(ctx, &wake_event, computeWaitPlan(states, instruments, ctx));
     }
-
-    // --- Collect saved values from all inner steps ---
-    var saved_values: step_mod.SavedValues = .{};
-    errdefer saved_values.deinit(allocator);
-    for (states) |*st| {
-        if (st.result) |res| {
-            try saved_values.items.append(allocator, res);
-            st.result = null;
-        }
-    }
-    return saved_values;
 }
 
 fn computeWaitPlan(
@@ -378,7 +363,7 @@ fn advanceState(
             }
 
             // Read complete (VI_SUCCESS, VI_SUCCESS_TERM_CHAR, or error).
-            try processReadResult(st, allocator, ic, instr, ctx);
+            try processReadResult(st, ic, instr, ctx);
             st.phase = .done;
         },
         .sleep_waiting => {
@@ -416,7 +401,6 @@ fn cancelActiveJobs(states: []SessionState, instruments: []session.InstrumentRun
 /// Parses the accumulated read data and stores the result in the session state.
 fn processReadResult(
     st: *SessionState,
-    allocator: std.mem.Allocator,
     ic: *const recipe_mod.Step.InstrumentCall,
     instr: *const visa.Instrument,
     ctx: *session.Context,
@@ -427,7 +411,7 @@ fn processReadResult(
         st.read_accum.items.len -= term.len;
     }
 
-    st.result = try step_mod.storeInstrumentResponse(allocator, ic, ctx, st.read_accum.items);
+    try step_mod.storeInstrumentResponse(ic, ctx, st.read_accum.items);
 }
 
 /// Executes inner steps sequentially; used for dry-run.
@@ -440,21 +424,14 @@ fn executeSequential(
     log_sink: session.LogSink,
     scratch: *step_mod.StepScratch,
     float_precision: ?u8,
-) anyerror!step_mod.SavedValues {
-    var saved_values: step_mod.SavedValues = .{};
-    errdefer saved_values.deinit(allocator);
+) anyerror!void {
     for (parallel.steps) |*s| {
         const instrument: ?*session.InstrumentRuntime = switch (s.action) {
             .instrument_call => |ic| &instruments[ic.instrument_idx],
             .compute, .sleep, .parallel => null,
         };
-        var result = try step_mod.executeStep(allocator, instrument, s, ctx, dry_run, log_sink, scratch, instruments, float_precision);
-        errdefer result.deinit(allocator);
-        try saved_values.items.appendSlice(allocator, result.items.items);
-        result.items.clearRetainingCapacity();
-        result.deinit(allocator);
+        try step_mod.executeStep(allocator, instrument, s, ctx, dry_run, log_sink, scratch, instruments, float_precision);
     }
-    return saved_values;
 }
 
 /// Extracts the instrument index from a step, if it's an instrument call.

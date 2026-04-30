@@ -3,6 +3,7 @@ const recipe_mod = @import("../recipe/root.zig");
 const session = @import("session.zig");
 const pipeline_mod = @import("pipeline/root.zig");
 const step_mod = @import("step.zig");
+const expr = @import("../expr.zig");
 
 var stop_requested: std.atomic.Value(bool) = .init(false);
 
@@ -47,24 +48,19 @@ pub fn runTasks(
     var scratch: step_mod.StepScratch = .init(allocator);
     defer scratch.deinit();
 
-    const column_count = if (compiled_recipe.pipeline.record) |rec| switch (rec) {
-        .explicit => |cols| cols.len,
-        .all => 0,
-    } else 0;
-
     for (compiled_recipe.tasks, 0..) |*task, task_idx| {
         if (stop_requested.load(.seq_cst)) break;
         if (try shouldStop(compiled_recipe, ctx, allocator)) break;
 
         switch (task.*) {
             .sequential => {
-                try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, &scratch, column_count);
+                try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, &scratch);
                 ctx.iteration += 1;
             },
             .conditional => |cond| {
                 const is_true = try cond.@"if".isTruthy(ctx.varResolver(), allocator);
                 if (is_true) {
-                    try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, &scratch, column_count);
+                    try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, &scratch);
                     ctx.iteration += 1;
                 }
             },
@@ -76,7 +72,7 @@ pub fn runTasks(
                     const is_true = try loop_task.condition.isTruthy(ctx.varResolver(), allocator);
                     if (!is_true) break;
 
-                    try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, &scratch, column_count);
+                    try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, &scratch);
                     ctx.iteration += 1;
                 }
             },
@@ -94,11 +90,8 @@ fn runTask(
     pipeline_runtime: *pipeline_mod.Runtime,
     dry_run: bool,
     scratch: *step_mod.StepScratch,
-    column_count: usize,
 ) !void {
     const task = compiled_recipe.tasks[task_idx];
-    var frame_builder: TaskFrameBuilder = try .init(allocator, column_count);
-    defer frame_builder.deinit();
 
     ctx.task_idx = task_idx;
 
@@ -108,7 +101,7 @@ fn runTask(
             .compute, .sleep, .parallel => null,
         };
         var async_log = pipeline_runtime.asyncLog();
-        var saved_values = try step_mod.executeStep(
+        try step_mod.executeStep(
             allocator,
             instrument,
             step,
@@ -119,14 +112,9 @@ fn runTask(
             instruments,
             compiled_recipe.float_precision,
         );
-        defer saved_values.deinit(allocator);
-        for (saved_values.items.items) |captured| {
-            frame_builder.captureOwned(captured.column, captured.value_owned);
-        }
-        saved_values.items.clearRetainingCapacity();
     }
 
-    if (frame_builder.finish()) |frame| {
+    if (try captureRecordFrame(allocator, compiled_recipe.record_bindings, ctx)) |frame| {
         var owned_frame = frame;
         if (!pipeline_runtime.publish(&owned_frame)) {
             stop_requested.store(true, .seq_cst);
@@ -136,92 +124,67 @@ fn runTask(
     }
 }
 
-const TaskFrameBuilder = struct {
+fn captureRecordFrame(
     allocator: std.mem.Allocator,
-    values: []?[]u8,
-    has_values: bool = false,
+    bindings: []const expr.VariableBinding,
+    ctx: *const session.Context,
+) !?pipeline_mod.Frame {
+    if (bindings.len == 0) return null;
 
-    fn init(allocator: std.mem.Allocator, column_count: usize) !TaskFrameBuilder {
-        const values = try allocator.alloc(?[]u8, column_count);
-        @memset(values, null);
-        return .{
-            .allocator = allocator,
-            .values = values,
-        };
+    const values = try allocator.alloc(?[]u8, bindings.len);
+    @memset(values, null);
+    errdefer {
+        for (values) |value| if (value) |owned| allocator.free(owned);
+        allocator.free(values);
     }
 
-    fn deinit(self: *TaskFrameBuilder) void {
-        for (self.values) |v| if (v) |owned| self.allocator.free(owned);
-        if (self.values.len > 0) self.allocator.free(self.values);
+    for (bindings, 0..) |binding, idx| {
+        values[idx] = try formatValueOwned(allocator, ctx.resolveBinding(binding));
     }
 
-    fn captureOwned(self: *TaskFrameBuilder, column: usize, value_owned: []u8) void {
-        if (self.values[column]) |old| self.allocator.free(old);
-        self.values[column] = value_owned;
-        self.has_values = true;
-    }
-
-    fn finish(self: *TaskFrameBuilder) ?pipeline_mod.Frame {
-        if (!self.has_values) return null;
-
-        const frame_values = self.values;
-        // Ownership of the values slice transfers to the returned Frame.
-        // Set to empty literal; deinit() skips freeing zero-length slices.
-        self.values = &.{};
-        self.has_values = false;
-
-        return .{
-            .values = frame_values,
-        };
-    }
-};
-
-test "task frame builder groups multiple saved values into one frame" {
-    var builder: TaskFrameBuilder = try .init(std.testing.allocator, 2);
-    defer builder.deinit();
-
-    builder.captureOwned(0, try std.testing.allocator.dupe(u8, "1.23"));
-    builder.captureOwned(1, try std.testing.allocator.dupe(u8, "0.45"));
-
-    var frame = builder.finish().?;
-    defer frame.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 2), frame.fieldCount());
-    try std.testing.expectEqualStrings("1.23", frame.getColumn(0).?);
-    try std.testing.expectEqualStrings("0.45", frame.getColumn(1).?);
+    return .{ .values = values };
 }
 
-test "task frame builder keeps the latest value for duplicate columns" {
-    var builder: TaskFrameBuilder = try .init(std.testing.allocator, 1);
-    defer builder.deinit();
+fn formatValueOwned(allocator: std.mem.Allocator, value: session.Value) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
 
-    builder.captureOwned(0, try std.testing.allocator.dupe(u8, "1.23"));
-    builder.captureOwned(0, try std.testing.allocator.dupe(u8, "1.24"));
-
-    var frame = builder.finish().?;
-    defer frame.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), frame.fieldCount());
-    try std.testing.expectEqualStrings("1.24", frame.getColumn(0).?);
+    value.format(&out.writer) catch return error.OutOfMemory;
+    return out.toOwnedSlice() catch error.OutOfMemory;
 }
 
-test "task frame builder captures saved value by ownership transfer" {
+test "record frame samples bindings in column order" {
     const gpa = std.testing.allocator;
-
-    var builder: TaskFrameBuilder = try .init(gpa, 1);
-    defer builder.deinit();
-
-    const saved = step_mod.SavedValue{
-        .column = 0,
-        .value_owned = try gpa.dupe(u8, "1.23"),
+    const initial_values = [_]session.Value{
+        .{ .int = 7 },
+        .{ .bool = true },
     };
-    builder.captureOwned(saved.column, saved.value_owned);
+    var ctx: session.Context = try .init(gpa, std.testing.io, &initial_values);
+    defer ctx.deinit();
+    ctx.iteration = 3;
+    ctx.task_idx = 2;
 
-    var frame = builder.finish().?;
+    const bindings = [_]expr.VariableBinding{
+        .{ .slot = 0 },
+        .{ .builtin = .iter },
+        .{ .slot = 1 },
+        .{ .builtin = .task_idx },
+    };
+    var frame = (try captureRecordFrame(gpa, &bindings, &ctx)).?;
     defer frame.deinit(gpa);
 
-    try std.testing.expectEqual(@as(usize, 1), frame.fieldCount());
-    try std.testing.expectEqualStrings("1.23", frame.getColumn(0).?);
+    try std.testing.expectEqual(@as(usize, 4), frame.fieldCount());
+    try std.testing.expectEqualStrings("7", frame.getColumn(0).?);
+    try std.testing.expectEqualStrings("3", frame.getColumn(1).?);
+    try std.testing.expectEqualStrings("true", frame.getColumn(2).?);
+    try std.testing.expectEqualStrings("2", frame.getColumn(3).?);
+}
+
+test "record frame is omitted when no columns are configured" {
+    var ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{});
+    defer ctx.deinit();
+
+    try std.testing.expect(try captureRecordFrame(std.testing.allocator, &.{}, &ctx) == null);
 }
 
 pub const SamplerState = struct {

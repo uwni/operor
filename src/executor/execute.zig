@@ -231,7 +231,11 @@ test "executor pipeline creates csv frame sink during dry run" {
     const file_data = try workspace.readFileAlloc(gpa, "recipes/samples.csv", 8 * 1024);
     defer gpa.free(file_data);
 
-    try std.testing.expectEqualStrings("\n", file_data);
+    try std.testing.expectEqualStrings(
+        "\"$ITER\",\"$TASK_IDX\",\"$ELAPSED_MS\"\n" ++
+            "\"0\",\"0\",\"0\"\n",
+        file_data,
+    );
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "[SUMMARY]"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "buffer capacity: 64"));
 }

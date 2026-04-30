@@ -259,8 +259,6 @@ pub const Step = struct {
         args: []const StepArg,
         /// Optional slot that receives the parsed response value.
         save_slot: ?usize = null,
-        /// Optional column index into the pipeline record for frame persistence.
-        save_column: ?usize = null,
     };
 
     pub const Compute = struct {
@@ -268,8 +266,6 @@ pub const Step = struct {
         expression: expr.Expression,
         /// Slot that receives the computed result.
         save_slot: usize,
-        /// Optional column index into the pipeline record for frame persistence.
-        save_column: ?usize = null,
     };
 
     pub const Sleep = struct {
@@ -344,8 +340,8 @@ pub const PipelineConfig = struct {
     network_host: ?[]const u8 = null,
     /// Optional TCP sink port written by the consumer thread.
     network_port: ?u16 = null,
-    /// Declares which `assign` variables to record as frame columns.
-    /// Use `"all"` to record every `assign` variable, or list names explicitly.
+    /// Declares which runtime variables to record as frame columns.
+    /// Use `"all"` to record every recipe var plus built-ins, or list names explicitly.
     record: ?RecordConfig = null,
 
     pub fn clone(
@@ -377,11 +373,11 @@ pub const PipelineConfig = struct {
 
 const serde_lib = @import("serde");
 
-/// Controls which `assign` variables are persisted by pipeline sinks.
+/// Controls which runtime variables are persisted by pipeline sinks.
 pub const RecordConfig = union(enum) {
-    /// Record every `assign` variable.
+    /// Record every recipe var and built-in variable.
     all: []const u8,
-    /// Record only the listed variable names.
+    /// Record only the listed recipe var or built-in names.
     explicit: []const []const u8,
 
     pub const serde = .{
@@ -396,6 +392,9 @@ pub const PrecompiledRecipe = struct {
     instruments: std.StringArrayHashMapUnmanaged(PrecompiledInstrument),
     tasks: []Task,
     pipeline: PipelineConfig,
+    /// Runtime variable sources for pipeline columns, aligned with `pipeline.record.explicit`.
+    /// `.slot` values are Context slot indices, not record column indices.
+    record_bindings: []const expr.VariableBinding,
     /// Optional stop condition expression; scheduler stops when this evaluates to truthy.
     stop_when: ?expr.Expression,
     /// Estimated total number of task iterations across all tasks.

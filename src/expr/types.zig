@@ -163,6 +163,16 @@ pub const BuiltinVar = enum {
     iter,
     task_idx,
     elapsed_ms,
+
+    pub const vars = std.enums.values(BuiltinVar);
+
+    pub fn name(self: BuiltinVar) []const u8 {
+        return switch (self) {
+            .iter => "$ITER",
+            .task_idx => "$TASK_IDX",
+            .elapsed_ms => "$ELAPSED_MS",
+        };
+    }
 };
 
 pub const VariableBinding = union(enum) {
@@ -244,8 +254,8 @@ pub const VarResolver = struct {
 };
 
 pub fn resolveBuiltin(name: []const u8) ?VariableBinding {
-    if (std.mem.eql(u8, name, "$ITER")) return .{ .builtin = .iter };
-    if (std.mem.eql(u8, name, "$TASK_IDX")) return .{ .builtin = .task_idx };
-    if (std.mem.eql(u8, name, "$ELAPSED_MS")) return .{ .builtin = .elapsed_ms };
+    inline for (BuiltinVar.vars) |builtin| {
+        if (std.mem.eql(u8, name, builtin.name())) return .{ .builtin = builtin };
+    }
     return null;
 }

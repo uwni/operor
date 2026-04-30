@@ -18,20 +18,6 @@ pub const ParsedValue = union(instrument_types.Encoding) {
     bool: bool,
 };
 
-pub const SavedValue = struct {
-    column: usize,
-    value_owned: []u8,
-};
-
-pub const SavedValues = struct {
-    items: std.ArrayList(SavedValue) = .empty,
-
-    pub fn deinit(self: *SavedValues, allocator: std.mem.Allocator) void {
-        for (self.items.items) |saved| allocator.free(saved.value_owned);
-        self.items.deinit(allocator);
-    }
-};
-
 /// Reusable scratch space for step argument resolution, avoiding per-step HashMap allocation.
 pub const StepScratch = struct {
     temp_arena: std.heap.ArenaAllocator,
@@ -68,32 +54,21 @@ pub fn executeStep(
     scratch: *StepScratch,
     instruments: []session.InstrumentRuntime,
     float_precision: ?u8,
-) !SavedValues {
+) !void {
     // Evaluate optional `if` guard.
     if (step.@"if") |*if_expr| {
         const is_true = try if_expr.isTruthy(ctx.varResolver(), allocator);
-        if (!is_true) return .{};
+        if (!is_true) return;
     }
 
-    return switch (step.action) {
-        .instrument_call => |ic| try savedValuesFromOptional(
-            allocator,
-            try executeInstrumentCall(allocator, instrument.?, &ic, ctx, dry_run, log_sink, scratch, float_precision),
-        ),
-        .compute => |comp| try savedValuesFromOptional(allocator, try executeCompute(allocator, &comp, ctx)),
+    switch (step.action) {
+        .instrument_call => |ic| try executeInstrumentCall(allocator, instrument.?, &ic, ctx, dry_run, log_sink, scratch, float_precision),
+        .compute => |comp| try executeCompute(allocator, &comp, ctx),
         .sleep => |s| {
             try ctx.io.sleep(.fromNanoseconds(@as(i96, s.duration_ms) * 1_000_000), .awake);
-            return .{};
         },
-        .parallel => |p| parallel_mod.executeParallel(allocator, &p, instruments, ctx, dry_run, log_sink, scratch, float_precision),
-    };
-}
-
-fn savedValuesFromOptional(allocator: std.mem.Allocator, value: ?SavedValue) !SavedValues {
-    var values: SavedValues = .{};
-    errdefer values.deinit(allocator);
-    if (value) |saved| try values.items.append(allocator, saved);
-    return values;
+        .parallel => |p| try parallel_mod.executeParallel(allocator, &p, instruments, ctx, dry_run, log_sink, scratch, float_precision),
+    }
 }
 
 /// Evaluates a local compute expression and stores the result in the context.
@@ -101,7 +76,7 @@ pub fn executeCompute(
     allocator: std.mem.Allocator,
     comp: *const recipe_mod.Step.Compute,
     ctx: *session.Context,
-) !?SavedValue {
+) !void {
     var eval_res = try comp.expression.eval(ctx.varResolver(), allocator);
     defer eval_res.deinit();
     const result = eval_res.value;
@@ -113,7 +88,6 @@ pub fn executeCompute(
         .string => |s| .{ .string = s },
     };
     try ctx.setSlot(comp.save_slot, value);
-    return try saveColumnValue(allocator, comp.save_column, value);
 }
 
 pub fn renderInstrumentCall(
@@ -141,18 +115,16 @@ pub fn renderInstrumentCall(
 }
 
 pub fn storeInstrumentResponse(
-    allocator: std.mem.Allocator,
     step: *const recipe_mod.Step.InstrumentCall,
     ctx: *session.Context,
     resp: []const u8,
-) !?SavedValue {
-    const slot = step.save_slot orelse return null;
-    const encoding = step.command.response orelse return null;
+) !void {
+    const slot = step.save_slot orelse return;
+    const encoding = step.command.response orelse return;
 
     const stored = try parseResponse(encoding, resp, step.command.instrument.bool_map);
     const value = parsedValueToSessionValue(stored);
     try ctx.setSlot(slot, value);
-    return try saveColumnValue(allocator, step.save_column, value);
 }
 
 /// Sends an instrument command and optionally saves the parsed response.
@@ -165,25 +137,24 @@ fn executeInstrumentCall(
     log_sink: session.LogSink,
     scratch: *StepScratch,
     float_precision: ?u8,
-) !?SavedValue {
+) !void {
     var render_stack_buf: [command_stack_bytes]u8 = undefined;
     var rendered = try renderInstrumentCall(allocator, step, ctx, scratch, render_stack_buf[0..], float_precision);
     defer rendered.deinit(allocator);
 
     if (dry_run) {
         logDryRun(log_sink, step.command.instrument.adapter_name, rendered.bytes);
-        return null;
+        return;
     }
 
     const instr = &(instrument.handle orelse unreachable);
     if (step.command.response != null) {
         const resp = try instr.queryToOwned(allocator, rendered.bytes);
         defer allocator.free(resp);
-        return try storeInstrumentResponse(allocator, step, ctx, resp);
+        return try storeInstrumentResponse(step, ctx, resp);
     }
 
     try instr.write(rendered.bytes);
-    return null;
 }
 
 /// Convert the raw response byte string into a ParsedValue according to the specified encoding.
@@ -220,18 +191,6 @@ fn parsedValueToSessionValue(stored: ParsedValue) session.Value {
         .int => |v| .{ .int = v },
         .float => |v| .{ .float = v },
         .bool => |v| .{ .bool = v },
-    };
-}
-
-fn saveColumnValue(
-    allocator: std.mem.Allocator,
-    save_column: ?usize,
-    value: session.Value,
-) !?SavedValue {
-    const column = save_column orelse return null;
-    return .{
-        .column = column,
-        .value_owned = try std.fmt.allocPrint(allocator, "{f}", .{value}),
     };
 }
 
