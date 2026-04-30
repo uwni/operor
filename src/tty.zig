@@ -16,6 +16,7 @@ pub const Attr = enum {
     white,
     // styles
     bold,
+    underline,
 
     fn code(comptime self: Attr) []const u8 {
         return switch (self) {
@@ -27,20 +28,72 @@ pub const Attr = enum {
             .aqua => "\x1b[38;5;14m",
             .white => "\x1b[38;5;15m",
             .bold => "\x1b[1m",
+            .underline => "\x1b[4m",
         };
     }
 };
 
+pub const reset = "\x1b[0m";
+
+pub fn attrPrefix(comptime attrs: anytype) []const u8 {
+    var codes: []const u8 = "";
+    for (@typeInfo(@TypeOf(attrs)).@"struct".fields) |f| {
+        codes = codes ++ @as(Attr, @field(attrs, f.name)).code();
+    }
+    return codes;
+}
+
 /// Wrap comptime text with ANSI attributes and a reset suffix.
 /// Example: `styledText("[OK]", .{.green})` or `styledText("{s}", .{.green, .bold})`
-pub inline fn styledText(comptime text: []const u8, comptime attrs: anytype) []const u8 {
-    comptime {
-        var codes: []const u8 = "";
-        for (@typeInfo(@TypeOf(attrs)).@"struct".fields) |f| {
-            codes = codes ++ @as(Attr, @field(attrs, f.name)).code();
+pub fn styledText(comptime text: []const u8, comptime attrs: anytype) []const u8 {
+    return comptime attrPrefix(attrs) ++ text ++ reset;
+}
+
+/// Wrap each real std.fmt placeholder in ANSI attributes at comptime.
+/// Escaped braces (`{{` and `}}`) remain escaped for std.fmt to unescape.
+pub fn styledPlaceholders(comptime fmt: []const u8, comptime attrs: anytype) []const u8 {
+    const prefix = comptime attrPrefix(attrs);
+    var out: []const u8 = "";
+    var i: usize = 0;
+
+    @setEvalBranchQuota(@as(comptime_int, fmt.len) * 1000);
+    while (true) {
+        const literal_start = i;
+        while (i < fmt.len) : (i += 1) {
+            switch (fmt[i]) {
+                '{', '}' => break,
+                else => {},
+            }
         }
-        return codes ++ text ++ "\x1b[0m";
+
+        out = out ++ fmt[literal_start..i];
+        if (i >= fmt.len) break;
+
+        const brace = fmt[i];
+        if (i + 1 < fmt.len and fmt[i + 1] == brace) {
+            out = out ++ fmt[i .. i + 2];
+            i += 2;
+            continue;
+        }
+
+        if (brace == '}') {
+            @compileError("missing opening {");
+        }
+
+        i += 1;
+        const placeholder_start = i;
+        while (i < fmt.len and fmt[i] != '}') : (i += 1) {}
+        if (i >= fmt.len) {
+            @compileError("missing closing }");
+        }
+
+        const placeholder = fmt[placeholder_start..i].*;
+        _ = std.fmt.Placeholder.parse(&placeholder);
+        out = out ++ prefix ++ "{" ++ fmt[placeholder_start..i] ++ "}" ++ reset;
+        i += 1;
     }
+
+    return out;
 }
 
 /// Standard styled prefix for error messages, usable by any diagnostic.

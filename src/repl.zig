@@ -77,7 +77,7 @@ pub fn run(
 
     if (resource_addr) |addr| {
         const name = try ctx.openConnection(addr, null);
-        try out.print(tty.styledText("Connected to {s} ({s})", .{.green}) ++ "\n", .{ addr, name });
+        try out.print(comptime tty.styledText("Connected to {s} ({s})", .{.green}) ++ "\n", .{ addr, name });
     }
 
     try printHelp(out, ctx.state());
@@ -559,7 +559,7 @@ fn runLoop(
 
 fn buildPrompt(ctx: anytype, buf: []u8) []const u8 {
     if (ctx.selectedName()) |name| {
-        return std.fmt.bufPrint(buf, tty.styledText("repl[{s}]> ", .{.aqua}), .{
+        return std.fmt.bufPrint(buf, comptime tty.styledText("repl[{s}]> ", .{.aqua}), .{
             name,
         }) catch repl_prompt;
     }
@@ -612,7 +612,7 @@ fn handleOpen(
             return;
         }
         const name = try ctx.openConnection(addr, args.name);
-        try out.print(tty.styledText("Connected to {s} ({s})", .{.green}) ++ "\n", .{ addr, name });
+        try out.print(comptime tty.styledText("Connected to {s} ({s})", .{.green}) ++ "\n", .{ addr, name });
         return;
     }
     // Interactive mode: scan and prompt for index.
@@ -654,7 +654,7 @@ fn handleOpen(
         return;
     };
     const name = try ctx.openConnection(target_addr, args.name);
-    try out.print(tty.styledText("Connected to {s} ({s})", .{.green}) ++ "\n", .{ target_addr, name });
+    try out.print(comptime tty.styledText("Connected to {s} ({s})", .{.green}) ++ "\n", .{ target_addr, name });
 }
 
 fn handleClose(ctx: anytype, target: ?[]const u8, out: *std.Io.Writer) !void {
@@ -809,9 +809,9 @@ fn handleList(allocator: std.mem.Allocator, ctx: anytype, out: *std.Io.Writer) !
             const conn = ctx.connections.items[ci];
             const is_selected = if (ctx.selected) |sel| sel == ci else false;
             if (is_selected) {
-                try out.print("  " ++ tty.styledText("{s}) {s}", .{ .bold, .green }) ++ "\n", .{ conn.name, resource });
+                try out.print("  " ++ comptime tty.styledText("{s}) {s}", .{ .bold, .green }) ++ "\n", .{ conn.name, resource });
             } else {
-                try out.print("  " ++ tty.styledText("{s}) {s}", .{.yellow}) ++ "\n", .{ conn.name, resource });
+                try out.print("  " ++ comptime tty.styledText("{s}) {s}", .{.yellow}) ++ "\n", .{ conn.name, resource });
             }
         } else {
             try out.print("  {s}\n", .{resource});

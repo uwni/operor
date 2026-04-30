@@ -197,7 +197,7 @@ pub const Diagnostics = struct {
     fn writeItem(self: *const Diagnostics, writer: *std.Io.Writer, item: Diagnostic) !void {
         try writer.writeAll(switch (item.severity) {
             .fatal => tty.error_prefix,
-            .warning => tty.styledText("warning: ", .{.yellow}),
+            .warning => comptime tty.styledText("warning: ", .{.yellow}),
         });
         try writer.print("'{s}'", .{self.file_path});
         if (item.context.task_idx) |task_idx| {
@@ -300,7 +300,8 @@ fn writeMessage(writer: *std.Io.Writer, item: Diagnostic) !void {
                 .@"struct" => payload,
                 else => @compileError("diagnostic message payloads must be void or struct"),
             };
-            try writer.print(@field(message_formats, @tagName(tag)), args);
+            const styled_fmt = comptime tty.styledPlaceholders(@field(message_formats, @tagName(tag)), .{.underline});
+            try writer.print(styled_fmt, args);
         },
     }
 }
@@ -323,6 +324,48 @@ test "document diagnostics do not add duplicate source separator" {
     try diagnostics.writeAll(&out.writer);
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "'new.yaml': file not found\n"));
     try std.testing.expect(!std.mem.containsAtLeast(u8, out.written(), 1, ": :"));
+}
+
+test "diagnostic message payloads are underlined" {
+    const gpa = std.testing.allocator;
+
+    var diagnostics = Diagnostics.init(gpa, "recipe.yaml");
+    defer diagnostics.deinit();
+
+    try diagnostics.add(.{
+        .severity = .fatal,
+        .message = .{ .duplicate_parallel_instrument = .{ .instrument = "smu" } },
+    });
+
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    try diagnostics.writeAll(&out.writer);
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        out.written(),
+        1,
+        "parallel steps cannot use instrument '\x1b[4msmu\x1b[0m' more than once\n",
+    ));
+}
+
+test "diagnostic escaped braces are not styled as placeholders" {
+    const gpa = std.testing.allocator;
+
+    var diagnostics = Diagnostics.init(gpa, "recipe.yaml");
+    defer diagnostics.deinit();
+
+    try diagnostics.add(.{
+        .severity = .fatal,
+        .message = .{ .missing_closing_brace = {} },
+    });
+
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    try diagnostics.writeAll(&out.writer);
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "'recipe.yaml': missing closing '}'\n"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, out.written(), 1, "\x1b[4m"));
 }
 
 test "empty diagnostics has no output" {

@@ -1980,7 +1980,7 @@ test "precompile rejects duplicate instrument in parallel block" {
 
     _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &out.writer) catch |err| {
         try std.testing.expectEqual(error.AnalysisFail, err);
-        try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "parallel steps cannot use instrument 'd1' more than once"));
+        try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "parallel steps cannot use instrument '\x1b[4md1\x1b[0m' more than once"));
         return;
     };
 
@@ -2691,7 +2691,7 @@ test "precompile rejects record column referencing const" {
 
     _ = precompilePath(gpa, std.testing.io, recipe_path, dir, &out.writer) catch |err| {
         try std.testing.expectEqual(error.AnalysisFail, err);
-        try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "pipeline record references const 'limit'"));
+        try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "pipeline record references const '\x1b[4mlimit\x1b[0m'"));
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "consts are compile-time values and cannot be recorded"));
         try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "Declare it in 'vars'"));
         return;
