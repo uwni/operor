@@ -5,6 +5,9 @@ const diagnostic = @import("../diagnostic.zig");
 const instrument = @import("../instrument.zig");
 
 pub const Encoding = instrument.Encoding;
+pub const ResponseSpec = instrument.ResponseSpec;
+
+const default_response_separator = ",";
 
 /// Human-readable metadata declared in a adapter document.
 pub const AdapterMeta = struct {
@@ -93,13 +96,31 @@ pub const ArgSpecObject = struct {
     default: ?ArgDefault = null,
 };
 
+/// Response type specification declared in adapter command `read`.
+/// Short scalar form: `float`; tuple/list form: `[float, float]`.
+pub const ReadSpec = union(enum) {
+    scalar: []const u8,
+    list: []const []const u8,
+    object: ReadSpecObject,
+
+    pub const serde = .{
+        .tag = serde_lib.UnionTag.untagged,
+    };
+};
+
+/// Extended response list form for non-comma separated responses.
+pub const ReadSpecObject = struct {
+    split: ?[]const u8 = null,
+    items: []const []const u8,
+};
+
 /// Parsed command entry from a adapter document.
 /// All owned data lives in the arena passed to `parse`; no individual `deinit` needed.
 pub const Command = struct {
     /// Optional human-readable description of the command.
     description: ?[]const u8 = null,
     /// Expected response encoding when the command reads back data.
-    response: ?Encoding,
+    response: ?ResponseSpec,
     /// Pre-parsed write template ready for precompilation.
     template: []const template.Segment,
     /// Optional argument type specifications from the adapter document.
@@ -109,13 +130,13 @@ pub const Command = struct {
     pub fn parse(
         allocator: std.mem.Allocator,
         write_template: []const u8,
-        read_value: ?[]const u8,
+        read_value: ?ReadSpec,
         description_value: ?[]const u8,
         reporter: diagnostic.Reporter,
     ) diagnostic.Error!Command {
         return .{
             .description = if (description_value) |d| try allocator.dupe(u8, d) else null,
-            .response = try parseReadType(read_value, reporter),
+            .response = try parseReadType(read_value, allocator, reporter),
             .template = try template.parseTemplate(allocator, write_template, reporter),
         };
     }
@@ -123,16 +144,59 @@ pub const Command = struct {
     /// Frees all owned data allocated by `parse`.
     pub fn deinit(self: *Command, allocator: std.mem.Allocator) void {
         template.freeSegments(allocator, self.template);
+        if (self.response) |response| response.deinit(allocator);
         if (self.description) |d| allocator.free(d);
         self.* = undefined;
     }
 };
 
 fn parseReadType(
-    read_value: ?[]const u8,
+    read_value: ?ReadSpec,
+    allocator: std.mem.Allocator,
     reporter: diagnostic.Reporter,
-) diagnostic.Error!?Encoding {
+) diagnostic.Error!?ResponseSpec {
     const read = read_value orelse return null;
+    return switch (read) {
+        .scalar => |name| .{ .scalar = try parseEncoding(name, reporter) },
+        .list => |items| .{ .list = try parseReadList(allocator, default_response_separator, items, reporter) },
+        .object => |object| .{ .list = try parseReadList(allocator, object.split orelse default_response_separator, object.items, reporter) },
+    };
+}
+
+fn parseReadList(
+    allocator: std.mem.Allocator,
+    separator: []const u8,
+    items: []const []const u8,
+    reporter: diagnostic.Reporter,
+) diagnostic.Error!instrument.ListResponseSpec {
+    if (items.len == 0) {
+        const source = "[]";
+        return reporter
+            .withSource(.adapter_read_type, source)
+            .fail(.{ .start = 0, .end = source.len }, .{ .invalid_read_type = .{ .read_type = source } });
+    }
+    if (separator.len == 0) {
+        return reporter
+            .withSource(.adapter_read_type, separator)
+            .fail(.{ .start = 0, .end = separator.len }, .{ .invalid_read_type = .{ .read_type = separator } });
+    }
+
+    const parsed_items = try allocator.alloc(Encoding, items.len);
+    errdefer allocator.free(parsed_items);
+    for (items, 0..) |item, idx| {
+        parsed_items[idx] = try parseEncoding(item, reporter);
+    }
+
+    return .{
+        .separator = try allocator.dupe(u8, separator),
+        .items = parsed_items,
+    };
+}
+
+fn parseEncoding(
+    read: []const u8,
+    reporter: diagnostic.Reporter,
+) diagnostic.Error!Encoding {
     return Encoding.fromString(read) orelse return reporter
         .withSource(.adapter_read_type, read)
         .fail(.{ .start = 0, .end = read.len }, .{ .invalid_read_type = .{ .read_type = read } });

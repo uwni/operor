@@ -159,7 +159,7 @@ test "record frame samples bindings in column order" {
         .{ .int = 7 },
         .{ .bool = true },
     };
-    var ctx: session.Context = try .init(gpa, std.testing.io, &initial_values);
+    var ctx: session.Context = try .init(gpa, std.testing.io, &initial_values, &.{});
     defer ctx.deinit();
     ctx.iteration = 3;
     ctx.task_idx = 2;
@@ -181,7 +181,7 @@ test "record frame samples bindings in column order" {
 }
 
 test "record frame is omitted when no columns are configured" {
-    var ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{});
+    var ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{}, &.{});
     defer ctx.deinit();
 
     try std.testing.expect(try captureRecordFrame(std.testing.allocator, &.{}, &ctx) == null);

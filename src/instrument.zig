@@ -68,3 +68,26 @@ pub const Encoding = enum {
         return map.get(tag);
     }
 };
+
+/// Parsed response shape declared by adapter commands.
+pub const ResponseSpec = union(enum) {
+    scalar: Encoding,
+    list: ListResponseSpec,
+
+    pub fn deinit(self: ResponseSpec, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .scalar => {},
+            .list => |list| {
+                allocator.free(list.separator);
+                allocator.free(list.items);
+            },
+        }
+    }
+};
+
+/// Split response fields into a runtime list and parse each field with the
+/// corresponding encoding.
+pub const ListResponseSpec = struct {
+    separator: []const u8,
+    items: []const Encoding,
+};

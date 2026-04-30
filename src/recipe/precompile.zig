@@ -130,6 +130,7 @@ fn precompileInternal(
         .expected_iterations = recipe.expected_iterations,
         .float_precision = recipe.float_precision,
         .initial_values = slot_map.varInitialValues(),
+        .list_slot_capacities = slot_map.list_slot_capacities,
     };
 }
 
@@ -147,6 +148,7 @@ fn addDocumentError(diag: diagnostic.Reporter, err: anyerror, context: Diagnosti
 const SlotMap = struct {
     slots: SlotTable,
     initial_values: []const recipe_ir.Value,
+    list_slot_capacities: []usize,
     const_count: usize,
     /// Allocator that owns only compile-time slot-table backing and expression
     /// scratch arenas. Returned recipe data must not reference it.
@@ -199,6 +201,19 @@ const SlotMap = struct {
     /// Returns only the var portion of initial_values (excluding consts).
     fn varInitialValues(self: *const SlotMap) []const recipe_ir.Value {
         return self.initial_values[self.const_count..];
+    }
+
+    fn recordListResponseCapacity(self: *SlotMap, slot_idx: usize, response: recipe_ir.ResponseSpec) void {
+        const list = switch (response) {
+            .scalar => return,
+            .list => |list| list,
+        };
+        switch (self.initial_values[self.const_count + slot_idx]) {
+            .list => {
+                self.list_slot_capacities[slot_idx] = @max(self.list_slot_capacities[slot_idx], list.items.len);
+            },
+            else => {},
+        }
     }
 
     /// Returns recipe var names in runtime slot order.
@@ -694,6 +709,14 @@ fn buildSlotMap(
         initial_values[const_keys.len + idx] = try compileInitialValue(arena, value);
     }
 
+    const list_slot_capacities = try arena.alloc(usize, var_keys.len);
+    for (initial_values[const_keys.len..], 0..) |value, idx| {
+        list_slot_capacities[idx] = switch (value) {
+            .list => |items| items.len,
+            else => 0,
+        };
+    }
+
     // Build the key-only slot map: consts first, then vars.
     var all_slots: SlotTable = .empty;
     errdefer all_slots.deinit(scratch_alloc);
@@ -703,6 +726,7 @@ fn buildSlotMap(
     return .{
         .slots = all_slots,
         .initial_values = initial_values,
+        .list_slot_capacities = list_slot_capacities,
         .const_count = const_keys.len,
         .scratch_alloc = scratch_alloc,
     };
@@ -770,7 +794,7 @@ fn precompileTasks(
     scratch_alloc: std.mem.Allocator,
     arena: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
-    slot_map: *const SlotMap,
+    slot_map: *SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
     diag: diagnostic.Reporter,
@@ -835,7 +859,7 @@ fn precompileSteps(
     scratch_alloc: std.mem.Allocator,
     arena: std.mem.Allocator,
     step_cfgs: []config.StepConfig,
-    slot_map: *const SlotMap,
+    slot_map: *SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
     task_idx: usize,
@@ -920,7 +944,7 @@ fn precompileComputeStep(
 fn precompileCallStep(
     scratch_alloc: std.mem.Allocator,
     arena: std.mem.Allocator,
-    slot_map: *const SlotMap,
+    slot_map: *SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
     cfg: *const config.CallStepConfig,
@@ -971,6 +995,9 @@ fn precompileCallStep(
         var assign_context = call_context;
         assign_context.variable_name = label;
         save_slot = try slot_map.varSlotIndex(diag, assign_context, label);
+        if (command.response) |response| {
+            slot_map.recordListResponseCapacity(save_slot.?, response);
+        }
     }
 
     return .{
@@ -1018,7 +1045,7 @@ fn precompileSleepStep(
 fn precompileParallelStep(
     scratch_alloc: std.mem.Allocator,
     arena: std.mem.Allocator,
-    slot_map: *const SlotMap,
+    slot_map: *SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
     cfg: *const config.ParallelStepConfig,
@@ -1251,6 +1278,20 @@ fn cloneBoolTextMap(
     };
 }
 
+fn cloneResponseSpec(
+    arena: std.mem.Allocator,
+    source: ?adapter_schema.ResponseSpec,
+) !?recipe_ir.ResponseSpec {
+    const src = source orelse return null;
+    return switch (src) {
+        .scalar => |encoding| .{ .scalar = encoding },
+        .list => |list| .{ .list = .{
+            .separator = try arena.dupe(u8, list.separator),
+            .items = try arena.dupe(adapter_schema.Encoding, list.items),
+        } },
+    };
+}
+
 fn getOrParseAdapter(
     cache_alloc: std.mem.Allocator,
     io: std.Io,
@@ -1327,7 +1368,7 @@ fn compileCommand(
 
     return .{
         .instrument = instrument,
-        .response = source.response,
+        .response = try cloneResponseSpec(arena, source.response),
         .segments = segments,
         .args = args,
     };
@@ -3234,6 +3275,10 @@ test "precompile recipe with list variable" {
         },
         else => return error.TestUnexpectedResult,
     }
+
+    try std.testing.expectEqual(@as(usize, 2), compiled.list_slot_capacities.len);
+    try std.testing.expectEqual(@as(usize, 0), compiled.list_slot_capacities[0]);
+    try std.testing.expectEqual(@as(usize, 3), compiled.list_slot_capacities[1]);
 }
 
 test "precompile const-folds join() in step args" {

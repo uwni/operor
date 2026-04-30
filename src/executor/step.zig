@@ -9,14 +9,6 @@ const parallel_mod = @import("parallel.zig");
 const dry_run_tag = tty.styledText("[dry-run]", .{.fuchsia});
 
 pub const command_stack_bytes: usize = 512;
-/// Parsed response value in the native Zig type indicated by the command encoding.
-pub const ParsedValue = union(instrument_types.Encoding) {
-    raw: []const u8,
-    float: f64,
-    int: i64,
-    string: []const u8,
-    bool: bool,
-};
 
 /// Reusable scratch space for step argument resolution, avoiding per-step HashMap allocation.
 pub const StepScratch = struct {
@@ -117,14 +109,12 @@ pub fn renderInstrumentCall(
 pub fn storeInstrumentResponse(
     step: *const recipe_mod.Step.InstrumentCall,
     ctx: *session.Context,
-    resp: []const u8,
+    response_bytes: []const u8,
 ) !void {
     const slot = step.save_slot orelse return;
-    const encoding = step.command.response orelse return;
+    const response_spec = step.command.response orelse return;
 
-    const stored = try parseResponse(encoding, resp, step.command.instrument.bool_map);
-    const value = parsedValueToSessionValue(stored);
-    try ctx.setSlot(slot, value);
+    try parseResponseIntoSlot(response_spec, response_bytes, step.command.instrument.bool_map, ctx, slot);
 }
 
 /// Sends an instrument command and optionally saves the parsed response.
@@ -149,28 +139,101 @@ fn executeInstrumentCall(
 
     const instr = &(instrument.handle orelse unreachable);
     if (step.command.response != null) {
-        const resp = try instr.queryToOwned(allocator, rendered.bytes);
-        defer allocator.free(resp);
-        return try storeInstrumentResponse(step, ctx, resp);
+        const response_bytes = try instr.queryToOwned(allocator, rendered.bytes);
+        defer allocator.free(response_bytes);
+        return try storeInstrumentResponse(step, ctx, response_bytes);
     }
 
     try instr.write(rendered.bytes);
 }
 
-/// Convert the raw response byte string into a ParsedValue according to the specified encoding.
-pub fn parseResponse(
-    encoding: instrument_types.Encoding,
-    resp: []const u8,
+/// Parses the raw response byte string and stores it into the target runtime slot.
+pub fn parseResponseIntoSlot(
+    response_spec: instrument_types.ResponseSpec,
+    response_bytes: []const u8,
     bool_map: ?recipe_mod.BoolTextMap,
-) !ParsedValue {
-    const trimmed = std.mem.trim(u8, resp, &std.ascii.whitespace);
+    ctx: *session.Context,
+    slot: usize,
+) !void {
+    switch (response_spec) {
+        .scalar => |encoding| try ctx.setSlot(slot, try parseScalarResponseValue(encoding, response_bytes, bool_map, false)),
+        .list => |list_spec| try parseListResponseIntoSlot(ctx, slot, list_spec, response_bytes, bool_map),
+    }
+}
+
+fn parseScalarResponseValue(
+    encoding: instrument_types.Encoding,
+    response_bytes: []const u8,
+    bool_map: ?recipe_mod.BoolTextMap,
+    unwrap_string: bool,
+) !session.Value {
+    const trimmed = std.mem.trim(u8, response_bytes, &std.ascii.whitespace);
     return switch (encoding) {
-        .raw => .{ .raw = resp },
+        .raw => .{ .string = response_bytes },
         .float => .{ .float = try std.fmt.parseFloat(f64, trimmed) },
         .int => .{ .int = try std.fmt.parseInt(i64, trimmed, 10) },
-        .string => .{ .string = trimmed },
+        .string => .{ .string = if (unwrap_string) unwrapQuotedString(trimmed) else trimmed },
         .bool => .{ .bool = try parseBoolResponse(trimmed, bool_map) },
     };
+}
+
+fn parseListResponseIntoSlot(
+    ctx: *session.Context,
+    slot: usize,
+    response_spec: instrument_types.ListResponseSpec,
+    response_bytes: []const u8,
+    bool_map: ?recipe_mod.BoolTextMap,
+) !void {
+    const items = try ctx.prepareListSlot(slot, response_spec.items.len);
+
+    var remaining = std.mem.trim(u8, response_bytes, &std.ascii.whitespace);
+    for (response_spec.items, 0..) |encoding, idx| {
+        const field = if (idx + 1 == response_spec.items.len) blk: {
+            if (findSeparatorOutsideQuotes(remaining, response_spec.separator) != null) return error.ResponseFieldCountMismatch;
+            break :blk remaining;
+        } else blk: {
+            const sep_idx = findSeparatorOutsideQuotes(remaining, response_spec.separator) orelse return error.ResponseFieldCountMismatch;
+            const field = remaining[0..sep_idx];
+            remaining = remaining[sep_idx + response_spec.separator.len ..];
+            break :blk field;
+        };
+
+        const parsed = try parseScalarResponseValue(
+            encoding,
+            std.mem.trim(u8, field, &std.ascii.whitespace),
+            bool_map,
+            true,
+        );
+        try ctx.setPreparedListItem(items, idx, parsed);
+    }
+}
+
+fn findSeparatorOutsideQuotes(source: []const u8, separator: []const u8) ?usize {
+    if (separator.len == 0) return null;
+
+    var in_quotes = false;
+    var idx: usize = 0;
+    while (idx < source.len) {
+        if (source[idx] == '"') {
+            if (in_quotes and idx + 1 < source.len and source[idx + 1] == '"') {
+                idx += 2;
+                continue;
+            }
+            in_quotes = !in_quotes;
+            idx += 1;
+            continue;
+        }
+        if (!in_quotes and std.mem.startsWith(u8, source[idx..], separator)) return idx;
+        idx += 1;
+    }
+    return null;
+}
+
+fn unwrapQuotedString(value: []const u8) []const u8 {
+    if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') {
+        return value[1 .. value.len - 1];
+    }
+    return value;
 }
 
 fn parseBoolResponse(trimmed: []const u8, bool_map: ?recipe_mod.BoolTextMap) !bool {
@@ -182,16 +245,6 @@ fn parseBoolResponse(trimmed: []const u8, bool_map: ?recipe_mod.BoolTextMap) !bo
 
     // No mapping configured: preserve legacy behavior.
     return trimmed.len > 0 and trimmed[0] == '1';
-}
-
-fn parsedValueToSessionValue(stored: ParsedValue) session.Value {
-    return switch (stored) {
-        .raw => |v| .{ .string = v },
-        .string => |v| .{ .string = v },
-        .int => |v| .{ .int = v },
-        .float => |v| .{ .float = v },
-        .bool => |v| .{ .bool = v },
-    };
 }
 
 fn evalToValue(
@@ -233,36 +286,75 @@ fn logDryRun(log_sink: session.LogSink, adapter_name: []const u8, rendered: []co
 }
 
 test "executor parse response" {
-    const raw = "  2.5 \n";
-    const parsed = try parseResponse(.float, raw, null);
-    switch (parsed) {
-        .float => |value| try std.testing.expectApproxEqAbs(@as(f64, 2.5), value, 1e-9),
+    var scalar_ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{
+        .{ .float = 0 },
+        .{ .int = 0 },
+        .{ .bool = false },
+        .{ .bool = true },
+        .{ .bool = false },
+    }, &.{});
+    defer scalar_ctx.deinit();
+
+    try parseResponseIntoSlot(.{ .scalar = .float }, "  2.5 \n", null, &scalar_ctx, 0);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.5), scalar_ctx.getSlot(0).float, 1e-9);
+
+    try parseResponseIntoSlot(.{ .scalar = .int }, "7", null, &scalar_ctx, 1);
+    try std.testing.expectEqual(@as(i64, 7), scalar_ctx.getSlot(1).int);
+
+    try parseResponseIntoSlot(.{ .scalar = .bool }, "1", null, &scalar_ctx, 2);
+    try std.testing.expect(scalar_ctx.getSlot(2).bool);
+
+    try parseResponseIntoSlot(.{ .scalar = .bool }, "ON", null, &scalar_ctx, 3);
+    try std.testing.expect(!scalar_ctx.getSlot(3).bool);
+
+    try parseResponseIntoSlot(.{ .scalar = .bool }, "ENABLE", .{ .true_text = "ENABLE", .false_text = "DISABLE" }, &scalar_ctx, 4);
+    try std.testing.expect(scalar_ctx.getSlot(4).bool);
+
+    try std.testing.expectError(error.InvalidBoolResponse, parseResponseIntoSlot(.{ .scalar = .bool }, "ON", .{ .true_text = "ENABLE", .false_text = "DISABLE" }, &scalar_ctx, 4));
+
+    var list_ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{
+        .{ .list = &.{} },
+    }, &.{2});
+    defer list_ctx.deinit();
+    switch (list_ctx.getSlot(0)) {
+        .list => |items| try std.testing.expectEqual(@as(usize, 0), items.len),
         else => return error.TestUnexpectedResult,
     }
 
-    const parsed_int = try parseResponse(.int, "7", null);
-    switch (parsed_int) {
-        .int => |value| try std.testing.expectEqual(@as(i64, 7), value),
+    try parseResponseIntoSlot(.{ .list = .{
+        .separator = ",",
+        .items = &.{ .float, .float },
+    } }, " 1.25, 2.5\n", null, &list_ctx, 0);
+    switch (list_ctx.getSlot(0)) {
+        .list => |items| {
+            try std.testing.expectEqual(@as(usize, 2), items.len);
+            try std.testing.expectApproxEqAbs(@as(f64, 1.25), items[0].float, 1e-9);
+            try std.testing.expectApproxEqAbs(@as(f64, 2.5), items[1].float, 1e-9);
+        },
         else => return error.TestUnexpectedResult,
     }
 
-    const parsed_bool_legacy_true = try parseResponse(.bool, "1", null);
-    switch (parsed_bool_legacy_true) {
-        .bool => |value| try std.testing.expect(value),
+    const initial_error_items = [_]session.Value{ .{ .int = 0 }, .{ .string = "" } };
+    var error_ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{
+        .{ .list = initial_error_items[0..] },
+    }, &.{});
+    defer error_ctx.deinit();
+
+    try parseResponseIntoSlot(.{ .list = .{
+        .separator = ",",
+        .items = &.{ .int, .string },
+    } }, "-221,\"Settings conflict, channel 1\"", null, &error_ctx, 0);
+    switch (error_ctx.getSlot(0)) {
+        .list => |items| {
+            try std.testing.expectEqual(@as(usize, 2), items.len);
+            try std.testing.expectEqual(@as(i64, -221), items[0].int);
+            try std.testing.expectEqualStrings("Settings conflict, channel 1", items[1].string);
+        },
         else => return error.TestUnexpectedResult,
     }
 
-    const parsed_bool_legacy_false = try parseResponse(.bool, "ON", null);
-    switch (parsed_bool_legacy_false) {
-        .bool => |value| try std.testing.expect(!value),
-        else => return error.TestUnexpectedResult,
-    }
-
-    const parsed_bool_custom = try parseResponse(.bool, "ENABLE", .{ .true_text = "ENABLE", .false_text = "DISABLE" });
-    switch (parsed_bool_custom) {
-        .bool => |value| try std.testing.expect(value),
-        else => return error.TestUnexpectedResult,
-    }
-
-    try std.testing.expectError(error.InvalidBoolResponse, parseResponse(.bool, "ON", .{ .true_text = "ENABLE", .false_text = "DISABLE" }));
+    try std.testing.expectError(error.ResponseFieldCountMismatch, parseResponseIntoSlot(.{ .list = .{
+        .separator = ",",
+        .items = &.{ .int, .string },
+    } }, "1,a,b", null, &error_ctx, 0));
 }

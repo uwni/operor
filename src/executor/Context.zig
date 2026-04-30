@@ -24,17 +24,32 @@ const Slot = union(enum) {
         buffer: []u8,
         len: usize,
     },
-    list: []Value,
+    list: ListSlot,
+};
+
+const ListSlot = struct {
+    buffer: []Value,
+    len: usize,
+
+    fn items(self: ListSlot) []Value {
+        return self.buffer[0..self.len];
+    }
 };
 
 /// Creates an execution context from initial values, deep-copying owned data.
-pub fn init(allocator: std.mem.Allocator, io: std.Io, initial_values: []const Value) !Context {
+pub fn init(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    initial_values: []const Value,
+    list_slot_capacities: []const usize,
+) !Context {
     const values = try allocator.alloc(Slot, initial_values.len);
     @memset(values, .unset);
     var self: Context = .{ .allocator = allocator, .io = io, .values = values };
     errdefer self.deinit();
     for (initial_values, 0..) |value, idx| {
-        self.values[idx] = try self.dupeToSlot(value);
+        const capacity_hint = if (idx < list_slot_capacities.len) list_slot_capacities[idx] else 0;
+        self.values[idx] = try self.dupeToSlot(value, capacity_hint);
     }
     return self;
 }
@@ -46,7 +61,7 @@ pub fn deinit(self: *Context) void {
 }
 
 /// Deep-copies a recipe Value into a context-owned Slot.
-fn dupeToSlot(self: *Context, value: Value) !Slot {
+fn dupeToSlot(self: *Context, value: Value, capacity_hint: usize) !Slot {
     return switch (value) {
         .float => |f| .{ .float = f },
         .int => |i| .{ .int = i },
@@ -55,7 +70,7 @@ fn dupeToSlot(self: *Context, value: Value) !Slot {
             .buffer = try self.allocator.dupe(u8, s),
             .len = s.len,
         } },
-        .list => |items| .{ .list = try self.dupeList(items) },
+        .list => |items| .{ .list = try self.dupeList(items, capacity_hint) },
     };
 }
 
@@ -96,7 +111,7 @@ pub fn setSlot(self: *Context, slot_idx: usize, value: Value) !void {
                 .list => |v| v,
                 else => return error.TypeMismatch,
             };
-            const duped = try self.dupeList(items);
+            const duped = try self.dupeList(items, items.len);
             self.freeStored(stored);
             stored.* = .{ .list = duped };
         },
@@ -112,9 +127,38 @@ pub fn getSlot(self: *const Context, slot_idx: usize) Value {
         .int => |i| .{ .int = i },
         .bool => |b| .{ .bool = b },
         .string => |s| .{ .string = s.buffer[0..s.len] },
-        .list => |items| .{ .list = items },
+        .list => |list| .{ .list = list.items() },
         .unset => unreachable,
     };
+}
+
+pub fn prepareListSlot(self: *Context, slot_idx: usize, len: usize) ![]Value {
+    const stored = &self.values[slot_idx];
+    switch (stored.*) {
+        .list => |*list| {
+            if (list.buffer.len < len) {
+                const replacement = try self.allocator.alloc(Value, len);
+                @memset(replacement, .{ .int = 0 });
+                self.freeStored(stored);
+                stored.* = .{ .list = .{ .buffer = replacement, .len = len } };
+                return stored.list.items();
+            }
+            if (list.len > len) {
+                for (list.buffer[len..list.len]) |item| self.freeValue(item);
+            } else if (list.len < len) {
+                @memset(list.buffer[list.len..len], .{ .int = 0 });
+            }
+            list.len = len;
+            return list.items();
+        },
+        else => return error.TypeMismatch,
+    }
+}
+
+pub fn setPreparedListItem(self: *Context, items: []Value, index: usize, value: Value) !void {
+    const replacement = try self.dupeValue(value);
+    self.freeValue(items[index]);
+    items[index] = replacement;
 }
 
 pub fn resolveBinding(self: *const Context, binding: expr.VariableBinding) Value {
@@ -176,9 +220,9 @@ pub fn varResolver(self: *const Context) expr.VarResolver {
 fn freeStored(self: *Context, stored: *Slot) void {
     switch (stored.*) {
         .string => |s| self.allocator.free(s.buffer),
-        .list => |items| {
-            for (items) |item| self.freeValue(item);
-            self.allocator.free(items);
+        .list => |list| {
+            for (list.items()) |item| self.freeValue(item);
+            self.allocator.free(list.buffer);
         },
         else => {},
     }
@@ -191,20 +235,25 @@ fn freeValue(self: *Context, val: Value) void {
     }
 }
 
-fn dupeList(self: *Context, items: []const Value) ![]Value {
-    const duped = try self.allocator.alloc(Value, items.len);
+fn dupeValue(self: *Context, item: Value) !Value {
+    return switch (item) {
+        .string => |s| .{ .string = try self.allocator.dupe(u8, s) },
+        .list => unreachable, // nested lists are not supported in runtime slots
+        else => item,
+    };
+}
+
+fn dupeList(self: *Context, items: []const Value, capacity_hint: usize) !ListSlot {
+    const capacity = @max(items.len, capacity_hint);
+    const duped = try self.allocator.alloc(Value, capacity);
     errdefer self.allocator.free(duped);
     var initialized: usize = 0;
     errdefer for (duped[0..initialized]) |item| self.freeValue(item);
     for (items, 0..) |item, idx| {
-        duped[idx] = switch (item) {
-            .string => |s| .{ .string = try self.allocator.dupe(u8, s) },
-            .list => unreachable, // nested lists structurally impossible from YAML
-            else => item,
-        };
+        duped[idx] = try self.dupeValue(item);
         initialized += 1;
     }
-    return duped;
+    return .{ .buffer = duped, .len = items.len };
 }
 
 test "Value and RenderValue format support formatter specifier" {
@@ -233,7 +282,7 @@ test "Context exposes built-ins alongside stored values" {
     const testing = std.testing;
     const expr_mod = @import("../expr.zig");
 
-    var ctx: Context = try .init(testing.allocator, std.testing.io, &.{Value{ .float = 3.3 }});
+    var ctx: Context = try .init(testing.allocator, std.testing.io, &.{Value{ .float = 3.3 }}, &.{});
     defer ctx.deinit();
 
     ctx.task_idx = 2;
@@ -262,7 +311,7 @@ test "Context exposes built-ins alongside stored values" {
 test "Context stores run start state separately from iteration state" {
     const testing = std.testing;
 
-    var ctx: Context = try .init(testing.allocator, std.testing.io, &.{});
+    var ctx: Context = try .init(testing.allocator, std.testing.io, &.{}, &.{});
     defer ctx.deinit();
 
     ctx.start_ns = 1234;
@@ -282,7 +331,7 @@ test "Context list round-trip through setSlot and varResolver" {
     var ctx: Context = try .init(testing.allocator, std.testing.io, &.{
         Value{ .list = items[0..] },
         Value{ .int = 0 },
-    });
+    }, &.{});
     defer ctx.deinit();
 
     // Verify getSlot returns the list.
@@ -324,7 +373,7 @@ test "Context list round-trip through setSlot and varResolver" {
 test "Context resolves $ELAPSED_MS builtin as elapsed milliseconds" {
     const testing = std.testing;
 
-    var ctx: Context = try .init(testing.allocator, std.testing.io, &.{});
+    var ctx: Context = try .init(testing.allocator, std.testing.io, &.{}, &.{});
     defer ctx.deinit();
 
     // Before start_ns is set, elapsed_ms is 0.
@@ -343,7 +392,7 @@ test "setSlot auto-coerces between int and float" {
     var ctx: Context = try .init(testing.allocator, std.testing.io, &.{
         Value{ .int = 5 },
         Value{ .float = 1.0 },
-    });
+    }, &.{});
     defer ctx.deinit();
 
     // Slot 0: declared as int, receives float → truncated to int.
@@ -363,7 +412,7 @@ test "setSlot rejects incompatible types" {
         Value{ .string = "hello" },
         Value{ .float = 1.0 },
         Value{ .list = list_items[0..] },
-    });
+    }, &.{});
     defer ctx.deinit();
 
     // String slot rejects float.
@@ -384,6 +433,6 @@ test "init cleans up on partial allocation failure" {
     const result = Context.init(failing.allocator(), std.testing.io, &.{
         Value{ .string = "aaa" },
         Value{ .string = "bbb" },
-    });
+    }, &.{});
     try testing.expectError(error.OutOfMemory, result);
 }

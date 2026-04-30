@@ -18,7 +18,7 @@ const AdapterDoc = struct {
 /// Raw serialized shape of a single command entry.
 const CommandDoc = struct {
     write: []const u8,
-    read: ?[]const u8 = null,
+    read: ?schema.ReadSpec = null,
     description: ?[]const u8 = null,
     args: ?std.StringHashMap(schema.ArgSpec) = null,
 };
@@ -138,8 +138,59 @@ test "parse adapter response encoding" {
     defer adapter.deinit();
 
     const cmd = adapter.commands.get("measure_voltage") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(schema.Encoding.float, cmd.response.?);
+    switch (cmd.response.?) {
+        .scalar => |encoding| try std.testing.expectEqual(schema.Encoding.float, encoding),
+        .list => return error.TestUnexpectedResult,
+    }
     try std.testing.expectEqual(@as(usize, 1), cmd.template.len);
+}
+
+test "parse adapter list response encoding" {
+    const gpa = std.testing.allocator;
+
+    var adapter = try parseTestYaml(gpa,
+        \\commands:
+        \\  measure_all:
+        \\    write: "MEAS:ALL?"
+        \\    read: [float, float]
+    );
+    defer adapter.deinit();
+
+    const cmd = adapter.commands.get("measure_all") orelse return error.TestUnexpectedResult;
+    switch (cmd.response.?) {
+        .scalar => return error.TestUnexpectedResult,
+        .list => |list| {
+            try std.testing.expectEqualStrings(",", list.separator);
+            try std.testing.expectEqual(@as(usize, 2), list.items.len);
+            try std.testing.expectEqual(schema.Encoding.float, list.items[0]);
+            try std.testing.expectEqual(schema.Encoding.float, list.items[1]);
+        },
+    }
+}
+
+test "parse adapter list response with custom separator" {
+    const gpa = std.testing.allocator;
+
+    var adapter = try parseTestYaml(gpa,
+        \\commands:
+        \\  read_pair:
+        \\    write: "PAIR?"
+        \\    read:
+        \\      split: ";"
+        \\      items: [int, string]
+    );
+    defer adapter.deinit();
+
+    const cmd = adapter.commands.get("read_pair") orelse return error.TestUnexpectedResult;
+    switch (cmd.response.?) {
+        .scalar => return error.TestUnexpectedResult,
+        .list => |list| {
+            try std.testing.expectEqualStrings(";", list.separator);
+            try std.testing.expectEqual(@as(usize, 2), list.items.len);
+            try std.testing.expectEqual(schema.Encoding.int, list.items[0]);
+            try std.testing.expectEqual(schema.Encoding.string, list.items[1]);
+        },
+    }
 }
 
 test "parse adapter with write termination" {

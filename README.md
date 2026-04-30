@@ -111,13 +111,18 @@ commands:
   measure_voltage:
     write: "MEAS:VOLT?"
     read: float
+  measure_all:
+    write: "MEAS:ALL?"
+    read: [float, float]
 ```
 
 Notes:
 
 - Command template placeholders use `{name}` syntax.
 - Placeholder names must be valid identifiers.
-- A command with `read = "raw" | "float" | "int" | "string"` reads and parses a response after the write.
+- A command with `read: raw | float | int | string | bool` reads and parses a scalar response after the write.
+- Use `read: [float, float]` for comma-separated multi-field responses; the parsed result is stored as a list.
+- For non-comma separators, use `read: { split: ";", items: [int, string] }`.
 - `write_termination` is appended automatically to every command sent through that adapter.
 - `read_termination`, `timeout_ms`, `query_delay_ms`, and `chunk_size` tune the VISA session used for instruments that reference the adapter.
 

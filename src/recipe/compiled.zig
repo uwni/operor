@@ -2,6 +2,8 @@ const std = @import("std");
 const instrument = @import("../instrument.zig");
 const expr = @import("../expr.zig");
 
+pub const ResponseSpec = instrument.ResponseSpec;
+
 /// Writes a float with exactly `decimal_places` digits after the decimal point,
 /// using the standard library's Ryu-based decimal formatter.
 fn writeFloatFixed(writer: anytype, value: f64, decimal_places: u8) !void {
@@ -144,8 +146,8 @@ pub const CommandArg = struct {
 pub const PrecompiledCommand = struct {
     /// Precompiled instrument that owns this command.
     instrument: *const PrecompiledInstrument,
-    /// Response encoding declared by the source adapter command.
-    response: ?instrument.Encoding,
+    /// Response parsing spec declared by the source adapter command.
+    response: ?ResponseSpec,
     /// Allocator-owned compiled render segments used at execution time.
     segments: []CompiledSegment,
     /// Placeholder metadata used for validation, defaults, and rendering.
@@ -164,6 +166,7 @@ pub const PrecompiledCommand = struct {
             arg.format.deinit(allocator);
         }
         allocator.free(self.args);
+        if (self.response) |response| response.deinit(allocator);
         freeCompiledSegments(allocator, self.segments);
         self.* = undefined;
     }
@@ -405,6 +408,8 @@ pub const PrecompiledRecipe = struct {
     float_precision: ?u8,
     /// Default values for slot-based context variables at execution startup.
     initial_values: []const Value,
+    /// Runtime var slot aligned list backing capacities used by `Context`.
+    list_slot_capacities: []const usize,
 
     /// Releases all arena-owned precompiled recipe data.
     pub fn deinit(self: *PrecompiledRecipe) void {
