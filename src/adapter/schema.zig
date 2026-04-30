@@ -135,5 +135,5 @@ fn parseReadType(
     const read = read_value orelse return null;
     return Encoding.fromString(read) orelse return reporter
         .withSource(.adapter_read_type, read)
-        .fail(.{ .start = 0, .end = read.len }, .{ .invalid_read_type = read });
+        .fail(.{ .start = 0, .end = read.len }, .{ .invalid_read_type = .{ .read_type = read } });
 }

@@ -1,5 +1,6 @@
 const std = @import("std");
 const tty = @import("tty.zig");
+const message_formats = @import("diagnostic_messages.zon");
 
 pub const Span = struct {
     start: usize,
@@ -74,14 +75,14 @@ pub const Message = union(enum) {
 
     expected_expression,
     expected_variable,
-    expected_token: []const u8,
+    expected_token: struct { token: []const u8 },
     unexpected_token,
-    invalid_number: []const u8,
-    unknown_function: []const u8,
+    invalid_number: struct { number: []const u8 },
+    unknown_function: struct { name: []const u8 },
     unterminated_string,
     unbound_variable,
     const_runtime_value,
-    negative_list_index: i64,
+    negative_list_index: struct { index: i64 },
     list_index_out_of_bounds: struct {
         index: i64,
         len: usize,
@@ -94,8 +95,8 @@ pub const Message = union(enum) {
     missing_closing_bracket,
     nested_optional_group,
     empty_argument,
-    invalid_identifier: []const u8,
-    invalid_read_type: []const u8,
+    invalid_identifier: struct { identifier: []const u8 },
+    invalid_read_type: struct { read_type: []const u8 },
 };
 
 pub const Diagnostic = struct {
@@ -293,50 +294,14 @@ fn writeMessage(writer: *std.Io.Writer, item: Diagnostic) !void {
     }
 
     switch (item.message) {
-        .file_not_found => try writer.writeAll("file not found"),
-        .syntax_error => try writer.writeAll("invalid configuration syntax"),
-        .unsupported_format => try writer.writeAll("unsupported configuration file format"),
-        .wrong_type => try writer.writeAll("invalid configuration value type"),
-        .partial_bool_map => try writer.writeAll("bool argument map must define both true and false"),
-        .missing_pipeline => try writer.writeAll("recipe is missing required 'pipeline' section"),
-        .missing_record_config => try writer.writeAll("pipeline is missing required 'record' field"),
-        .invalid_pipeline_config => try writer.writeAll("invalid pipeline configuration"),
-        .nested_parallel_step => try writer.writeAll("parallel steps cannot be nested"),
-        .duplicate_parallel_instrument => |p| try writer.print("parallel steps cannot use instrument '{s}' more than once", .{p.instrument}),
-        .adapter_not_found => try writer.writeAll("adapter not found"),
-        .instrument_not_found => |p| try writer.print("instrument '{s}' is not declared in recipe", .{p.instrument}),
-        .command_not_found => |p| try writer.print("command not found in adapter: '{s}.{s}'", .{ p.instrument, p.command }),
-        .invalid_call_format => |p| try writer.print("call '{s}' must use instrument.command format", .{p.call}),
-        .missing_command_argument => |p| try writer.print("missing required command argument '{s}'", .{p.argument}),
-        .unexpected_command_argument => |p| try writer.print("unexpected command argument '{s}'", .{p.argument}),
-        .record_const_not_recordable => |p| try writer.print("pipeline record references const '{s}'; consts are compile-time values and cannot be recorded. Declare it in 'vars' to record a runtime value", .{p.variable}),
-        .unknown_variable => |p| try writer.print("variable '{s}' is not declared in recipe 'vars' section", .{p.variable}),
-        .assign_to_const => |p| try writer.print("cannot assign to const variable '{s}'", .{p.variable}),
-        .builtin_variable_conflict => |p| try writer.print("variable name '{s}' conflicts with a built-in variable", .{p.variable}),
-        .duplicate_variable => |p| try writer.print("const and var sections both define variable '{s}'", .{p.variable}),
-        .duplicate_record_column => |p| try writer.print("pipeline record lists duplicate column '{s}'", .{p.column}),
-        .invalid_expression => try writer.writeAll("invalid expression"),
-        .division_by_zero => try writer.writeAll("division by zero"),
-        .expected_expression => try writer.writeAll("expected expression"),
-        .expected_variable => try writer.writeAll("expected variable reference"),
-        .expected_token => |token| try writer.print("expected '{s}'", .{token}),
-        .unexpected_token => try writer.writeAll("unexpected token"),
-        .invalid_number => |text| try writer.print("invalid number '{s}'", .{text}),
-        .unknown_function => |name| try writer.print("unknown function '{s}'", .{name}),
-        .unterminated_string => try writer.writeAll("unterminated string literal"),
-        .unbound_variable => try writer.writeAll("expression variable was not bound before lowering"),
-        .const_runtime_value => try writer.writeAll("const list value cannot be used with a runtime-dependent operation"),
-        .negative_list_index => |index| try writer.print("list index {d} is negative", .{index}),
-        .list_index_out_of_bounds => |p| try writer.print("list index {d} is out of bounds for list of length {d}", .{ p.index, p.len }),
-        .nested_list_value => try writer.writeAll("nested list value is not valid in this expression"),
-        .invalid_stack_shape => try writer.writeAll("expression lowered to invalid bytecode"),
-        .stack_too_deep => try writer.writeAll("expression stack is too deep"),
-        .missing_closing_brace => try writer.writeAll("missing closing '}'"),
-        .missing_closing_bracket => try writer.writeAll("missing closing ']'"),
-        .nested_optional_group => try writer.writeAll("optional groups cannot be nested"),
-        .empty_argument => try writer.writeAll("template placeholder cannot be empty"),
-        .invalid_identifier => |name| try writer.print("template placeholder '{s}' is not a valid identifier", .{name}),
-        .invalid_read_type => |tag| try writer.print("read type '{s}' is not supported", .{tag}),
+        inline else => |payload, tag| {
+            const args = switch (@typeInfo(@TypeOf(payload))) {
+                .void => .{},
+                .@"struct" => payload,
+                else => @compileError("diagnostic message payloads must be void or struct"),
+            };
+            try writer.print(@field(message_formats, @tagName(tag)), args);
+        },
     }
 }
 

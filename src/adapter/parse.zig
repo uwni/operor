@@ -56,9 +56,12 @@ fn documentMessage(err: anyerror) ?diagnostic.Message {
 }
 
 fn failDocument(reporter: diagnostic.Reporter, file_name: []const u8, message: diagnostic.Message) error{OutOfMemory}!void {
+    var context = reporter.context;
+    context.adapter_name = file_name;
     try reporter
-        .withSource(.adapter_document, file_name)
-        .add(.fatal, .{ .start = 0, .end = file_name.len }, message);
+        .withSourceKind(.adapter_document)
+        .withContext(context)
+        .add(.fatal, null, message);
 }
 
 fn buildAdapter(
@@ -255,6 +258,43 @@ test "parse adapter result owns document data independent of diagnostics" {
         .string => |name| try std.testing.expectEqualStrings("float", name),
         .object => return error.TestUnexpectedResult,
     }
+}
+
+test "parse adapter document diagnostic does not invent byte position" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.makePath("adapters");
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
+    defer dir.close(std.testing.io);
+
+    var parse_arena: std.heap.ArenaAllocator = .init(gpa);
+    defer parse_arena.deinit();
+
+    var diagnostics = diagnostic.Diagnostics.init(parse_arena.allocator(), "recipe.yaml");
+    defer diagnostics.deinit();
+
+    try std.testing.expectError(
+        error.AnalysisFail,
+        parseAdapterInDir(
+            parse_arena.allocator(),
+            std.testing.io,
+            dir,
+            "missing.yaml",
+            diagnostics.reporter().withContext(.{ .instrument_name = "psu", .adapter_name = "missing.yaml" }),
+        ),
+    );
+
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    try diagnostics.writeAll(&out.writer);
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "adapter=missing.yaml: adapter not found\n"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, out.written(), 1, "at byte"));
 }
 
 test "parse args string short form" {

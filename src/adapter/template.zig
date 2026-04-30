@@ -109,7 +109,7 @@ fn parseTemplateInner(
                     return reporter.fail(.{
                         .start = source_offset + i + 1,
                         .end = source_offset + close_idx,
-                    }, .{ .invalid_identifier = inner });
+                    }, .{ .invalid_identifier = .{ .identifier = inner } });
                 }
                 try segments.append(allocator, .{ .placeholder = try allocator.dupe(u8, inner) });
 
@@ -188,7 +188,7 @@ test "parse template error: invalid identifier" {
 
     try std.testing.expectError(error.AnalysisFail, parseTemplate(gpa, "VOLT {123bad}", diagnostics.reporter()));
     try std.testing.expectEqual(@as(usize, 1), diagnostics.items.items.len);
-    try std.testing.expectEqualStrings("123bad", diagnostics.items.items[0].message.invalid_identifier);
+    try std.testing.expectEqualStrings("123bad", diagnostics.items.items[0].message.invalid_identifier.identifier);
 }
 
 test "parse template with optional group" {

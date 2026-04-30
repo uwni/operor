@@ -44,7 +44,7 @@ const AstParser = struct {
     }
 
     fn expectChar(self: *AstParser, expected: u8, expected_text: []const u8) CompileError!void {
-        if (!self.matchChar(expected)) return self.failAt(self.pos, .{ .expected_token = expected_text });
+        if (!self.matchChar(expected)) return self.failAt(self.pos, .{ .expected_token = .{ .token = expected_text } });
     }
 
     fn matchStr(self: *AstParser, prefix: []const u8) bool {
@@ -213,7 +213,7 @@ const AstParser = struct {
                     try self.expectChar(')', ")");
                     return try self.newNode(.{ .call_join = .{ .ref = ref, .delim = delim } }, .{ .start = name_start, .end = self.pos });
                 } else {
-                    return self.fail(.{ .start = name_start, .end = self.pos }, .{ .unknown_function = name });
+                    return self.fail(.{ .start = name_start, .end = self.pos }, .{ .unknown_function = .{ .name = name } });
                 }
             }
             self.pos = name_start;
@@ -252,7 +252,7 @@ const AstParser = struct {
         self.pos += 2;
         const start = self.pos;
         while (self.pos < self.source.len and self.source[self.pos] != '}') : (self.pos += 1) {}
-        if (self.pos >= self.source.len) return self.failAt(self.pos, .{ .expected_token = "}" });
+        if (self.pos >= self.source.len) return self.failAt(self.pos, .{ .expected_token = .{ .token = "}" } });
         const text = self.source[start..self.pos];
         self.pos += 1;
         return .{ .name = text };
@@ -283,9 +283,9 @@ const AstParser = struct {
         const span: Span = .{ .start = start, .end = self.pos };
         const text = self.source[start..self.pos];
         if (!is_float) {
-            return try self.newNode(.{ .int = std.fmt.parseInt(i64, text, 10) catch return self.fail(span, .{ .invalid_number = text }) }, span);
+            return try self.newNode(.{ .int = std.fmt.parseInt(i64, text, 10) catch return self.fail(span, .{ .invalid_number = .{ .number = text } }) }, span);
         }
-        return try self.newNode(.{ .float = std.fmt.parseFloat(f64, text) catch return self.fail(span, .{ .invalid_number = text }) }, span);
+        return try self.newNode(.{ .float = std.fmt.parseFloat(f64, text) catch return self.fail(span, .{ .invalid_number = .{ .number = text } }) }, span);
     }
 };
 

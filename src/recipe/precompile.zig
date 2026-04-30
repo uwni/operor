@@ -584,7 +584,7 @@ const ExprOptimizer = struct {
     }
 
     fn foldConstListElem(self: *ExprOptimizer, items: []const recipe_ir.Value, index: i64, span: expr.Span, index_span: expr.Span) !*expr.Ast.Node {
-        if (index < 0) return self.diagnostics.fail(index_span, .{ .negative_list_index = index });
+        if (index < 0) return self.diagnostics.fail(index_span, .{ .negative_list_index = .{ .index = index } });
         const idx: usize = @intCast(index);
         if (idx >= items.len) return self.diagnostics.fail(index_span, .{ .list_index_out_of_bounds = .{ .index = index, .len = items.len } });
         return switch (items[idx]) {
