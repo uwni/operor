@@ -28,19 +28,19 @@ const ExprSourceKind = enum {
 };
 
 pub fn precompilePath(
-    allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
     io: std.Io,
     recipe_path: []const u8,
     adapter_dir: std.Io.Dir,
     log: ?*std.Io.Writer,
 ) !recipe_ir.PrecompiledRecipe {
-    var diagnostics: diagnostic.Diagnostics = .init(allocator, recipe_path);
+    var diagnostics: diagnostic.Diagnostics = .init(gpa, recipe_path);
     defer diagnostics.deinit();
     var empty_diagnostics: diagnostic.EmptyDiagnostics = .init();
     defer empty_diagnostics.deinit();
     const reporter = if (log != null) diagnostics.reporter() else empty_diagnostics.reporter();
 
-    var precompile_arena: std.heap.ArenaAllocator = .init(allocator);
+    var precompile_arena: std.heap.ArenaAllocator = .init(gpa);
     defer precompile_arena.deinit();
     const precompile_allocator = precompile_arena.allocator();
     defer if (log) |writer| {
@@ -62,7 +62,7 @@ pub fn precompilePath(
 
     var loaded_adapters = try loadAdapters(adapter_cache_arena.allocator(), io, &recipe_cfg, adapter_dir, reporter);
 
-    const compiled = try precompileInternal(allocator, &recipe_cfg, &loaded_adapters, reporter);
+    const compiled = try precompileInternal(gpa, precompile_allocator, &recipe_cfg, &loaded_adapters, reporter);
 
     return compiled;
 }
@@ -78,34 +78,41 @@ pub fn precompilePath(
 /// 6. Parse `stop_when` and return a fully validated `PrecompiledRecipe` whose data is owned by the arena.
 ///
 /// Precompile only validates and reshapes recipe data; it does not perform VISA I/O or talk to hardware.
+/// `gpa` is the parent allocator for the returned recipe arena.
+/// `scratch_alloc` owns temporary compiler data; returned recipe data must not
+/// reference allocations owned only by it. Data referenced by the returned
+/// `PrecompiledRecipe` is allocated from the local result `arena`.
 fn precompileInternal(
-    allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
     loaded_adapters: *const std.StringHashMap(Adapter),
     reporter: diagnostic.Reporter,
 ) !recipe_ir.PrecompiledRecipe {
     // 1. Create the arena-owned result lifetime.
-    var arena: std.heap.ArenaAllocator = .init(allocator);
-    errdefer arena.deinit();
-    const alloc = arena.allocator();
+    var result_arena: std.heap.ArenaAllocator = .init(gpa);
+    errdefer result_arena.deinit();
+    const arena = result_arena.allocator();
 
-    var slot_map = try buildSlotMap(alloc, recipe, reporter);
+    var slot_map = try buildSlotMap(scratch_alloc, arena, recipe, reporter);
+    defer slot_map.deinit();
 
     // 3. Compile instrument metadata from loaded adapters.
-    var precompiled_instruments = try precompileInstruments(alloc, recipe, loaded_adapters);
+    var precompiled_instruments = try precompileInstruments(arena, recipe, loaded_adapters);
 
     // 3-5. Normalize tasks and steps, resolving commands and validating arguments.
     var assign_set: std.StringArrayHashMapUnmanaged(void) = .empty;
-    const tasks = try precompileTasks(alloc, recipe, &slot_map, loaded_adapters, &precompiled_instruments, &assign_set, reporter);
+    defer assign_set.deinit(scratch_alloc);
+    const tasks = try precompileTasks(scratch_alloc, arena, recipe, &slot_map, loaded_adapters, &precompiled_instruments, &assign_set, reporter);
 
     // 6. Validate and resolve pipeline record configuration.
-    const pipeline = try resolvePipelineConfig(alloc, recipe, &slot_map, &assign_set, reporter);
+    const pipeline = try resolvePipelineConfig(scratch_alloc, arena, recipe, &slot_map, &assign_set, reporter);
 
     // 7. Parse optional stop_when expression.
     var stop_when: ?expr.Expression = null;
     var stop_when_failed = false;
     if (recipe.stop_when) |src|
-        stop_when = slot_map.compileExpr(reporter, .{}, src.source(), .expression) catch |err| switch (err) {
+        stop_when = slot_map.compileExpr(arena, reporter, .{}, src.source(), .expression) catch |err| switch (err) {
             error.AnalysisFail => blk: {
                 stop_when_failed = true;
                 break :blk null;
@@ -119,7 +126,7 @@ fn precompileInternal(
     assignSaveColumns(tasks, &slot_map, pipeline.record.?.explicit);
 
     return .{
-        .arena = arena,
+        .arena = result_arena,
         .instruments = precompiled_instruments,
         .tasks = tasks,
         .pipeline = pipeline,
@@ -145,18 +152,27 @@ const SlotMap = struct {
     slots: SlotTable,
     initial_values: []const recipe_ir.Value,
     const_count: usize,
-    alloc: std.mem.Allocator,
+    /// Allocator that owns only compile-time slot-table backing and expression
+    /// scratch arenas. Returned recipe data must not reference it.
+    scratch_alloc: std.mem.Allocator,
+
+    fn deinit(self: *SlotMap) void {
+        self.slots.deinit(self.scratch_alloc);
+        self.* = undefined;
+    }
 
     /// Compile an expression source string, bind variables, and rewrite it
     /// into runtime-ready bytecode with partial constant folding applied.
+    /// `arena` owns the returned expression bytecode and string literals.
     fn compileExpr(
         self: *const SlotMap,
+        arena: std.mem.Allocator,
         diag: diagnostic.Reporter,
         context: DiagnosticContext,
         source: []const u8,
         source_kind: ExprSourceKind,
     ) !expr.Expression {
-        var temp_arena: std.heap.ArenaAllocator = .init(self.alloc);
+        var temp_arena: std.heap.ArenaAllocator = .init(self.scratch_alloc);
         defer temp_arena.deinit();
 
         const expr_diags = diag.withContext(context).withSource(source_kind.sourceKind(), source);
@@ -167,7 +183,7 @@ const SlotMap = struct {
         var optimizer = ExprOptimizer.init(self, temp_arena.allocator(), expr_diags);
         try optimizer.optimize(&ast);
         try ast.remapBindings(SlotBindingRemapper{ .slot_map = self }, expr_diags);
-        return try ast.lower(self.alloc, expr_diags);
+        return try ast.lower(arena, expr_diags);
     }
 
     /// Look up a name and return the runtime binding (var slot remapped)
@@ -251,7 +267,7 @@ const SlotBindingRemapper = struct {
 
 const ExprOptimizer = struct {
     slot_map: *const SlotMap,
-    allocator: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
     diagnostics: diagnostic.Reporter,
 
     const ScalarClass = enum {
@@ -260,10 +276,10 @@ const ExprOptimizer = struct {
         other,
     };
 
-    fn init(slot_map: *const SlotMap, allocator: std.mem.Allocator, diagnostics: diagnostic.Reporter) ExprOptimizer {
+    fn init(slot_map: *const SlotMap, scratch_alloc: std.mem.Allocator, diagnostics: diagnostic.Reporter) ExprOptimizer {
         return .{
             .slot_map = slot_map,
-            .allocator = allocator,
+            .scratch_alloc = scratch_alloc,
             .diagnostics = diagnostics,
         };
     }
@@ -273,7 +289,7 @@ const ExprOptimizer = struct {
     }
 
     fn newNode(self: *ExprOptimizer, data: expr.Ast.Node.Data, span: expr.Span) !*expr.Ast.Node {
-        const node = try self.allocator.create(expr.Ast.Node);
+        const node = try self.scratch_alloc.create(expr.Ast.Node);
         node.* = .{ .span = span, .data = data };
         return node;
     }
@@ -366,7 +382,7 @@ const ExprOptimizer = struct {
             .int => |v| try self.newNode(.{ .int = v }, span),
             .float => |v| try self.newNode(.{ .float = v }, span),
             .bool => |v| try self.newNode(.{ .bool = v }, span),
-            .string => |v| try self.newNode(.{ .string = try self.allocator.dupe(u8, v) }, span),
+            .string => |v| try self.newNode(.{ .string = try self.scratch_alloc.dupe(u8, v) }, span),
         };
     }
 
@@ -407,7 +423,7 @@ const ExprOptimizer = struct {
                 .int => |value| try self.newNode(.{ .int = value }, span),
                 .float => |value| try self.newNode(.{ .float = value }, span),
                 .bool => |value| try self.newNode(.{ .bool = value }, span),
-                .string => |value| try self.newNode(.{ .string = try self.allocator.dupe(u8, value) }, span),
+                .string => |value| try self.newNode(.{ .string = try self.scratch_alloc.dupe(u8, value) }, span),
                 .list => null,
             },
         };
@@ -485,7 +501,7 @@ const ExprOptimizer = struct {
         if (op != .add and op != .mul) return null;
 
         var operands: std.ArrayList(*expr.Ast.Node) = .empty;
-        defer operands.deinit(self.allocator);
+        defer operands.deinit(self.scratch_alloc);
         try self.collectAssocOperands(&operands, op, lhs);
         try self.collectAssocOperands(&operands, op, rhs);
 
@@ -497,7 +513,7 @@ const ExprOptimizer = struct {
         var first_const_pos: ?usize = null;
         var aggregate: i64 = if (op == .add) 0 else 1;
         var nonconst: std.ArrayList(*expr.Ast.Node) = .empty;
-        defer nonconst.deinit(self.allocator);
+        defer nonconst.deinit(self.scratch_alloc);
 
         for (operands.items, 0..) |item, idx| {
             if (constInt(item)) |value| {
@@ -509,7 +525,7 @@ const ExprOptimizer = struct {
                     else => unreachable,
                 };
             } else {
-                try nonconst.append(self.allocator, item);
+                try nonconst.append(self.scratch_alloc, item);
             }
         }
 
@@ -523,7 +539,7 @@ const ExprOptimizer = struct {
         if (const_count == 1 and !drop_identity) return null;
 
         var ordered: std.ArrayList(*expr.Ast.Node) = .empty;
-        defer ordered.deinit(self.allocator);
+        defer ordered.deinit(self.scratch_alloc);
 
         const insert_pos = blk: {
             if (first_const_pos == null) break :blk nonconst.items.len;
@@ -536,12 +552,12 @@ const ExprOptimizer = struct {
 
         for (nonconst.items, 0..) |item, idx| {
             if (!drop_identity and idx == insert_pos) {
-                try ordered.append(self.allocator, try self.newNode(.{ .int = aggregate }, span));
+                try ordered.append(self.scratch_alloc, try self.newNode(.{ .int = aggregate }, span));
             }
-            try ordered.append(self.allocator, item);
+            try ordered.append(self.scratch_alloc, item);
         }
         if (!drop_identity and insert_pos >= nonconst.items.len) {
-            try ordered.append(self.allocator, try self.newNode(.{ .int = aggregate }, span));
+            try ordered.append(self.scratch_alloc, try self.newNode(.{ .int = aggregate }, span));
         }
 
         if (ordered.items.len == 0) return try self.newNode(.{ .int = aggregate }, span);
@@ -563,7 +579,7 @@ const ExprOptimizer = struct {
             },
             else => {},
         }
-        try out.append(self.allocator, node);
+        try out.append(self.scratch_alloc, node);
     }
 
     fn foldConstListElem(self: *ExprOptimizer, items: []const recipe_ir.Value, index: i64, span: expr.Span, index_span: expr.Span) !*expr.Ast.Node {
@@ -574,7 +590,7 @@ const ExprOptimizer = struct {
             .int => |value| try self.newNode(.{ .int = value }, span),
             .float => |value| try self.newNode(.{ .float = value }, span),
             .bool => |value| try self.newNode(.{ .bool = value }, span),
-            .string => |value| try self.newNode(.{ .string = try self.allocator.dupe(u8, value) }, span),
+            .string => |value| try self.newNode(.{ .string = try self.scratch_alloc.dupe(u8, value) }, span),
             .list => self.diagnostics.fail(span, .nested_list_value),
         };
     }
@@ -583,15 +599,15 @@ const ExprOptimizer = struct {
         const items = self.constListItems(ref) orelse return null;
         const delimiter = constString(delim) orelse return null;
         var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(self.allocator);
+        errdefer out.deinit(self.scratch_alloc);
         for (items, 0..) |item, idx| {
-            if (idx > 0) try out.appendSlice(self.allocator, delimiter);
-            expr.appendResolvedValueText(&out, self.allocator, SlotMap.resolveConstValue(item)) catch |err| switch (err) {
+            if (idx > 0) try out.appendSlice(self.scratch_alloc, delimiter);
+            expr.appendResolvedValueText(&out, self.scratch_alloc, SlotMap.resolveConstValue(item)) catch |err| switch (err) {
                 error.InvalidExpression => return self.diagnostics.fail(span, .nested_list_value),
                 error.OutOfMemory => return error.OutOfMemory,
             };
         }
-        return try self.newNode(.{ .string = try out.toOwnedSlice(self.allocator) }, span);
+        return try self.newNode(.{ .string = try out.toOwnedSlice(self.scratch_alloc) }, span);
     }
 
     fn foldConstValue(self: *ExprOptimizer, value: expr.EvalError!expr.Value, span: expr.Span) expr.CompileError!expr.Value {
@@ -635,8 +651,11 @@ const ExprOptimizer = struct {
 
 /// Validate consts/vars, build the merged slot map (consts first, then vars),
 /// compile initial values, and create the compile-time const resolver.
+/// `scratch_alloc` owns the compile-time slot table backing; `arena` owns
+/// initial values that are returned as part of `PrecompiledRecipe`.
 fn buildSlotMap(
-    alloc: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
+    arena: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
     diag: diagnostic.Reporter,
 ) !SlotMap {
@@ -666,50 +685,52 @@ fn buildSlotMap(
     if (has_error) return error.AnalysisFail;
 
     // Build initial values array: consts first, then vars.
-    const initial_values = try alloc.alloc(recipe_ir.Value, const_keys.len + var_keys.len);
+    const initial_values = try arena.alloc(recipe_ir.Value, const_keys.len + var_keys.len);
     for (const_vals, 0..) |value, idx| {
-        initial_values[idx] = try compileInitialValue(alloc, value);
+        initial_values[idx] = try compileInitialValue(arena, value);
     }
     for (var_vals, 0..) |value, idx| {
-        initial_values[const_keys.len + idx] = try compileInitialValue(alloc, value);
+        initial_values[const_keys.len + idx] = try compileInitialValue(arena, value);
     }
 
     // Build the key-only slot map: consts first, then vars.
     var all_slots: SlotTable = .empty;
-    for (const_keys) |name| try all_slots.put(alloc, name, {});
-    for (var_keys) |name| try all_slots.put(alloc, name, {});
+    errdefer all_slots.deinit(scratch_alloc);
+    for (const_keys) |name| try all_slots.put(scratch_alloc, name, {});
+    for (var_keys) |name| try all_slots.put(scratch_alloc, name, {});
 
     return .{
         .slots = all_slots,
         .initial_values = initial_values,
         .const_count = const_keys.len,
-        .alloc = alloc,
+        .scratch_alloc = scratch_alloc,
     };
 }
 
+/// `cache_alloc` owns loaded adapter documents for the duration of precompile.
 fn loadAdapters(
-    allocator: std.mem.Allocator,
+    cache_alloc: std.mem.Allocator,
     io: std.Io,
     recipe: *const config.RecipeConfig,
     adapter_dir: std.Io.Dir,
     diag: diagnostic.Reporter,
 ) !std.StringHashMap(Adapter) {
-    var map: std.StringHashMap(Adapter) = .init(allocator);
+    var map: std.StringHashMap(Adapter) = .init(cache_alloc);
     var instrument_it = recipe.instruments.iterator();
     while (instrument_it.next()) |entry| {
         const cfg = entry.value_ptr.*;
-        _ = try getOrParseAdapter(allocator, io, &map, adapter_dir, entry.key_ptr.*, cfg.adapter, diag);
+        _ = try getOrParseAdapter(cache_alloc, io, &map, adapter_dir, entry.key_ptr.*, cfg.adapter, diag);
     }
     return map;
 }
 
 fn precompileInstruments(
-    alloc: std.mem.Allocator,
+    arena: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
     loaded_adapters: *const std.StringHashMap(Adapter),
 ) !std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument) {
     var precompiled_instruments: std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument) = .empty;
-    try precompiled_instruments.ensureTotalCapacity(alloc, recipe.instruments.count());
+    try precompiled_instruments.ensureTotalCapacity(arena, recipe.instruments.count());
 
     var instrument_it = recipe.instruments.iterator();
     while (instrument_it.next()) |entry| {
@@ -717,22 +738,22 @@ fn precompileInstruments(
         const instrument_cfg = entry.value_ptr;
         const adapter = loaded_adapters.getPtr(instrument_cfg.adapter).?;
 
-        const name_copy = try alloc.dupe(u8, instrument_name);
-        const precompiled_instrument = try precompileOwnedInstrument(alloc, instrument_cfg, adapter);
-        try precompiled_instruments.put(alloc, name_copy, precompiled_instrument);
+        const name_copy = try arena.dupe(u8, instrument_name);
+        const precompiled_instrument = try precompileOwnedInstrument(arena, instrument_cfg, adapter);
+        try precompiled_instruments.put(arena, name_copy, precompiled_instrument);
     }
     return precompiled_instruments;
 }
 
-fn precompileOwnedInstrument(alloc: std.mem.Allocator, instrument_cfg: *const config.InstrumentConfig, adapter: *const Adapter) !recipe_ir.PrecompiledInstrument {
-    const adapter_copy = try alloc.dupe(u8, instrument_cfg.adapter);
-    const resource_copy = try alloc.dupe(u8, instrument_cfg.resource);
-    const write_termination = try cloneOptionalBytes(alloc, adapter.write_termination);
-    const bool_map = try cloneBoolTextMap(alloc, adapter.instrument.bool_format);
+fn precompileOwnedInstrument(arena: std.mem.Allocator, instrument_cfg: *const config.InstrumentConfig, adapter: *const Adapter) !recipe_ir.PrecompiledInstrument {
+    const adapter_copy = try arena.dupe(u8, instrument_cfg.adapter);
+    const resource_copy = try arena.dupe(u8, instrument_cfg.resource);
+    const write_termination = try cloneOptionalBytes(arena, adapter.write_termination);
+    const bool_map = try cloneBoolTextMap(arena, adapter.instrument.bool_format);
     return .{
         .adapter_name = adapter_copy,
         .resource = resource_copy,
-        .commands = std.StringHashMap(*const recipe_ir.PrecompiledCommand).init(alloc),
+        .commands = std.StringHashMap(*const recipe_ir.PrecompiledCommand).init(arena),
         .write_termination = write_termination,
         .bool_map = bool_map,
         .options = .{
@@ -745,7 +766,8 @@ fn precompileOwnedInstrument(alloc: std.mem.Allocator, instrument_cfg: *const co
 }
 
 fn precompileTasks(
-    arena_alloc: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
+    arena: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
     slot_map: *const SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
@@ -754,11 +776,11 @@ fn precompileTasks(
     diag: diagnostic.Reporter,
 ) ![]recipe_ir.Task {
     var tasks: std.ArrayList(recipe_ir.Task) = .empty;
-    errdefer tasks.deinit(arena_alloc);
+    errdefer tasks.deinit(arena);
     var has_error = false;
 
     for (recipe.tasks, 0..) |*task_cfg, task_idx| {
-        const steps = precompileSteps(arena_alloc, task_cfg.steps, slot_map, loaded_adapters, precompiled_instruments, assign_set, task_idx, diag) catch |err| switch (err) {
+        const steps = precompileSteps(scratch_alloc, arena, task_cfg.steps, slot_map, loaded_adapters, precompiled_instruments, assign_set, task_idx, diag) catch |err| switch (err) {
             error.AnalysisFail => {
                 has_error = true;
                 continue;
@@ -768,7 +790,7 @@ fn precompileTasks(
 
         if (task_cfg.@"while") |while_src| {
             const task_context: DiagnosticContext = .{ .task_idx = task_idx };
-            const condition = slot_map.compileExpr(diag, task_context, while_src.source(), .expression) catch |err| {
+            const condition = slot_map.compileExpr(arena, diag, task_context, while_src.source(), .expression) catch |err| {
                 switch (err) {
                     error.AnalysisFail => {
                         has_error = true;
@@ -778,13 +800,13 @@ fn precompileTasks(
                 }
             };
             // Loop task
-            try tasks.append(arena_alloc, .{ .loop = .{
+            try tasks.append(arena, .{ .loop = .{
                 .condition = condition,
                 .steps = steps,
             } });
         } else if (task_cfg.@"if") |guard_src| {
             const task_context: DiagnosticContext = .{ .task_idx = task_idx };
-            const condition = slot_map.compileExpr(diag, task_context, guard_src.source(), .expression) catch |err| {
+            const condition = slot_map.compileExpr(arena, diag, task_context, guard_src.source(), .expression) catch |err| {
                 switch (err) {
                     error.AnalysisFail => {
                         has_error = true;
@@ -794,23 +816,24 @@ fn precompileTasks(
                 }
             };
             // Conditional task
-            try tasks.append(arena_alloc, .{ .conditional = .{
+            try tasks.append(arena, .{ .conditional = .{
                 .@"if" = condition,
                 .steps = steps,
             } });
         } else {
             // Sequential task
-            try tasks.append(arena_alloc, .{ .sequential = .{
+            try tasks.append(arena, .{ .sequential = .{
                 .steps = steps,
             } });
         }
     }
     if (has_error) return error.AnalysisFail;
-    return try tasks.toOwnedSlice(arena_alloc);
+    return try tasks.toOwnedSlice(arena);
 }
 
 fn precompileSteps(
-    arena_alloc: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
+    arena: std.mem.Allocator,
     step_cfgs: []config.StepConfig,
     slot_map: *const SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
@@ -820,13 +843,14 @@ fn precompileSteps(
     diag: diagnostic.Reporter,
 ) ![]recipe_ir.Step {
     var steps: std.ArrayList(recipe_ir.Step) = .empty;
-    errdefer steps.deinit(arena_alloc);
+    errdefer steps.deinit(arena);
     var has_error = false;
 
     for (step_cfgs, 0..) |*step_cfg, step_idx| {
         const step = switch (step_cfg.*) {
             .compute => |*cfg| precompileComputeStep(
-                arena_alloc,
+                scratch_alloc,
+                arena,
                 slot_map,
                 assign_set,
                 cfg,
@@ -835,7 +859,8 @@ fn precompileSteps(
                 diag,
             ),
             .call => |*cfg| precompileCallStep(
-                arena_alloc,
+                scratch_alloc,
+                arena,
                 slot_map,
                 loaded_adapters,
                 precompiled_instruments,
@@ -845,9 +870,10 @@ fn precompileSteps(
                 step_idx,
                 diag,
             ),
-            .sleep_ms => |*cfg| precompileSleepStep(slot_map, cfg, task_idx, step_idx, diag),
+            .sleep_ms => |*cfg| precompileSleepStep(arena, slot_map, cfg, task_idx, step_idx, diag),
             .parallel => |*cfg| precompileParallelStep(
-                arena_alloc,
+                scratch_alloc,
+                arena,
                 slot_map,
                 loaded_adapters,
                 precompiled_instruments,
@@ -864,14 +890,15 @@ fn precompileSteps(
             },
             else => return err,
         };
-        try steps.append(arena_alloc, step);
+        try steps.append(arena, step);
     }
     if (has_error) return error.AnalysisFail;
-    return try steps.toOwnedSlice(arena_alloc);
+    return try steps.toOwnedSlice(arena);
 }
 
 fn precompileComputeStep(
-    arena_alloc: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
+    arena: std.mem.Allocator,
     slot_map: *const SlotMap,
     assign_set: *std.StringArrayHashMapUnmanaged(void),
     cfg: *const config.ComputeStepConfig,
@@ -881,14 +908,13 @@ fn precompileComputeStep(
 ) !recipe_ir.Step {
     const step_context: DiagnosticContext = .{ .task_idx = task_idx, .step_idx = step_idx };
 
-    const if_expr = try precompileIf(slot_map, diag, step_context, cfg.@"if");
+    const if_expr = try precompileIf(arena, slot_map, diag, step_context, cfg.@"if");
 
     const assign_context: DiagnosticContext = .{ .task_idx = task_idx, .step_idx = step_idx, .variable_name = cfg.assign };
     const save_slot = try slot_map.varSlotIndex(diag, assign_context, cfg.assign);
-    const assign_copy = try arena_alloc.dupe(u8, cfg.assign);
-    try assign_set.put(arena_alloc, assign_copy, {});
+    try assign_set.put(scratch_alloc, cfg.assign, {});
 
-    const compute_expr = try slot_map.compileExpr(diag, assign_context, cfg.compute, .expression);
+    const compute_expr = try slot_map.compileExpr(arena, diag, assign_context, cfg.compute, .expression);
 
     return .{
         .action = .{ .compute = .{
@@ -900,7 +926,8 @@ fn precompileComputeStep(
 }
 
 fn precompileCallStep(
-    arena_alloc: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
+    arena: std.mem.Allocator,
     slot_map: *const SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
@@ -928,7 +955,7 @@ fn precompileCallStep(
         .command_name = command_name,
     };
 
-    const if_expr = try precompileIf(slot_map, diag, call_context, cfg.@"if");
+    const if_expr = try precompileIf(arena, slot_map, diag, call_context, cfg.@"if");
 
     const precompiled_instrument = precompiled_instruments.getPtr(instrument_name) orelse {
         return diag.withContext(call_context).fail(null, .{ .instrument_not_found = .{ .instrument = instrument_name } });
@@ -942,19 +969,18 @@ fn precompileCallStep(
             .command = command_name,
         } });
     };
-    const command = try getOrCompileCommand(arena_alloc, precompiled_instrument, command_source, command_name, loaded_adapter.instrument.bool_format, diag, call_context);
+    const command = try getOrCompileCommand(scratch_alloc, arena, precompiled_instrument, command_source, command_name, loaded_adapter.instrument.bool_format, diag, call_context);
 
-    const call_copy = try arena_alloc.dupe(u8, command_name);
-    const instrument_copy = try arena_alloc.dupe(u8, instrument_name);
-    const compiled_args = try compileStepArgs(arena_alloc, command, cfg.args, slot_map, diag, call_context);
+    const call_copy = try arena.dupe(u8, command_name);
+    const instrument_copy = try arena.dupe(u8, instrument_name);
+    const compiled_args = try compileStepArgs(arena, command, cfg.args, slot_map, diag, call_context);
 
     var save_slot: ?usize = null;
     if (cfg.assign) |label| {
         var assign_context = call_context;
         assign_context.variable_name = label;
         save_slot = try slot_map.varSlotIndex(diag, assign_context, label);
-        const duped = try arena_alloc.dupe(u8, label);
-        try assign_set.put(arena_alloc, duped, {});
+        try assign_set.put(scratch_alloc, label, {});
     }
 
     return .{
@@ -971,18 +997,20 @@ fn precompileCallStep(
 }
 
 fn precompileIf(
+    arena: std.mem.Allocator,
     slot_map: *const SlotMap,
     diag: diagnostic.Reporter,
     context: DiagnosticContext,
     if_src_opt: ?config.BooleanExpr,
 ) !?expr.Expression {
     if (if_src_opt) |if_src| {
-        return try slot_map.compileExpr(diag, context, if_src.source(), .expression);
+        return try slot_map.compileExpr(arena, diag, context, if_src.source(), .expression);
     }
     return null;
 }
 
 fn precompileSleepStep(
+    arena: std.mem.Allocator,
     slot_map: *const SlotMap,
     cfg: *const config.SleepStepConfig,
     task_idx: usize,
@@ -990,7 +1018,7 @@ fn precompileSleepStep(
     diag: diagnostic.Reporter,
 ) !recipe_ir.Step {
     const step_context: DiagnosticContext = .{ .task_idx = task_idx, .step_idx = step_idx };
-    const if_expr = try precompileIf(slot_map, diag, step_context, cfg.@"if");
+    const if_expr = try precompileIf(arena, slot_map, diag, step_context, cfg.@"if");
     return .{
         .action = .{ .sleep = .{ .duration_ms = cfg.sleep_ms } },
         .@"if" = if_expr,
@@ -998,7 +1026,8 @@ fn precompileSleepStep(
 }
 
 fn precompileParallelStep(
-    arena_alloc: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
+    arena: std.mem.Allocator,
     slot_map: *const SlotMap,
     loaded_adapters: *const std.StringHashMap(Adapter),
     precompiled_instruments: *std.StringArrayHashMapUnmanaged(recipe_ir.PrecompiledInstrument),
@@ -1018,7 +1047,8 @@ fn precompileParallelStep(
     }
 
     const inner_steps = try precompileSteps(
-        arena_alloc,
+        scratch_alloc,
+        arena,
         cfg.parallel,
         slot_map,
         loaded_adapters,
@@ -1028,14 +1058,14 @@ fn precompileParallelStep(
         diag,
     );
     try validateParallelUniqueInstruments(
-        arena_alloc,
+        scratch_alloc,
         inner_steps,
         precompiled_instruments.count(),
         step_context,
         diag,
     );
 
-    const if_expr = try precompileIf(slot_map, diag, step_context, cfg.@"if");
+    const if_expr = try precompileIf(arena, slot_map, diag, step_context, cfg.@"if");
     return .{
         .action = .{ .parallel = .{ .steps = inner_steps } },
         .@"if" = if_expr,
@@ -1043,14 +1073,14 @@ fn precompileParallelStep(
 }
 
 fn validateParallelUniqueInstruments(
-    allocator: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
     steps: []const recipe_ir.Step,
     instrument_count: usize,
     context: DiagnosticContext,
     diag: diagnostic.Reporter,
 ) !void {
-    var seen = try std.DynamicBitSetUnmanaged.initEmpty(allocator, instrument_count);
-    defer seen.deinit(allocator);
+    var seen = try std.DynamicBitSetUnmanaged.initEmpty(scratch_alloc, instrument_count);
+    defer seen.deinit(scratch_alloc);
 
     for (steps) |*step| {
         switch (step.action) {
@@ -1068,7 +1098,8 @@ fn validateParallelUniqueInstruments(
 }
 
 fn resolvePipelineConfig(
-    arena_alloc: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
+    arena: std.mem.Allocator,
     recipe: *const config.RecipeConfig,
     slot_map: *const SlotMap,
     assign_set: *const std.StringArrayHashMapUnmanaged(void),
@@ -1086,17 +1117,18 @@ fn resolvePipelineConfig(
     }
 
     try validatePipelineConfig(&pipeline_cfg, diag);
-    var pipeline = try pipeline_cfg.clone(arena_alloc);
+    var pipeline = try pipeline_cfg.clone(arena);
     if (pipeline.record == null) {
         pipeline.record = .{ .explicit = empty_columns };
     }
 
     switch (pipeline.record.?) {
         .all => {
-            pipeline.record = .{ .explicit = try arena_alloc.dupe([]const u8, assign_set.keys()) };
+            pipeline.record = .{ .explicit = try cloneStringList(arena, assign_set.keys()) };
         },
         .explicit => |columns| {
             var seen: std.StringArrayHashMapUnmanaged(void) = .empty;
+            defer seen.deinit(scratch_alloc);
             var unique_columns: std.ArrayList([]const u8) = .empty;
 
             for (columns) |name| {
@@ -1106,7 +1138,7 @@ fn resolvePipelineConfig(
                     try column_reporter.warn(null, .{ .duplicate_record_column = .{ .column = name } });
                     continue;
                 }
-                try seen.put(arena_alloc, name, {});
+                try seen.put(scratch_alloc, name, {});
 
                 var valid = true;
                 if (slot_map.resolveName(name) == null) {
@@ -1119,9 +1151,9 @@ fn resolvePipelineConfig(
                     valid = false;
                     has_error = true;
                 }
-                if (valid) try unique_columns.append(arena_alloc, name);
+                if (valid) try unique_columns.append(arena, name);
             }
-            pipeline.record = .{ .explicit = try unique_columns.toOwnedSlice(arena_alloc) };
+            pipeline.record = .{ .explicit = try unique_columns.toOwnedSlice(arena) };
         },
     }
     if (has_error) return error.AnalysisFail;
@@ -1182,24 +1214,32 @@ fn slotToColumn(var_keys: []const []const u8, save_slot: usize, columns: []const
     return null;
 }
 
-fn cloneOptionalBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
+fn cloneOptionalBytes(arena: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     if (bytes.len == 0) return "";
-    return allocator.dupe(u8, bytes);
+    return arena.dupe(u8, bytes);
 }
 
 fn cloneBoolTextMap(
-    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
     source: ?adapter_schema.BoolFormat,
 ) !?recipe_ir.BoolTextMap {
     const src = source orelse return null;
     return .{
-        .true_text = try allocator.dupe(u8, src.true),
-        .false_text = try allocator.dupe(u8, src.false),
+        .true_text = try arena.dupe(u8, src.true),
+        .false_text = try arena.dupe(u8, src.false),
     };
 }
 
+fn cloneStringList(arena: std.mem.Allocator, source: []const []const u8) ![]const []const u8 {
+    const out = try arena.alloc([]const u8, source.len);
+    for (source, 0..) |item, idx| {
+        out[idx] = try arena.dupe(u8, item);
+    }
+    return out;
+}
+
 fn getOrParseAdapter(
-    allocator: std.mem.Allocator,
+    cache_alloc: std.mem.Allocator,
     io: std.Io,
     loaded_adapters: *std.StringHashMap(Adapter),
     adapter_dir: std.Io.Dir,
@@ -1209,9 +1249,9 @@ fn getOrParseAdapter(
 ) !*const Adapter {
     if (loaded_adapters.getPtr(adapter_name)) |loaded| return loaded;
 
-    const key = try allocator.dupe(u8, adapter_name);
+    const key = try cache_alloc.dupe(u8, adapter_name);
 
-    var loaded = try parse_mod.parseAdapterInDir(allocator, io, adapter_dir, adapter_name, diag.withContext(.{
+    var loaded = try parse_mod.parseAdapterInDir(cache_alloc, io, adapter_dir, adapter_name, diag.withContext(.{
         .instrument_name = instrument_name,
         .adapter_name = adapter_name,
     }));
@@ -1221,8 +1261,11 @@ fn getOrParseAdapter(
     return loaded_adapters.getPtr(adapter_name).?;
 }
 
+/// `scratch_alloc` owns temporary command compilation backing; `arena` owns the
+/// cached command key, command object, and all data reachable from it.
 fn getOrCompileCommand(
-    allocator: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
+    arena: std.mem.Allocator,
     instrument: *recipe_ir.PrecompiledInstrument,
     source: Adapter.Command,
     call: []const u8,
@@ -1232,18 +1275,21 @@ fn getOrCompileCommand(
 ) !*const recipe_ir.PrecompiledCommand {
     if (instrument.commands.get(call)) |command| return command;
 
-    const key = try allocator.dupe(u8, call);
-    const compiled_value = try compileCommand(allocator, source, instrument, adapter_bool_format, diag, context);
+    const key = try arena.dupe(u8, call);
+    const compiled_value = try compileCommand(scratch_alloc, arena, source, instrument, adapter_bool_format, diag, context);
 
-    const compiled = try allocator.create(recipe_ir.PrecompiledCommand);
+    const compiled = try arena.create(recipe_ir.PrecompiledCommand);
     compiled.* = compiled_value;
 
     try instrument.commands.put(key, compiled);
     return compiled;
 }
 
+/// `scratch_alloc` owns temporary command-builder backing such as `arg_entries`.
+/// `arena` owns returned command data referenced by `PrecompiledRecipe`.
 fn compileCommand(
-    allocator: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
+    arena: std.mem.Allocator,
     source: Adapter.Command,
     instrument: *const recipe_ir.PrecompiledInstrument,
     adapter_bool_format: ?adapter_schema.BoolFormat,
@@ -1251,20 +1297,20 @@ fn compileCommand(
     base_context: DiagnosticContext,
 ) !recipe_ir.PrecompiledCommand {
     var arg_entries: std.ArrayList(ArgBuildEntry) = .empty;
-    const segments = try compileSegments(allocator, source.template, &arg_entries, false);
+    defer arg_entries.deinit(scratch_alloc);
+    const segments = try compileSegments(scratch_alloc, arena, source.template, &arg_entries, false);
 
-    const args = try allocator.alloc(recipe_ir.CommandArg, arg_entries.items.len);
+    const args = try arena.alloc(recipe_ir.CommandArg, arg_entries.items.len);
     for (arg_entries.items, 0..) |entry, idx| {
         var arg_context = base_context;
         arg_context.argument_name = entry.name;
         args[idx] = .{
             .name = entry.name,
             .is_optional = !entry.required,
-            .default = try compileArgDefault(allocator, source.args, entry.name),
-            .format = try compileArgFormat(allocator, source.args, entry.name, adapter_bool_format, diag, arg_context),
+            .default = try compileArgDefault(arena, source.args, entry.name),
+            .format = try compileArgFormat(arena, source.args, entry.name, adapter_bool_format, diag, arg_context),
         };
     }
-    arg_entries.deinit(allocator);
 
     return .{
         .instrument = instrument,
@@ -1280,7 +1326,7 @@ const ArgBuildEntry = struct {
 };
 
 fn compileArgFormat(
-    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
     source_args: ?std.StringHashMap(adapter_schema.ArgSpec),
     arg_name: []const u8,
     adapter_bool_format: ?adapter_schema.BoolFormat,
@@ -1288,13 +1334,7 @@ fn compileArgFormat(
     context: DiagnosticContext,
 ) !recipe_ir.ArgFormat {
     var format: recipe_ir.ArgFormat = .{};
-
-    if (adapter_bool_format) |bf| {
-        format.bool_map = .{
-            .true_text = try allocator.dupe(u8, bf.true),
-            .false_text = try allocator.dupe(u8, bf.false),
-        };
-    }
+    var bool_format = adapter_bool_format;
 
     if (source_args) |args_map| {
         if (args_map.get(arg_name)) |spec| {
@@ -1306,51 +1346,54 @@ fn compileArgFormat(
                             return diag.withContext(context).fail(null, .{ .partial_bool_map = {} });
                         }
                         if (obj.true) |t| {
-                            if (format.bool_map) |old| {
-                                allocator.free(old.true_text);
-                                allocator.free(old.false_text);
-                            }
-                            format.bool_map = .{
-                                .true_text = try allocator.dupe(u8, t),
-                                .false_text = try allocator.dupe(u8, obj.false.?),
-                            };
+                            bool_format = .{ .true = t, .false = obj.false.? };
                         }
                     }
                     if (obj.separator) |sep| {
-                        format.list_separator = try allocator.dupe(u8, sep);
+                        format.list_separator = try arena.dupe(u8, sep);
                     }
                 },
             }
         }
     }
 
+    if (bool_format) |bf| {
+        format.bool_map = .{
+            .true_text = try arena.dupe(u8, bf.true),
+            .false_text = try arena.dupe(u8, bf.false),
+        };
+    }
+
     return format;
 }
 
+/// `scratch_alloc` owns command argument builder backing; `arena` owns returned
+/// compiled template segments and placeholder names.
 fn compileSegments(
-    allocator: std.mem.Allocator,
+    scratch_alloc: std.mem.Allocator,
+    arena: std.mem.Allocator,
     template_segments: []const template.Segment,
     arg_entries: *std.ArrayList(ArgBuildEntry),
     in_optional: bool,
 ) ![]recipe_ir.CompiledSegment {
-    const segments = try allocator.alloc(recipe_ir.CompiledSegment, template_segments.len);
+    const segments = try arena.alloc(recipe_ir.CompiledSegment, template_segments.len);
 
     for (template_segments, 0..) |segment, idx| {
         segments[idx] = switch (segment) {
-            .literal => |literal| .{ .literal = try allocator.dupe(u8, literal) },
+            .literal => |literal| .{ .literal = try arena.dupe(u8, literal) },
             .placeholder => |name| .{ .arg = blk: {
                 if (findArgEntryIndex(arg_entries.items, name)) |arg_idx| {
                     if (!in_optional) arg_entries.items[arg_idx].required = true;
                     break :blk arg_idx;
                 }
-                const name_copy = try allocator.dupe(u8, name);
-                try arg_entries.append(allocator, .{
+                const name_copy = try arena.dupe(u8, name);
+                try arg_entries.append(scratch_alloc, .{
                     .name = name_copy,
                     .required = !in_optional,
                 });
                 break :blk arg_entries.items.len - 1;
             } },
-            .optional => |inner| .{ .optional = try compileSegments(allocator, inner, arg_entries, true) },
+            .optional => |inner| .{ .optional = try compileSegments(scratch_alloc, arena, inner, arg_entries, true) },
         };
     }
 
@@ -1358,14 +1401,14 @@ fn compileSegments(
 }
 
 fn compileStepArgs(
-    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
     command: *const recipe_ir.PrecompiledCommand,
     doc_args: ?std.StringHashMap(config.ArgValueDoc),
     slot_map: *const SlotMap,
     diag: diagnostic.Reporter,
     base_context: DiagnosticContext,
 ) ![]recipe_ir.StepArg {
-    const args = try allocator.alloc(recipe_ir.StepArg, command.args.len);
+    const args = try arena.alloc(recipe_ir.StepArg, command.args.len);
     var has_error = false;
 
     for (command.args, 0..) |arg, idx| {
@@ -1373,11 +1416,11 @@ fn compileStepArgs(
             if (wrapper.get(arg.name)) |doc_arg| {
                 var arg_context = base_context;
                 arg_context.argument_name = arg.name;
-                args[idx] = compileArg(allocator, doc_arg, slot_map, diag, arg_context) catch |err| blk: {
+                args[idx] = compileArg(arena, doc_arg, slot_map, diag, arg_context) catch |err| blk: {
                     switch (err) {
                         error.AnalysisFail => {
                             has_error = true;
-                            break :blk try makeEmptyStringArg(allocator);
+                            break :blk try makeEmptyStringArg(arena);
                         },
                         else => return err,
                     }
@@ -1391,7 +1434,7 @@ fn compileStepArgs(
             continue;
         }
         if (arg.is_optional) {
-            args[idx] = try makeEmptyStringArg(allocator);
+            args[idx] = try makeEmptyStringArg(arena);
             continue;
         }
 
@@ -1399,7 +1442,7 @@ fn compileStepArgs(
         arg_context.argument_name = arg.name;
         try diag.withContext(arg_context).add(.fatal, null, .{ .missing_command_argument = .{ .argument = arg.name } });
         has_error = true;
-        args[idx] = try makeEmptyStringArg(allocator);
+        args[idx] = try makeEmptyStringArg(arena);
     }
 
     if (doc_args) |wrapper| {
@@ -1418,22 +1461,22 @@ fn compileStepArgs(
     return args;
 }
 
-fn compileInitialValue(allocator: std.mem.Allocator, value: config.ArgValueDoc) !recipe_ir.Value {
+fn compileInitialValue(arena: std.mem.Allocator, value: config.ArgValueDoc) !recipe_ir.Value {
     return switch (value) {
-        .scalar => |scalar| compileScalarValue(allocator, scalar),
+        .scalar => |scalar| compileScalarValue(arena, scalar),
         .list => |items| blk: {
-            const compiled = try allocator.alloc(recipe_ir.Value, items.len);
+            const compiled = try arena.alloc(recipe_ir.Value, items.len);
             for (items, 0..) |item, idx| {
-                compiled[idx] = try compileScalarValue(allocator, item);
+                compiled[idx] = try compileScalarValue(arena, item);
             }
             break :blk .{ .list = compiled };
         },
     };
 }
 
-fn compileScalarValue(allocator: std.mem.Allocator, value: config.ArgScalarDoc) !recipe_ir.Value {
+fn compileScalarValue(arena: std.mem.Allocator, value: config.ArgScalarDoc) !recipe_ir.Value {
     return switch (value) {
-        .string => |text| .{ .string = try allocator.dupe(u8, text) },
+        .string => |text| .{ .string = try arena.dupe(u8, text) },
         .int => |number| .{ .int = number },
         .float => |number| .{ .float = number },
         .bool => |flag| .{ .bool = flag },
@@ -1441,18 +1484,18 @@ fn compileScalarValue(allocator: std.mem.Allocator, value: config.ArgScalarDoc) 
 }
 
 fn compileArg(
-    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
     doc_arg: config.ArgValueDoc,
     slot_map: *const SlotMap,
     diag: diagnostic.Reporter,
     context: DiagnosticContext,
 ) !recipe_ir.StepArg {
     return switch (doc_arg) {
-        .scalar => |scalar| .{ .scalar = try compileArgScalar(allocator, scalar, slot_map, diag, context) },
+        .scalar => |scalar| .{ .scalar = try compileArgScalar(arena, scalar, slot_map, diag, context) },
         .list => |items| blk: {
-            const out = try allocator.alloc(expr.Expression, items.len);
+            const out = try arena.alloc(expr.Expression, items.len);
             for (items, 0..) |item, idx| {
-                out[idx] = try compileArgScalar(allocator, item, slot_map, diag, context);
+                out[idx] = try compileArgScalar(arena, item, slot_map, diag, context);
             }
             break :blk .{ .list = out };
         },
@@ -1460,7 +1503,7 @@ fn compileArg(
 }
 
 fn compileArgDefault(
-    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
     source_args: ?std.StringHashMap(adapter_schema.ArgSpec),
     arg_name: []const u8,
 ) !?recipe_ir.StepArg {
@@ -1469,22 +1512,22 @@ fn compileArgDefault(
     return switch (spec) {
         .string => null,
         .object => |obj| if (obj.default) |default_value|
-            try compileAdapterDefaultArg(allocator, default_value)
+            try compileAdapterDefaultArg(arena, default_value)
         else
             null,
     };
 }
 
 fn compileAdapterDefaultArg(
-    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
     value: adapter_schema.ArgDefault,
 ) !recipe_ir.StepArg {
     return switch (value) {
-        .scalar => |scalar| .{ .scalar = try compileAdapterDefaultScalar(allocator, scalar) },
+        .scalar => |scalar| .{ .scalar = try compileAdapterDefaultScalar(arena, scalar) },
         .list => |items| blk: {
-            const out = try allocator.alloc(expr.Expression, items.len);
+            const out = try arena.alloc(expr.Expression, items.len);
             for (items, 0..) |item, idx| {
-                out[idx] = try compileAdapterDefaultScalar(allocator, item);
+                out[idx] = try compileAdapterDefaultScalar(arena, item);
             }
             break :blk .{ .list = out };
         },
@@ -1492,23 +1535,23 @@ fn compileAdapterDefaultArg(
 }
 
 fn compileAdapterDefaultScalar(
-    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
     value: adapter_schema.ArgDefaultScalar,
 ) !expr.Expression {
     return switch (value) {
-        .string => |text| makeLiteralExpr(allocator, .{ .push_string = try allocator.dupe(u8, text) }),
-        .int => |n| makeLiteralExpr(allocator, .{ .push_int = n }),
-        .float => |n| makeLiteralExpr(allocator, .{ .push_float = n }),
-        .bool => |b| makeLiteralExpr(allocator, .{ .push_bool = b }),
+        .string => |text| makeLiteralExpr(arena, .{ .push_string = try arena.dupe(u8, text) }),
+        .int => |n| makeLiteralExpr(arena, .{ .push_int = n }),
+        .float => |n| makeLiteralExpr(arena, .{ .push_float = n }),
+        .bool => |b| makeLiteralExpr(arena, .{ .push_bool = b }),
     };
 }
 
-fn makeEmptyStringArg(allocator: std.mem.Allocator) !recipe_ir.StepArg {
-    return .{ .scalar = try makeLiteralExpr(allocator, .{ .push_string = try allocator.dupe(u8, "") }) };
+fn makeEmptyStringArg(arena: std.mem.Allocator) !recipe_ir.StepArg {
+    return .{ .scalar = try makeLiteralExpr(arena, .{ .push_string = try arena.dupe(u8, "") }) };
 }
 
 fn compileArgScalar(
-    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
     value: config.ArgScalarDoc,
     slot_map: *const SlotMap,
     diag: diagnostic.Reporter,
@@ -1517,18 +1560,18 @@ fn compileArgScalar(
     return switch (value) {
         .string => |text| {
             if (std.mem.indexOf(u8, text, "${") != null) {
-                return slot_map.compileExpr(diag, context, text, .argument);
+                return slot_map.compileExpr(arena, diag, context, text, .argument);
             }
-            return makeLiteralExpr(allocator, .{ .push_string = try allocator.dupe(u8, text) });
+            return makeLiteralExpr(arena, .{ .push_string = try arena.dupe(u8, text) });
         },
-        .int => |n| makeLiteralExpr(allocator, .{ .push_int = n }),
-        .float => |n| makeLiteralExpr(allocator, .{ .push_float = n }),
-        .bool => |b| makeLiteralExpr(allocator, .{ .push_bool = b }),
+        .int => |n| makeLiteralExpr(arena, .{ .push_int = n }),
+        .float => |n| makeLiteralExpr(arena, .{ .push_float = n }),
+        .bool => |b| makeLiteralExpr(arena, .{ .push_bool = b }),
     };
 }
 
-fn makeLiteralExpr(allocator: std.mem.Allocator, op: expr.Op) !expr.Expression {
-    const ops = try allocator.alloc(expr.Op, 1);
+fn makeLiteralExpr(arena: std.mem.Allocator, op: expr.Op) !expr.Expression {
+    const ops = try arena.alloc(expr.Op, 1);
     ops[0] = op;
     return .{ .ops = ops };
 }
@@ -2180,7 +2223,7 @@ test "precompiled command renders via helper" {
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, source, &instrument, null, diags.reporter(), .{});
+    var compiled = try compileCommand(gpa, gpa, source, &instrument, null, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
     try std.testing.expect(compiled.instrument == &instrument);
@@ -2218,7 +2261,7 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, source, &instrument, null, diags.reporter(), .{});
+    var compiled = try compileCommand(gpa, gpa, source, &instrument, null, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
@@ -2252,7 +2295,7 @@ test "float_precision controls decimal places in rendered command" {
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, source, &instrument, null, diags.reporter(), .{});
+    var compiled = try compileCommand(gpa, gpa, source, &instrument, null, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
@@ -2296,7 +2339,7 @@ test "precompiled command applies bool format from adapter defaults" {
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, source, &instrument, .{ .true = "ON", .false = "OFF" }, diags.reporter(), .{});
+    var compiled = try compileCommand(gpa, gpa, source, &instrument, .{ .true = "ON", .false = "OFF" }, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
