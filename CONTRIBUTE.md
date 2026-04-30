@@ -42,3 +42,4 @@ zig build test
 - [x] Allow `repl` to set instrument environment config (termination, etc.)
 - [x] Allow recipe variables of lists. and define `len` built-in function, `arr[ ]` index syntax
 - [ ] Add monite/probe mechanism. for monite a time variation of user-specified value (in repl? or recipe?)
+- [ ] Support Cartesian product (like matrix in github CI)
