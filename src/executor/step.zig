@@ -77,7 +77,7 @@ pub fn executeCompute(
         .int => |i| .{ .int = i },
         .float => |f| .{ .float = f },
         .bool => |b| .{ .bool = b },
-        .string => |s| .{ .string = s },
+        .string => |s| .{ .string = session.String.borrow(s) },
     };
     try ctx.setSlot(comp.save_slot, value);
 }
@@ -169,10 +169,10 @@ fn parseScalarResponseValue(
 ) !session.Value {
     const trimmed = std.mem.trim(u8, response_bytes, &std.ascii.whitespace);
     return switch (encoding) {
-        .raw => .{ .string = response_bytes },
+        .raw => .{ .string = session.String.borrow(response_bytes) },
         .float => .{ .float = try std.fmt.parseFloat(f64, trimmed) },
         .int => .{ .int = try std.fmt.parseInt(i64, trimmed, 10) },
-        .string => .{ .string = if (unwrap_string) unwrapQuotedString(trimmed) else trimmed },
+        .string => .{ .string = session.String.borrow(if (unwrap_string) unwrapQuotedString(trimmed) else trimmed) },
         .bool => .{ .bool = try parseBoolResponse(trimmed, bool_map) },
     };
 }
@@ -258,7 +258,7 @@ fn evalToValue(
         .int => |i| .{ .int = i },
         .float => |f| .{ .float = f },
         .bool => |b| .{ .bool = b },
-        .string => |s| .{ .string = s },
+        .string => |s| .{ .string = session.String.borrow(s) },
     };
 }
 
@@ -274,7 +274,7 @@ pub fn resolveStepArg(
             for (items, 0..) |*item, idx| {
                 resolved[idx] = try evalToValue(item, ctx, allocator);
             }
-            break :blk .{ .list = resolved };
+            break :blk .{ .list = session.List.borrow(resolved) };
         },
     };
 }
@@ -313,11 +313,11 @@ test "executor parse response" {
     try std.testing.expectError(error.InvalidBoolResponse, parseResponseIntoSlot(.{ .scalar = .bool }, "ON", .{ .true_text = "ENABLE", .false_text = "DISABLE" }, &scalar_ctx, 4));
 
     var list_ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{
-        .{ .list = &.{} },
+        .{ .list = session.List.borrow(&.{}) },
     }, &.{2});
     defer list_ctx.deinit();
     switch (list_ctx.getSlot(0)) {
-        .list => |items| try std.testing.expectEqual(@as(usize, 0), items.len),
+        .list => |items| try std.testing.expectEqual(@as(usize, 0), items.len()),
         else => return error.TestUnexpectedResult,
     }
 
@@ -327,16 +327,16 @@ test "executor parse response" {
     } }, " 1.25, 2.5\n", null, &list_ctx, 0);
     switch (list_ctx.getSlot(0)) {
         .list => |items| {
-            try std.testing.expectEqual(@as(usize, 2), items.len);
-            try std.testing.expectApproxEqAbs(@as(f64, 1.25), items[0].float, 1e-9);
-            try std.testing.expectApproxEqAbs(@as(f64, 2.5), items[1].float, 1e-9);
+            try std.testing.expectEqual(@as(usize, 2), items.len());
+            try std.testing.expectApproxEqAbs(@as(f64, 1.25), items.items()[0].float, 1e-9);
+            try std.testing.expectApproxEqAbs(@as(f64, 2.5), items.items()[1].float, 1e-9);
         },
         else => return error.TestUnexpectedResult,
     }
 
-    const initial_error_items = [_]session.Value{ .{ .int = 0 }, .{ .string = "" } };
+    const initial_error_items = [_]session.Value{ .{ .int = 0 }, .{ .string = session.String.borrow("") } };
     var error_ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{
-        .{ .list = initial_error_items[0..] },
+        .{ .list = session.List.borrow(initial_error_items[0..]) },
     }, &.{});
     defer error_ctx.deinit();
 
@@ -346,9 +346,9 @@ test "executor parse response" {
     } }, "-221,\"Settings conflict, channel 1\"", null, &error_ctx, 0);
     switch (error_ctx.getSlot(0)) {
         .list => |items| {
-            try std.testing.expectEqual(@as(usize, 2), items.len);
-            try std.testing.expectEqual(@as(i64, -221), items[0].int);
-            try std.testing.expectEqualStrings("Settings conflict, channel 1", items[1].string);
+            try std.testing.expectEqual(@as(usize, 2), items.len());
+            try std.testing.expectEqual(@as(i64, -221), items.items()[0].int);
+            try std.testing.expectEqualStrings("Settings conflict, channel 1", items.items()[1].string.items());
         },
         else => return error.TestUnexpectedResult,
     }

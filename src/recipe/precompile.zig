@@ -247,12 +247,15 @@ const SlotMap = struct {
             .float => |f| .{ .float = f },
             .int => |i| .{ .int = i },
             .bool => |b| .{ .bool = b },
-            .string => |s| .{ .string = s },
-            .list => |items| .{ .list = .{
-                .len = items.len,
-                .ctx = @ptrCast(items.ptr),
-                .at_fn = constListAt,
-            } },
+            .string => |s| .{ .string = s.items() },
+            .list => |items| blk: {
+                const slice = items.items();
+                break :blk .{ .list = .{
+                    .len = slice.len,
+                    .ctx = @ptrCast(slice.ptr),
+                    .at_fn = constListAt,
+                } };
+            },
         };
     }
 
@@ -439,7 +442,7 @@ const ExprOptimizer = struct {
                 .int => |value| try self.newNode(.{ .int = value }, span),
                 .float => |value| try self.newNode(.{ .float = value }, span),
                 .bool => |value| try self.newNode(.{ .bool = value }, span),
-                .string => |value| try self.newNode(.{ .string = try self.scratch_alloc.dupe(u8, value) }, span),
+                .string => |value| try self.newNode(.{ .string = try self.scratch_alloc.dupe(u8, value.items()) }, span),
                 .list => null,
             },
         };
@@ -455,7 +458,7 @@ const ExprOptimizer = struct {
             .slot => |slot| if (slot >= self.slot_map.const_count)
                 null
             else switch (self.slot_map.initial_values[slot]) {
-                .list => |items| items,
+                .list => |items| items.items(),
                 else => null,
             },
         };
@@ -606,7 +609,7 @@ const ExprOptimizer = struct {
             .int => |value| try self.newNode(.{ .int = value }, span),
             .float => |value| try self.newNode(.{ .float = value }, span),
             .bool => |value| try self.newNode(.{ .bool = value }, span),
-            .string => |value| try self.newNode(.{ .string = try self.scratch_alloc.dupe(u8, value) }, span),
+            .string => |value| try self.newNode(.{ .string = try self.scratch_alloc.dupe(u8, value.items()) }, span),
             .list => self.diagnostics.fail(span, .nested_list_value),
         };
     }
@@ -712,7 +715,7 @@ fn buildSlotMap(
     const list_slot_capacities = try arena.alloc(usize, var_keys.len);
     for (initial_values[const_keys.len..], 0..) |value, idx| {
         list_slot_capacities[idx] = switch (value) {
-            .list => |items| items.len,
+            .list => |items| items.len(),
             else => 0,
         };
     }
@@ -1137,7 +1140,13 @@ fn resolvePipelineConfig(
     }
 
     try validatePipelineConfig(&pipeline_cfg, diag);
-    var pipeline = try clonePipelineConfigWithoutRecord(arena, &pipeline_cfg);
+
+    var pipeline = blk: {
+        var _pipeline_cfg = pipeline_cfg;
+        _pipeline_cfg.record = null;
+        break :blk try _pipeline_cfg.clone(arena);
+    };
+
     var bindings: []const expr.VariableBinding = empty_bindings;
 
     const record_cfg: recipe_ir.RecordConfig = pipeline_cfg.record orelse .{ .explicit = empty_columns };
@@ -1227,18 +1236,6 @@ fn resolveRecordSource(
             try diag.add(.fatal, null, .{ .record_const_not_recordable = .{ .variable = name } });
             return error.AnalysisFail;
         },
-    };
-}
-
-fn clonePipelineConfigWithoutRecord(arena: std.mem.Allocator, cfg: *const recipe_ir.PipelineConfig) !recipe_ir.PipelineConfig {
-    return .{
-        .buffer_size = cfg.buffer_size,
-        .warn_usage_percent = cfg.warn_usage_percent,
-        .mode = cfg.mode,
-        .file_path = if (cfg.file_path) |path| try arena.dupe(u8, path) else null,
-        .network_host = if (cfg.network_host) |host| try arena.dupe(u8, host) else null,
-        .network_port = cfg.network_port,
-        .record = null,
     };
 }
 
@@ -1523,14 +1520,14 @@ fn compileInitialValue(arena: std.mem.Allocator, value: config.ArgValueDoc) !rec
             for (items, 0..) |item, idx| {
                 compiled[idx] = try compileScalarValue(arena, item);
             }
-            break :blk .{ .list = compiled };
+            break :blk .{ .list = recipe_ir.ValueList.borrow(compiled) };
         },
     };
 }
 
 fn compileScalarValue(arena: std.mem.Allocator, value: config.ArgScalarDoc) !recipe_ir.Value {
     return switch (value) {
-        .string => |text| .{ .string = try arena.dupe(u8, text) },
+        .string => |text| .{ .string = recipe_ir.String.borrow(try arena.dupe(u8, text)) },
         .int => |number| .{ .int = number },
         .float => |number| .{ .float = number },
         .bool => |flag| .{ .bool = flag },
@@ -1799,7 +1796,7 @@ test "precompile preserves initial variables" {
                 found_float = true;
             },
             .string => |text| {
-                try std.testing.expectEqualStrings("scan", text);
+                try std.testing.expectEqualStrings("scan", text.items());
                 found_string = true;
             },
             else => return error.TestUnexpectedResult,
@@ -2319,7 +2316,7 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
-        .{ .scalar = .{ .string = "1234567890" } },
+        .{ .scalar = .{ .string = recipe_ir.String.borrow("1234567890") } },
     };
 
     var stack_buf: [8]u8 = undefined;
@@ -3263,12 +3260,12 @@ test "precompile recipe with list variable" {
     const list_val = initial[1];
     switch (list_val) {
         .list => |items| {
-            try std.testing.expectEqual(@as(usize, 3), items.len);
-            switch (items[0]) {
+            try std.testing.expectEqual(@as(usize, 3), items.len());
+            switch (items.items()[0]) {
                 .float => |v| try std.testing.expectApproxEqAbs(@as(f64, 1.5), v, 1e-9),
                 else => return error.TestUnexpectedResult,
             }
-            switch (items[2]) {
+            switch (items.items()[2]) {
                 .float => |v| try std.testing.expectApproxEqAbs(@as(f64, 4.5), v, 1e-9),
                 else => return error.TestUnexpectedResult,
             }
