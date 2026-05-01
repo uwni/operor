@@ -77,7 +77,7 @@ pub fn executeCompute(
         .int => |i| .{ .int = i },
         .float => |f| .{ .float = f },
         .bool => |b| .{ .bool = b },
-        .string => |s| .{ .string = session.String.borrow(s) },
+        .string => |s| .{ .string = session.Value.String.borrow(s) },
     };
     try ctx.setSlot(comp.save_slot, value);
 }
@@ -169,10 +169,10 @@ fn parseScalarResponseValue(
 ) !session.Value {
     const trimmed = std.mem.trim(u8, response_bytes, &std.ascii.whitespace);
     return switch (encoding) {
-        .raw => .{ .string = session.String.borrow(response_bytes) },
+        .raw => .{ .string = session.Value.String.borrow(response_bytes) },
         .float => .{ .float = try std.fmt.parseFloat(f64, trimmed) },
         .int => .{ .int = try std.fmt.parseInt(i64, trimmed, 10) },
-        .string => .{ .string = session.String.borrow(if (unwrap_string) unwrapQuotedString(trimmed) else trimmed) },
+        .string => .{ .string = session.Value.String.borrow(if (unwrap_string) unwrapQuotedString(trimmed) else trimmed) },
         .bool => .{ .bool = try parseBoolResponse(trimmed, bool_map) },
     };
 }
@@ -258,7 +258,7 @@ fn evalToValue(
         .int => |i| .{ .int = i },
         .float => |f| .{ .float = f },
         .bool => |b| .{ .bool = b },
-        .string => |s| .{ .string = session.String.borrow(s) },
+        .string => |s| .{ .string = session.Value.String.borrow(s) },
     };
 }
 
@@ -274,7 +274,7 @@ pub fn resolveStepArg(
             for (items, 0..) |*item, idx| {
                 resolved[idx] = try evalToValue(item, ctx, allocator);
             }
-            break :blk .{ .list = session.List.borrow(resolved) };
+            break :blk .{ .list = session.Value.List.borrow(resolved) };
         },
     };
 }
@@ -313,7 +313,7 @@ test "executor parse response" {
     try std.testing.expectError(error.InvalidBoolResponse, parseResponseIntoSlot(.{ .scalar = .bool }, "ON", .{ .true_text = "ENABLE", .false_text = "DISABLE" }, &scalar_ctx, 4));
 
     var list_ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{
-        .{ .list = session.List.borrow(&.{}) },
+        .{ .list = session.Value.List.borrow(&.{}) },
     }, &.{2});
     defer list_ctx.deinit();
     switch (list_ctx.getSlot(0)) {
@@ -334,9 +334,9 @@ test "executor parse response" {
         else => return error.TestUnexpectedResult,
     }
 
-    const initial_error_items = [_]session.Value{ .{ .int = 0 }, .{ .string = session.String.borrow("") } };
+    const initial_error_items = [_]session.Value{ .{ .int = 0 }, .{ .string = session.Value.String.borrow("") } };
     var error_ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{
-        .{ .list = session.List.borrow(initial_error_items[0..]) },
+        .{ .list = session.Value.List.borrow(initial_error_items[0..]) },
     }, &.{});
     defer error_ctx.deinit();
 

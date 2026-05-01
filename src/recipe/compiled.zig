@@ -4,30 +4,6 @@ const expr = @import("../expr.zig");
 
 pub const ResponseSpec = instrument.ResponseSpec;
 
-pub const String = union(enum) {
-    borrowed: []const u8,
-    owned: struct { items: []u8, len: usize },
-
-    pub fn borrow(items_: []const u8) String {
-        return .{ .borrowed = items_ };
-    }
-
-    pub fn deinit(self: *String, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .borrowed => {},
-            .owned => |buffer| allocator.free(buffer.items),
-        }
-        self.* = undefined;
-    }
-
-    pub fn items(self: String) []const u8 {
-        return switch (self) {
-            .borrowed => |v| v,
-            .owned => |b| b.items[0..b.len],
-        };
-    }
-};
-
 /// Writes a float with exactly `decimal_places` digits after the decimal point,
 /// using the standard library's Ryu-based decimal formatter.
 fn writeFloatFixed(writer: anytype, value: f64, decimal_places: u8) !void {
@@ -40,11 +16,92 @@ fn writeFloatFixed(writer: anytype, value: f64, decimal_places: u8) !void {
 }
 
 pub const Value = union(enum) {
+    pub const String = union(enum) {
+        borrowed: []const u8,
+        owned: struct { items: []u8, len: usize },
+
+        pub fn borrow(items_: []const u8) String {
+            return .{ .borrowed = items_ };
+        }
+
+        pub fn deinit(self: *String, allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .borrowed => {},
+                .owned => |buffer| allocator.free(buffer.items),
+            }
+            self.* = undefined;
+        }
+
+        pub fn items(self: String) []const u8 {
+            return switch (self) {
+                .borrowed => |v| v,
+                .owned => |b| b.items[0..b.len],
+            };
+        }
+    };
+
+    pub const List = union(enum) {
+        borrowed: []const Value,
+        owned: struct { items: []Value, len: usize },
+
+        pub fn borrow(items_: []const Value) List {
+            return .{ .borrowed = items_ };
+        }
+
+        pub fn deinit(self: *List, allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .borrowed => {},
+                .owned => |buffer| allocator.free(buffer.items),
+            }
+            self.* = undefined;
+        }
+
+        pub fn len(self: List) usize {
+            return self.items().len;
+        }
+
+        pub fn items(self: List) []const Value {
+            return switch (self) {
+                .borrowed => |v| v,
+                .owned => |b| b.items[0..b.len],
+            };
+        }
+
+        pub fn mutItems(self: *List) []Value {
+            return switch (self.*) {
+                .borrowed => unreachable,
+                .owned => |*b| b.items[0..b.len],
+            };
+        }
+
+        pub fn ensureOwnedCapacity(self: *List, allocator: std.mem.Allocator, capacity: usize) !void {
+            if (self.* == .owned and self.owned.items.len >= capacity) return;
+            const old_items = self.items();
+            const replacement = try allocator.alloc(Value, @max(capacity, old_items.len));
+            @memcpy(replacement[0..old_items.len], old_items);
+            switch (self.*) {
+                .borrowed => {},
+                .owned => |buffer| allocator.free(buffer.items),
+            }
+            self.* = .{ .owned = .{ .items = replacement, .len = old_items.len } };
+        }
+
+        pub fn setLen(self: *List, length: usize) void {
+            switch (self.*) {
+                .borrowed => unreachable,
+                .owned => |*buffer| {
+                    std.debug.assert(length <= buffer.items.len);
+                    buffer.len = length;
+                },
+            }
+        }
+    };
+
     float: f64,
     int: i64,
     bool: bool,
     string: String,
-    list: ValueList,
+    list: List,
 
     pub fn toResolvedValue(self: Value) expr.ResolvedValue {
         return switch (self) {
@@ -72,67 +129,10 @@ pub const Value = union(enum) {
     }
 };
 
-pub const ValueList = union(enum) {
-    borrowed: []const Value,
-    owned: struct { items: []Value, len: usize },
-
-    pub fn borrow(items_: []const Value) ValueList {
-        return .{ .borrowed = items_ };
-    }
-
-    pub fn deinit(self: *ValueList, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .borrowed => {},
-            .owned => |buffer| allocator.free(buffer.items),
-        }
-        self.* = undefined;
-    }
-
-    pub fn len(self: ValueList) usize {
-        return self.items().len;
-    }
-
-    pub fn items(self: ValueList) []const Value {
-        return switch (self) {
-            .borrowed => |v| v,
-            .owned => |b| b.items[0..b.len],
-        };
-    }
-
-    pub fn mutItems(self: *ValueList) []Value {
-        return switch (self.*) {
-            .borrowed => unreachable,
-            .owned => |*b| b.items[0..b.len],
-        };
-    }
-
-    pub fn ensureOwnedCapacity(self: *ValueList, allocator: std.mem.Allocator, capacity: usize) !void {
-        if (self.* == .owned and self.owned.items.len >= capacity) return;
-        const old_items = self.items();
-        const replacement = try allocator.alloc(Value, @max(capacity, old_items.len));
-        @memcpy(replacement[0..old_items.len], old_items);
-        switch (self.*) {
-            .borrowed => {},
-            .owned => |buffer| allocator.free(buffer.items),
-        }
-        self.* = .{ .owned = .{ .items = replacement, .len = old_items.len } };
-    }
-
-    pub fn setLen(self: *ValueList, length: usize) void {
-        switch (self.*) {
-            .borrowed => unreachable,
-            .owned => |*buffer| {
-                std.debug.assert(length <= buffer.items.len);
-                buffer.len = length;
-            },
-        }
-    }
-};
-
 /// Render-time value used by command templates.
 pub const RenderValue = union(enum) {
     scalar: Value,
-    list: ValueList,
+    list: Value.List,
 
     /// Returns true when this value would produce no output when rendered.
     pub fn isEmpty(self: RenderValue) bool {

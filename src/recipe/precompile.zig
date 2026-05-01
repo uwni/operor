@@ -1520,14 +1520,14 @@ fn compileInitialValue(arena: std.mem.Allocator, value: config.ArgValueDoc) !rec
             for (items, 0..) |item, idx| {
                 compiled[idx] = try compileScalarValue(arena, item);
             }
-            break :blk .{ .list = recipe_ir.ValueList.borrow(compiled) };
+            break :blk .{ .list = recipe_ir.Value.List.borrow(compiled) };
         },
     };
 }
 
 fn compileScalarValue(arena: std.mem.Allocator, value: config.ArgScalarDoc) !recipe_ir.Value {
     return switch (value) {
-        .string => |text| .{ .string = recipe_ir.String.borrow(try arena.dupe(u8, text)) },
+        .string => |text| .{ .string = recipe_ir.Value.String.borrow(try arena.dupe(u8, text)) },
         .int => |number| .{ .int = number },
         .float => |number| .{ .float = number },
         .bool => |flag| .{ .bool = flag },
@@ -2316,7 +2316,7 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.RenderValue{
-        .{ .scalar = .{ .string = recipe_ir.String.borrow("1234567890") } },
+        .{ .scalar = .{ .string = recipe_ir.Value.String.borrow("1234567890") } },
     };
 
     var stack_buf: [8]u8 = undefined;

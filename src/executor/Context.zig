@@ -6,8 +6,8 @@ const recipe_compiled = @import("../recipe/compiled.zig");
 
 pub const Value = recipe_compiled.Value;
 pub const RenderValue = recipe_compiled.RenderValue;
-pub const String = recipe_compiled.String;
-pub const List = recipe_compiled.ValueList;
+const String = Value.String;
+const List = Value.List;
 
 /// Execution-time value store used for `${name}` substitutions and `assign` outputs.
 allocator: std.mem.Allocator,
