@@ -95,8 +95,13 @@ pub const Message = union(enum) {
     missing_closing_bracket,
     nested_optional_group,
     empty_argument,
+    missing_argument_type,
     invalid_identifier: struct { identifier: []const u8 },
+    invalid_argument_type: struct { arg_type: []const u8 },
     invalid_read_type: struct { read_type: []const u8 },
+    missing_option_values,
+    invalid_option_value,
+    conflicting_argument_type,
 };
 
 pub const Diagnostic = struct {

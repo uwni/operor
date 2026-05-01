@@ -108,7 +108,7 @@ test "parse adapter templates and placeholders" {
     var adapter = try parseTestYaml(gpa,
         \\commands:
         \\  set_voltage:
-        \\    write: "VOLT {voltage},(@{channels})"
+        \\    write: "VOLT {voltage:float},(@{channels:list})"
     );
     defer adapter.deinit();
 
@@ -117,11 +117,17 @@ test "parse adapter templates and placeholders" {
     try std.testing.expectEqual(@as(usize, 5), cmd.template.len);
 
     switch (cmd.template[1]) {
-        .placeholder => |name| try std.testing.expectEqualStrings("voltage", name),
+        .placeholder => |placeholder| {
+            try std.testing.expectEqualStrings("voltage", placeholder.name);
+            try std.testing.expectEqualStrings("float", placeholder.arg_type);
+        },
         else => return error.TestUnexpectedResult,
     }
     switch (cmd.template[3]) {
-        .placeholder => |name| try std.testing.expectEqualStrings("channels", name),
+        .placeholder => |placeholder| {
+            try std.testing.expectEqualStrings("channels", placeholder.name);
+            try std.testing.expectEqualStrings("list", placeholder.arg_type);
+        },
         else => return error.TestUnexpectedResult,
     }
 }
@@ -204,7 +210,7 @@ test "parse adapter with write termination" {
         \\  write_termination: "\n"
         \\commands:
         \\  set_voltage:
-        \\    write: "VOLT {voltage}"
+        \\    write: "VOLT {voltage:float}"
     );
     defer adapter.deinit();
 
@@ -277,9 +283,10 @@ test "parse adapter result owns document data independent of diagnostics" {
         \\  manufacturer: Acme
         \\commands:
         \\  set_voltage:
-        \\    write: "VOLT {voltage}"
+        \\    write: "VOLT {voltage:float}"
         \\    args:
-        \\      voltage: float
+        \\      voltage:
+        \\        precision: 2
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
@@ -301,14 +308,14 @@ test "parse adapter result owns document data independent of diagnostics" {
 
     const cmd = adapter.commands.get("set_voltage") orelse return error.TestUnexpectedResult;
     switch (cmd.template[1]) {
-        .placeholder => |name| try std.testing.expectEqualStrings("voltage", name),
+        .placeholder => |placeholder| {
+            try std.testing.expectEqualStrings("voltage", placeholder.name);
+            try std.testing.expectEqualStrings("float", placeholder.arg_type);
+        },
         else => return error.TestUnexpectedResult,
     }
     const args = cmd.args orelse return error.TestUnexpectedResult;
-    switch (args.get("voltage") orelse return error.TestUnexpectedResult) {
-        .string => |name| try std.testing.expectEqualStrings("float", name),
-        .object => return error.TestUnexpectedResult,
-    }
+    try std.testing.expectEqual(@as(?u8, 2), (args.get("voltage") orelse return error.TestUnexpectedResult).precision);
 }
 
 test "parse adapter document diagnostic does not invent byte position" {
@@ -348,53 +355,25 @@ test "parse adapter document diagnostic does not invent byte position" {
     try std.testing.expect(!std.mem.containsAtLeast(u8, out.written(), 1, "at byte"));
 }
 
-test "parse args string short form" {
-    const gpa = std.testing.allocator;
-
-    var adapter = try parseTestYaml(gpa,
-        \\commands:
-        \\  set_voltage:
-        \\    write: "VOLT {voltage}"
-        \\    args:
-        \\      voltage: float
-    );
-    defer adapter.deinit();
-
-    const cmd = adapter.commands.get("set_voltage") orelse return error.TestUnexpectedResult;
-    const args = cmd.args orelse return error.TestUnexpectedResult;
-    const spec = args.get("voltage") orelse return error.TestUnexpectedResult;
-    switch (spec) {
-        .string => |s| try std.testing.expectEqualStrings("float", s),
-        .object => return error.TestUnexpectedResult,
-    }
-}
-
 test "parse args object form" {
     const gpa = std.testing.allocator;
 
     var adapter = try parseTestYaml(gpa,
         \\commands:
         \\  set_output:
-        \\    write: "OUTP {enabled}"
+        \\    write: "OUTP {enabled:bool}"
         \\    args:
         \\      enabled:
-        \\        type: bool
-        \\        "true": "ON"
-        \\        "false": "OFF"
+        \\        true: "ON"
+        \\        false: "OFF"
     );
     defer adapter.deinit();
 
     const cmd = adapter.commands.get("set_output") orelse return error.TestUnexpectedResult;
     const args = cmd.args orelse return error.TestUnexpectedResult;
-    const spec = args.get("enabled") orelse return error.TestUnexpectedResult;
-    switch (spec) {
-        .object => |obj| {
-            try std.testing.expectEqualStrings("bool", obj.type);
-            try std.testing.expectEqualStrings("ON", obj.true.?);
-            try std.testing.expectEqualStrings("OFF", obj.false.?);
-        },
-        .string => return error.TestUnexpectedResult,
-    }
+    const obj = args.get("enabled") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("ON", obj.true_text.?);
+    try std.testing.expectEqualStrings("OFF", obj.false_text.?);
 }
 
 test "parse args object default form" {
@@ -403,25 +382,49 @@ test "parse args object default form" {
     var adapter = try parseTestYaml(gpa,
         \\commands:
         \\  select_channel:
-        \\    write: "INST {channel}"
+        \\    write: "INST {channel:string}"
         \\    args:
         \\      channel:
-        \\        type: string
         \\        default: "1"
     );
     defer adapter.deinit();
 
     const cmd = adapter.commands.get("select_channel") orelse return error.TestUnexpectedResult;
     const args = cmd.args orelse return error.TestUnexpectedResult;
-    const spec = args.get("channel") orelse return error.TestUnexpectedResult;
-    switch (spec) {
-        .object => |obj| switch (obj.default.?) {
-            .scalar => |scalar| switch (scalar) {
-                .string => |s| try std.testing.expectEqualStrings("1", s),
-                else => return error.TestUnexpectedResult,
-            },
-            .list => return error.TestUnexpectedResult,
+    const obj = args.get("channel") orelse return error.TestUnexpectedResult;
+    switch (obj.default.?) {
+        .scalar => |scalar| switch (scalar) {
+            .string => |s| try std.testing.expectEqualStrings("1", s),
+            else => return error.TestUnexpectedResult,
         },
-        .string => return error.TestUnexpectedResult,
+        .list => return error.TestUnexpectedResult,
     }
+}
+
+test "parse args object precision and option values" {
+    const gpa = std.testing.allocator;
+
+    var adapter = try parseTestYaml(gpa,
+        \\commands:
+        \\  configure:
+        \\    write: "WAV {wavelength:float};TRIG:SOUR {source:option}"
+        \\    args:
+        \\      wavelength:
+        \\        precision: 2
+        \\      source:
+        \\        options: [IMM, BUS, EXT]
+    );
+    defer adapter.deinit();
+
+    const cmd = adapter.commands.get("configure") orelse return error.TestUnexpectedResult;
+    const args = cmd.args orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(@as(?u8, 2), (args.get("wavelength") orelse return error.TestUnexpectedResult).precision);
+
+    const source = args.get("source") orelse return error.TestUnexpectedResult;
+    const options = source.options orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 3), options.len);
+    try std.testing.expectEqualStrings("IMM", options[0]);
+    try std.testing.expectEqualStrings("BUS", options[1]);
+    try std.testing.expectEqualStrings("EXT", options[2]);
 }

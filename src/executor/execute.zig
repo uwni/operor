@@ -138,7 +138,7 @@ const vendor_psu_adapter =
     \\metadata: {}
     \\commands:
     \\  set_voltage:
-    \\    write: "VOLT {voltage},(@{channels})"
+    \\    write: "VOLT {voltage:float},(@{channels:list})"
 ;
 
 test "executor execute dry run" {

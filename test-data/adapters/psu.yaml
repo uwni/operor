@@ -3,9 +3,9 @@ metadata:
   description: bench supply
 commands:
   set:
-    write: "VOLT {voltage}"
+    write: "VOLT {voltage:float}"
   set_voltage:
-    write: "VOLT {voltage},(@{channels})"
+    write: "VOLT {voltage:float},(@{channels:list})"
   measure_voltage:
     write: "MEAS:VOLT?"
     read: float

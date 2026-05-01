@@ -136,7 +136,7 @@ test "preview output" {
         \\metadata: {}
         \\commands:
         \\  set_voltage:
-        \\    write: "VOLT {voltage},(@{channels})"
+        \\    write: "VOLT {voltage:float},(@{channels:list})"
     );
     try workspace.writeFile("recipes/r1_set_voltage.yaml",
         \\instruments:

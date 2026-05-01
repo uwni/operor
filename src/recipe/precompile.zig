@@ -1270,8 +1270,8 @@ fn cloneBoolTextMap(
 ) !?recipe_ir.BoolTextMap {
     const src = source orelse return null;
     return .{
-        .true_text = try arena.dupe(u8, src.true),
-        .false_text = try arena.dupe(u8, src.false),
+        .true_text = try arena.dupe(u8, src.true_text),
+        .false_text = try arena.dupe(u8, src.false_text),
     };
 }
 
@@ -1349,7 +1349,7 @@ fn compileCommand(
 ) !recipe_ir.PrecompiledCommand {
     var arg_entries: std.ArrayList(ArgBuildEntry) = .empty;
     defer arg_entries.deinit(scratch_alloc);
-    const segments = try compileSegments(scratch_alloc, arena, source.template, &arg_entries, false);
+    const segments = try compileSegments(scratch_alloc, arena, source.template, &arg_entries, false, diag, base_context);
 
     const args = try arena.alloc(recipe_ir.CommandArg, arg_entries.items.len);
     for (arg_entries.items, 0..) |entry, idx| {
@@ -1359,7 +1359,7 @@ fn compileCommand(
             .name = entry.name,
             .is_optional = !entry.required,
             .default = try compileArgDefault(arena, source.args, entry.name),
-            .format = try compileArgFormat(arena, source.args, entry.name, adapter_bool_format, diag, arg_context),
+            .format = try compileArgFormat(arena, source.args, entry.name, entry.arg_type, adapter_bool_format, diag, arg_context),
         };
     }
 
@@ -1373,6 +1373,7 @@ fn compileCommand(
 
 const ArgBuildEntry = struct {
     name: []const u8,
+    arg_type: []const u8,
     required: bool,
 };
 
@@ -1380,42 +1381,107 @@ fn compileArgFormat(
     arena: std.mem.Allocator,
     source_args: ?std.StringHashMap(adapter_schema.ArgSpec),
     arg_name: []const u8,
+    arg_type: []const u8,
     adapter_bool_format: ?adapter_schema.BoolFormat,
     diag: diagnostic.Reporter,
     context: DiagnosticContext,
 ) !recipe_ir.ArgFormat {
     var format: recipe_ir.ArgFormat = .{};
     var bool_format = adapter_bool_format;
+    const obj_spec: ?adapter_schema.ArgSpec = if (source_args) |args_map| args_map.get(arg_name) else null;
 
-    if (source_args) |args_map| {
-        if (args_map.get(arg_name)) |spec| {
-            switch (spec) {
-                .string => {},
-                .object => |obj| {
-                    if (std.mem.eql(u8, obj.type, "bool")) {
-                        if ((obj.true == null) != (obj.false == null)) {
-                            return diag.withContext(context).fail(null, .{ .partial_bool_map = {} });
-                        }
-                        if (obj.true) |t| {
-                            bool_format = .{ .true = t, .false = obj.false.? };
-                        }
-                    }
-                    if (obj.separator) |sep| {
-                        format.list_separator = try arena.dupe(u8, sep);
-                    }
-                },
+    if (obj_spec) |obj| {
+        const has_bool_map = obj.true_text != null or obj.false_text != null;
+        if (isArgType(arg_type, "bool") or has_bool_map) {
+            if ((obj.true_text == null) != (obj.false_text == null)) {
+                return diag.withContext(context).fail(null, .{ .partial_bool_map = {} });
+            }
+            if (obj.true_text) |t| {
+                bool_format = .{ .true_text = t, .false_text = obj.false_text.? };
             }
         }
+        if (obj.precision) |precision| {
+            format.float_precision = precision;
+        }
+        if (obj.separator) |sep| {
+            format.list_separator = try arena.dupe(u8, sep);
+        }
+        if (isArgType(arg_type, "option") or obj.options != null) {
+            const options = obj.options orelse return diag.withContext(context).fail(null, .{ .missing_option_values = {} });
+            if (options.len == 0) return diag.withContext(context).fail(null, .{ .missing_option_values = {} });
+            if (obj.default) |default_value| {
+                try validateAdapterDefaultOption(default_value, options, diag, context);
+            }
+            format.option_values = try cloneStringList(arena, options);
+        }
+    } else if (isArgType(arg_type, "option")) {
+        return diag.withContext(context).fail(null, .{ .missing_option_values = {} });
     }
 
     if (bool_format) |bf| {
         format.bool_map = .{
-            .true_text = try arena.dupe(u8, bf.true),
-            .false_text = try arena.dupe(u8, bf.false),
+            .true_text = try arena.dupe(u8, bf.true_text),
+            .false_text = try arena.dupe(u8, bf.false_text),
         };
     }
 
     return format;
+}
+
+fn isArgType(arg_type: []const u8, expected: []const u8) bool {
+    return std.mem.eql(u8, arg_type, expected);
+}
+
+fn isKnownArgType(arg_type: []const u8) bool {
+    const known_types = [_][]const u8{ "string", "int", "float", "bool", "list", "option" };
+    for (known_types) |known| {
+        if (std.mem.eql(u8, arg_type, known)) return true;
+    }
+    return false;
+}
+
+fn cloneStringList(arena: std.mem.Allocator, values: []const []const u8) ![]const []const u8 {
+    const out = try arena.alloc([]const u8, values.len);
+    for (values, 0..) |value, idx| {
+        out[idx] = try arena.dupe(u8, value);
+    }
+    return out;
+}
+
+fn validateAdapterDefaultOption(
+    value: adapter_schema.ArgDefault,
+    options: []const []const u8,
+    diag: diagnostic.Reporter,
+    context: DiagnosticContext,
+) diagnostic.Error!void {
+    switch (value) {
+        .scalar => |scalar| try validateAdapterDefaultOptionScalar(scalar, options, diag, context),
+        .list => |items| for (items) |item| {
+            try validateAdapterDefaultOptionScalar(item, options, diag, context);
+        },
+    }
+}
+
+fn validateAdapterDefaultOptionScalar(
+    value: adapter_schema.ArgDefaultScalar,
+    options: []const []const u8,
+    diag: diagnostic.Reporter,
+    context: DiagnosticContext,
+) diagnostic.Error!void {
+    const text = switch (value) {
+        .string => |s| s,
+        else => return diag.withContext(context).fail(null, .{ .invalid_option_value = {} }),
+    };
+    if (!containsOptionValue(options, text)) {
+        return diag.withContext(context).fail(null, .{ .invalid_option_value = {} });
+    }
+}
+
+fn containsOptionValue(options: []const []const u8, text: []const u8) bool {
+    for (options) |option| {
+        if (std.mem.eql(u8, option, text)) return true;
+    }
+    return false;
 }
 
 /// `scratch_alloc` owns command argument builder backing; `arena` owns returned
@@ -1426,29 +1492,64 @@ fn compileSegments(
     template_segments: []const template.Segment,
     arg_entries: *std.ArrayList(ArgBuildEntry),
     in_optional: bool,
+    diag: diagnostic.Reporter,
+    base_context: DiagnosticContext,
 ) ![]recipe_ir.CompiledSegment {
     const segments = try arena.alloc(recipe_ir.CompiledSegment, template_segments.len);
 
     for (template_segments, 0..) |segment, idx| {
         segments[idx] = switch (segment) {
             .literal => |literal| .{ .literal = try arena.dupe(u8, literal) },
-            .placeholder => |name| .{ .arg = blk: {
-                if (findArgEntryIndex(arg_entries.items, name)) |arg_idx| {
+            .placeholder => |placeholder| .{ .arg = blk: {
+                if (findArgEntryIndex(arg_entries.items, placeholder.name)) |arg_idx| {
                     if (!in_optional) arg_entries.items[arg_idx].required = true;
+                    try mergePlaceholderType(&arg_entries.items[arg_idx], placeholder, diag, base_context);
                     break :blk arg_idx;
                 }
-                const name_copy = try arena.dupe(u8, name);
+                const name_copy = try arena.dupe(u8, placeholder.name);
                 try arg_entries.append(scratch_alloc, .{
                     .name = name_copy,
+                    .arg_type = try validatePlaceholderType(placeholder, diag, base_context),
                     .required = !in_optional,
                 });
                 break :blk arg_entries.items.len - 1;
             } },
-            .optional => |inner| .{ .optional = try compileSegments(scratch_alloc, arena, inner, arg_entries, true) },
+            .optional => |inner| .{ .optional = try compileSegments(scratch_alloc, arena, inner, arg_entries, true, diag, base_context) },
         };
     }
 
     return segments;
+}
+
+fn validatePlaceholderType(
+    placeholder: template.Placeholder,
+    diag: diagnostic.Reporter,
+    base_context: DiagnosticContext,
+) ![]const u8 {
+    const arg_type = placeholder.arg_type;
+    var context = base_context;
+    context.argument_name = placeholder.name;
+    if (!isKnownArgType(arg_type)) {
+        return diag.withContext(context).fail(null, .{ .invalid_argument_type = .{ .arg_type = arg_type } });
+    }
+    return arg_type;
+}
+
+fn mergePlaceholderType(
+    entry: *ArgBuildEntry,
+    placeholder: template.Placeholder,
+    diag: diagnostic.Reporter,
+    base_context: DiagnosticContext,
+) !void {
+    const arg_type = placeholder.arg_type;
+    var context = base_context;
+    context.argument_name = placeholder.name;
+    if (!isKnownArgType(arg_type)) {
+        return diag.withContext(context).fail(null, .{ .invalid_argument_type = .{ .arg_type = arg_type } });
+    }
+    if (!std.mem.eql(u8, entry.arg_type, arg_type)) {
+        return diag.withContext(context).fail(null, .{ .conflicting_argument_type = {} });
+    }
 }
 
 fn compileStepArgs(
@@ -1467,6 +1568,10 @@ fn compileStepArgs(
             if (wrapper.get(arg.name)) |doc_arg| {
                 var arg_context = base_context;
                 arg_context.argument_name = arg.name;
+                validateOptionDocArg(arg.format, doc_arg, diag, arg_context) catch |err| switch (err) {
+                    error.AnalysisFail => has_error = true,
+                    else => return err,
+                };
                 args[idx] = compileArg(arena, doc_arg, slot_map, diag, arg_context) catch |err| blk: {
                     switch (err) {
                         error.AnalysisFail => {
@@ -1510,6 +1615,37 @@ fn compileStepArgs(
 
     if (has_error) return error.AnalysisFail;
     return args;
+}
+
+fn validateOptionDocArg(
+    format: recipe_ir.ArgFormat,
+    doc_arg: config.ArgValueDoc,
+    diag: diagnostic.Reporter,
+    context: DiagnosticContext,
+) diagnostic.Error!void {
+    const options = format.option_values orelse return;
+    switch (doc_arg) {
+        .scalar => |scalar| try validateOptionDocScalar(options, scalar, diag, context),
+        .list => |items| for (items) |item| {
+            try validateOptionDocScalar(options, item, diag, context);
+        },
+    }
+}
+
+fn validateOptionDocScalar(
+    options: []const []const u8,
+    scalar: config.ArgScalarDoc,
+    diag: diagnostic.Reporter,
+    context: DiagnosticContext,
+) diagnostic.Error!void {
+    const text = switch (scalar) {
+        .string => |s| s,
+        else => return diag.withContext(context).fail(null, .{ .invalid_option_value = {} }),
+    };
+    if (std.mem.indexOf(u8, text, "${") != null) return;
+    if (!containsOptionValue(options, text)) {
+        return diag.withContext(context).fail(null, .{ .invalid_option_value = {} });
+    }
 }
 
 fn compileInitialValue(arena: std.mem.Allocator, value: config.ArgValueDoc) !recipe_ir.Value {
@@ -1560,13 +1696,10 @@ fn compileArgDefault(
 ) !?recipe_ir.StepArg {
     const args_map = source_args orelse return null;
     const spec = args_map.get(arg_name) orelse return null;
-    return switch (spec) {
-        .string => null,
-        .object => |obj| if (obj.default) |default_value|
-            try compileAdapterDefaultArg(arena, default_value)
-        else
-            null,
-    };
+    return if (spec.default) |default_value|
+        try compileAdapterDefaultArg(arena, default_value)
+    else
+        null;
 }
 
 fn compileAdapterDefaultArg(
@@ -1644,7 +1777,7 @@ test "load recipe and adapters" {
         \\metadata: {}
         \\commands:
         \\  set:
-        \\    write: "VOLT {voltage}"
+        \\    write: "VOLT {voltage:float}"
     );
     try workspace.writeFile("recipes/r1_set.yaml",
         \\instruments:
@@ -1714,7 +1847,7 @@ test "precompile parses stop_when expression" {
         \\metadata: {}
         \\commands:
         \\  set:
-        \\    write: "VOLT {voltage}"
+        \\    write: "VOLT {voltage:float}"
     );
     try workspace.writeFile("recipes/r2_stop_when.yaml",
         \\instruments:
@@ -1880,7 +2013,7 @@ test "precompile preserves typed literal step arguments" {
         \\metadata: {}
         \\commands:
         \\  configure:
-        \\    write: "CONF {count} {voltage} {enabled} {channels} {mirror}"
+        \\    write: "CONF {count:int} {voltage:float} {enabled:bool} {channels:list} {mirror:string}"
     );
     try workspace.writeFile("recipes/typed_args.yaml",
         \\instruments:
@@ -1991,7 +2124,7 @@ const vendor_psu_adapter =
     \\metadata: {}
     \\commands:
     \\  set_voltage:
-    \\    write: "VOLT {voltage},(@{channels})"
+    \\    write: "VOLT {voltage:float},(@{channels:list})"
 ;
 
 test "precompile rejects duplicate instrument in parallel block" {
@@ -2004,7 +2137,7 @@ test "precompile rejects duplicate instrument in parallel block" {
         \\metadata: {}
         \\commands:
         \\  set_voltage:
-        \\    write: "VOLT {voltage}"
+        \\    write: "VOLT {voltage:float}"
         \\  output_on:
         \\    write: "OUTP ON"
     );
@@ -2055,7 +2188,7 @@ test "precompile stores only referenced commands" {
         \\metadata: {}
         \\commands:
         \\  set_voltage:
-        \\    write: "VOLT {voltage}"
+        \\    write: "VOLT {voltage:float}"
         \\  output_on:
         \\    write: "OUTP ON"
     );
@@ -2183,7 +2316,7 @@ test "precompile allows omitted optional group arguments" {
         \\metadata: {}
         \\commands:
         \\  set_voltage:
-        \\    write: "VOLT {voltage}[,(@{channels})]"
+        \\    write: "VOLT {voltage:float}[,(@{channels:list})]"
     );
     try workspace.writeFile("recipes/r.yaml",
         \\instruments:
@@ -2234,10 +2367,9 @@ test "precompile uses adapter argument defaults for omitted arguments" {
         \\metadata: {}
         \\commands:
         \\  select_channel:
-        \\    write: "INST {channel}"
+        \\    write: "INST {channel:string}"
         \\    args:
         \\      channel:
-        \\        type: string
         \\        default: "1"
     );
     try workspace.writeFile("recipes/r.yaml",
@@ -2284,7 +2416,7 @@ test "precompiled command renders via helper" {
     var diags: diagnostic.Diagnostics = .init(gpa, "<test>");
     defer diags.deinit();
 
-    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null, diags.reporter());
+    const source = try Adapter.Command.parse(alloc, "VOLT {voltage:float}", null, null, diags.reporter());
 
     var instrument = recipe_ir.PrecompiledInstrument{
         .adapter_name = "psu",
@@ -2322,7 +2454,7 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     var diags: diagnostic.Diagnostics = .init(gpa, "<test>");
     defer diags.deinit();
 
-    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null, diags.reporter());
+    const source = try Adapter.Command.parse(alloc, "VOLT {voltage:float}", null, null, diags.reporter());
 
     var instrument = recipe_ir.PrecompiledInstrument{
         .adapter_name = "psu",
@@ -2356,7 +2488,7 @@ test "float_precision controls decimal places in rendered command" {
     var diags: diagnostic.Diagnostics = .init(gpa, "<test>");
     defer diags.deinit();
 
-    const source = try Adapter.Command.parse(alloc, "VOLT {voltage}", null, null, diags.reporter());
+    const source = try Adapter.Command.parse(alloc, "VOLT {voltage:float}", null, null, diags.reporter());
 
     var instrument = recipe_ir.PrecompiledInstrument{
         .adapter_name = "psu",
@@ -2392,6 +2524,60 @@ test "float_precision controls decimal places in rendered command" {
     try std.testing.expectEqualStrings("VOLT 3.14159265\n", rn.bytes);
 }
 
+test "adapter arg precision overrides recipe global float precision" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/laser.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  tune:
+        \\    write: "WA{wavelength:float};CU{current:float}"
+        \\    args:
+        \\      wavelength:
+        \\        precision: 2
+    );
+    try workspace.writeFile("recipes/precision.yaml",
+        \\instruments:
+        \\  laser:
+        \\    adapter: laser.yaml
+        \\    resource: R
+        \\pipeline:
+        \\  record: all
+        \\float_precision: 0
+        \\tasks:
+        \\  - steps:
+        \\      - call: laser.tune
+        \\        args:
+        \\          wavelength: 1550.126
+        \\          current: 12.7
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/precision.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
+    defer dir.close(std.testing.io);
+
+    var compiled = try precompilePath(gpa, std.testing.io, recipe_path, dir, null);
+    defer compiled.deinit();
+
+    const call = compiled.tasks[0].steps()[0].action.instrument_call;
+    var args: [2]recipe_ir.Value = undefined;
+    args[call.command.argIndex("wavelength").?] = .{ .float = 1550.126 };
+    args[call.command.argIndex("current").?] = .{ .float = 12.7 };
+
+    var stack_buf: [64]u8 = undefined;
+    var rendered = try call.command.render(gpa, stack_buf[0..], args[0..], call.command.instrument.write_termination, compiled.float_precision);
+    defer rendered.deinit(gpa);
+
+    try std.testing.expectEqualStrings("WA1550.13;CU13", rendered.bytes);
+}
+
 test "precompiled command applies bool format from adapter defaults" {
     const gpa = std.testing.allocator;
     var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
@@ -2400,7 +2586,7 @@ test "precompiled command applies bool format from adapter defaults" {
     var diags: diagnostic.Diagnostics = .init(gpa, "<test>");
     defer diags.deinit();
 
-    const source = try Adapter.Command.parse(alloc, "OUTP {state}", null, null, diags.reporter());
+    const source = try Adapter.Command.parse(alloc, "OUTP {state:bool}", null, null, diags.reporter());
 
     var instrument = recipe_ir.PrecompiledInstrument{
         .adapter_name = "psu",
@@ -2411,7 +2597,7 @@ test "precompiled command applies bool format from adapter defaults" {
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, gpa, source, &instrument, .{ .true = "ON", .false = "OFF" }, diags.reporter(), .{});
+    var compiled = try compileCommand(gpa, gpa, source, &instrument, .{ .true_text = "ON", .false_text = "OFF" }, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.Value{
@@ -2435,15 +2621,13 @@ test "precompiled command applies list separators and element formats" {
         \\metadata: {}
         \\commands:
         \\  configure:
-        \\    write: "OUTP {states};VOLT {voltages}"
+        \\    write: "OUTP {states:list};VOLT {voltages:list}"
         \\    args:
         \\      states:
-        \\        type: bool
         \\        true: "ON"
         \\        false: "OFF"
         \\        separator: "|"
         \\      voltages:
-        \\        type: list
         \\        separator: ";"
     );
     try workspace.writeFile("recipes/list_format.yaml",
@@ -2486,6 +2670,81 @@ test "precompiled command applies list separators and element formats" {
     try std.testing.expectEqualStrings("OUTP ON|OFF;VOLT 1.0;2.5", rendered.bytes);
 }
 
+test "option args validate static values and dynamic renders" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/trigger.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  source:
+        \\    write: "TRIG:SOUR {source:option}"
+        \\    args:
+        \\      source:
+        \\        options: [IMM, BUS]
+    );
+    try workspace.writeFile("recipes/invalid_option.yaml",
+        \\instruments:
+        \\  trig:
+        \\    adapter: trigger.yaml
+        \\    resource: R
+        \\pipeline:
+        \\  record: all
+        \\tasks:
+        \\  - steps:
+        \\      - call: trig.source
+        \\        args:
+        \\          source: EXT
+    );
+    try workspace.writeFile("recipes/dynamic_option.yaml",
+        \\instruments:
+        \\  trig:
+        \\    adapter: trigger.yaml
+        \\    resource: R
+        \\pipeline:
+        \\  record: all
+        \\vars:
+        \\  source: EXT
+        \\tasks:
+        \\  - steps:
+        \\      - call: trig.source
+        \\        args:
+        \\          source: "${source}"
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const invalid_recipe_path = try workspace.realpathAlloc("recipes/invalid_option.yaml");
+    defer gpa.free(invalid_recipe_path);
+    const dynamic_recipe_path = try workspace.realpathAlloc("recipes/dynamic_option.yaml");
+    defer gpa.free(dynamic_recipe_path);
+
+    try expectPrecompileAnalysisFail(gpa, adapter_dir, invalid_recipe_path, &.{
+        "argument value is not one of the adapter option values",
+    });
+
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
+    defer dir.close(std.testing.io);
+
+    var compiled = try precompilePath(gpa, std.testing.io, dynamic_recipe_path, dir, null);
+    defer compiled.deinit();
+
+    const call = compiled.tasks[0].steps()[0].action.instrument_call;
+    var args = [_]recipe_ir.Value{
+        .{ .string = recipe_ir.Value.String.borrow("IMM") },
+    };
+
+    var stack_buf: [64]u8 = undefined;
+    var rendered = try call.command.render(gpa, stack_buf[0..], args[0..], call.command.instrument.write_termination, null);
+    defer rendered.deinit(gpa);
+    try std.testing.expectEqualStrings("TRIG:SOUR IMM", rendered.bytes);
+
+    args[0] = .{ .string = recipe_ir.Value.String.borrow("EXT") };
+    try std.testing.expectError(error.InvalidOptionValue, call.command.render(gpa, stack_buf[0..], args[0..], call.command.instrument.write_termination, null));
+}
+
 test "precompile rejects partial bool arg map" {
     const gpa = std.testing.allocator;
 
@@ -2496,10 +2755,9 @@ test "precompile rejects partial bool arg map" {
         \\instrument: {}
         \\commands:
         \\  output:
-        \\    write: "OUTP {state}"
+        \\    write: "OUTP {state:bool}"
         \\    args:
         \\      state:
-        \\        type: bool
         \\        true: "ON"
     );
 
@@ -3018,7 +3276,7 @@ test "precompile rejects undeclared variable use" {
         \\metadata: {}
         \\commands:
         \\  set:
-        \\    write: "V {voltage}"
+        \\    write: "V {voltage:float}"
     );
     try workspace.writeFile("recipes/undeclared.yaml",
         \\instruments:
@@ -3115,7 +3373,7 @@ test "precompile sequential task" {
         \\metadata: {}
         \\commands:
         \\  set:
-        \\    write: "VOLT {voltage}"
+        \\    write: "VOLT {voltage:float}"
     );
     try workspace.writeFile("recipes/sequential.yaml",
         \\instruments:
@@ -3159,7 +3417,7 @@ test "precompile loop task with while" {
         \\metadata: {}
         \\commands:
         \\  set:
-        \\    write: "VOLT {voltage}"
+        \\    write: "VOLT {voltage:float}"
     );
     try workspace.writeFile("recipes/loop_task.yaml",
         \\instruments:
@@ -3204,7 +3462,7 @@ test "precompile conditional task with if" {
         \\metadata: {}
         \\commands:
         \\  set:
-        \\    write: "VOLT {voltage}"
+        \\    write: "VOLT {voltage:float}"
     );
     try workspace.writeFile("recipes/conditional_task.yaml",
         \\instruments:
@@ -3288,7 +3546,7 @@ test "precompile recipe with list variable" {
         \\metadata: {}
         \\commands:
         \\  set:
-        \\    write: "VOLT {voltage}"
+        \\    write: "VOLT {voltage:float}"
     );
     try workspace.writeFile("recipes/list_vars.yaml",
         \\instruments:
@@ -3365,7 +3623,7 @@ test "precompile const-folds join() in step args" {
         \\metadata: {}
         \\commands:
         \\  set_voltage:
-        \\    write: "VOLT {voltage},(@{channels})"
+        \\    write: "VOLT {voltage:float},(@{channels:list})"
     );
     try workspace.writeFile("recipes/const_join.yaml",
         \\instruments:
@@ -3423,7 +3681,7 @@ test "precompile const scalar expression folding" {
         \\metadata: {}
         \\commands:
         \\  set:
-        \\    write: "V {voltage}"
+        \\    write: "V {voltage:float}"
     );
     try workspace.writeFile("recipes/const_arith.yaml",
         \\instruments:
@@ -3476,7 +3734,7 @@ test "precompile rejects assign to const" {
         \\metadata: {}
         \\commands:
         \\  set:
-        \\    write: "V {voltage}"
+        \\    write: "V {voltage:float}"
         \\    response: float
     );
     try workspace.writeFile("recipes/assign_const.yaml",
@@ -3546,7 +3804,7 @@ test "precompile does not fold expressions referencing runtime vars" {
         \\metadata: {}
         \\commands:
         \\  set:
-        \\    write: "V {voltage}"
+        \\    write: "V {voltage:float}"
     );
     try workspace.writeFile("recipes/no_fold.yaml",
         \\instruments:
@@ -3607,7 +3865,7 @@ test "precompile partially folds const prefix with runtime var" {
         \\metadata: {}
         \\commands:
         \\  set:
-        \\    write: "V {voltage}"
+        \\    write: "V {voltage:float}"
     );
     try workspace.writeFile("recipes/partial_fold.yaml",
         \\instruments:

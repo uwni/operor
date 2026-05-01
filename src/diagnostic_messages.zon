@@ -41,6 +41,11 @@
     .missing_closing_bracket = "missing closing ']'",
     .nested_optional_group = "optional groups cannot be nested",
     .empty_argument = "template placeholder cannot be empty",
+    .missing_argument_type = "template placeholder must declare an argument type",
     .invalid_identifier = "template placeholder '{[identifier]s}' is not a valid identifier",
+    .invalid_argument_type = "template placeholder type '{[arg_type]s}' is not supported",
     .invalid_read_type = "read type '{[read_type]s}' is not supported",
+    .missing_option_values = "option argument must define at least one option value",
+    .invalid_option_value = "argument value is not one of the adapter option values",
+    .conflicting_argument_type = "template placeholder uses conflicting type annotations",
 }

@@ -201,6 +201,8 @@ pub const BoolTextMap = struct {
 pub const ArgFormat = struct {
     bool_map: ?BoolTextMap = null,
     list_separator: ?[]const u8 = null,
+    float_precision: ?u8 = null,
+    option_values: ?[]const []const u8 = null,
 
     pub fn deinit(self: *ArgFormat, allocator: std.mem.Allocator) void {
         if (self.bool_map) |map| {
@@ -208,6 +210,10 @@ pub const ArgFormat = struct {
             allocator.free(map.false_text);
         }
         if (self.list_separator) |text| allocator.free(text);
+        if (self.option_values) |values| {
+            for (values) |value| allocator.free(value);
+            allocator.free(values);
+        }
         self.* = undefined;
     }
 };
@@ -234,6 +240,7 @@ pub const PrecompiledCommand = struct {
     pub const RenderError = error{
         BufferTooSmall,
         OutOfMemory,
+        InvalidOptionValue,
     };
 
     /// Releases heap-owned template and placeholder data.
@@ -279,6 +286,7 @@ pub const PrecompiledCommand = struct {
                     const owned = try renderAllocWithSuffix(allocator, self.segments, args, self.args, suffix, float_precision);
                     return .{ .bytes = owned, .owned = owned };
                 },
+                error.InvalidOptionValue => return error.InvalidOptionValue,
                 else => unreachable,
             };
 
@@ -499,6 +507,7 @@ pub const PrecompiledRecipe = struct {
 fn writeValueWithFormat(writer: anytype, value: Value, fmt: ArgFormat, float_precision: ?u8) !void {
     switch (value) {
         .bool => |b| {
+            if (fmt.option_values != null) return error.InvalidOptionValue;
             if (fmt.bool_map) |map| {
                 try writer.writeAll(if (b) map.true_text else map.false_text);
                 return;
@@ -506,14 +515,24 @@ fn writeValueWithFormat(writer: anytype, value: Value, fmt: ArgFormat, float_pre
             try writer.writeAll(if (b) "true" else "false");
         },
         .float => |f| {
-            if (float_precision) |precision| {
+            if (fmt.option_values != null) return error.InvalidOptionValue;
+            if (fmt.float_precision orelse float_precision) |precision| {
                 try writeFloatFixed(writer, f, precision);
             } else {
                 try writer.print("{d}", .{f});
             }
         },
-        .int => |i| try writer.print("{d}", .{i}),
-        .string => |s| try writer.writeAll(s.items()),
+        .int => |i| {
+            if (fmt.option_values != null) return error.InvalidOptionValue;
+            try writer.print("{d}", .{i});
+        },
+        .string => |s| {
+            const text = s.items();
+            if (fmt.option_values) |values| {
+                if (!containsOptionValue(values, text)) return error.InvalidOptionValue;
+            }
+            try writer.writeAll(text);
+        },
         .list => |items| {
             const sep = fmt.list_separator orelse ",";
             for (items.items(), 0..) |item, idx| {
@@ -523,6 +542,13 @@ fn writeValueWithFormat(writer: anytype, value: Value, fmt: ArgFormat, float_pre
             }
         },
     }
+}
+
+fn containsOptionValue(values: []const []const u8, needle: []const u8) bool {
+    for (values) |value| {
+        if (std.mem.eql(u8, value, needle)) return true;
+    }
+    return false;
 }
 
 fn renderInternal(
@@ -573,6 +599,7 @@ fn renderAllocWithSuffix(
 
     renderInternal(&out.writer, segments, args, arg_meta, float_precision) catch |err| switch (err) {
         error.WriteFailed => return error.OutOfMemory,
+        error.InvalidOptionValue => return error.InvalidOptionValue,
     };
 
     out.writer.writeAll(suffix) catch return error.OutOfMemory;

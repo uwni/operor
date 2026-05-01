@@ -107,7 +107,15 @@ instrument:
   firmware: "1.10"
 commands:
   set_voltage:
-    write: "VOLT {voltage},(@{channels})"
+    write: "VOLT {voltage:float},(@{channels:list})"
+    args:
+      voltage:
+        precision: 2
+  set_trigger_source:
+    write: "TRIG:SOUR {source:option}"
+    args:
+      source:
+        options: [IMM, BUS, EXT]
   measure_voltage:
     write: "MEAS:VOLT?"
     read: float
@@ -118,8 +126,10 @@ commands:
 
 Notes:
 
-- Command template placeholders use `{name}` syntax.
+- Command template placeholders use `{name:type}` syntax.
 - Placeholder names must be valid identifiers.
+- Command `args` can define formatting rules. `precision` on an argument overrides recipe-level `float_precision` for that placeholder.
+- Use `{name:option}` with `options: [...]` for string-like enumerated command parameters.
 - A command with `read: raw | float | int | string | bool` reads and parses a scalar response after the write.
 - Use `read: [float, float]` for comma-separated multi-field responses; the parsed result is stored as a list.
 - For non-comma separators, use `read: { split: ";", items: [int, string] }`.
@@ -238,7 +248,7 @@ All expression math is evaluated as `f64`. A non-zero result is treated as true.
 
 Important distinction:
 
-- Adapter command templates use `{name}` placeholders.
+- Adapter command templates use `{name:type}` placeholders.
 - Recipe expressions use `${name}` variable references.
 
 ## Preview And Dry-Run

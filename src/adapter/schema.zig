@@ -22,8 +22,15 @@ pub const AdapterMeta = struct {
 /// Configurable string mapping for boolean write/read values.
 /// Both fields must be explicitly provided by the adapter author.
 pub const BoolFormat = struct {
-    true: []const u8,
-    false: []const u8,
+    true_text: []const u8,
+    false_text: []const u8,
+
+    pub const serde = .{
+        .rename = .{
+            .true_text = "true",
+            .false_text = "false",
+        },
+    };
 };
 
 /// Instrument-level defaults declared in a adapter document.
@@ -51,19 +58,6 @@ pub const InstrumentSpec = struct {
     bool_format: ?BoolFormat = null,
 };
 
-/// Argument type specification declared in adapter command `args`.
-/// Deserialized directly from YAML/TOML; interpretation deferred to precompile.
-pub const ArgSpec = union(enum) {
-    /// Short form: `"bool"` or `"list"`.
-    string: []const u8,
-    /// Full form: `{type: bool, true: "1", false: "0"}`.
-    object: ArgSpecObject,
-
-    pub const serde = .{
-        .tag = serde_lib.UnionTag.untagged,
-    };
-};
-
 /// Literal default value for an adapter command argument.
 /// Mirrors recipe argument values but lives in the adapter schema to avoid
 /// coupling adapter parsing to recipe parsing.
@@ -87,13 +81,22 @@ pub const ArgDefault = union(enum) {
     };
 };
 
-/// Object form of an argument type specification.
-pub const ArgSpecObject = struct {
-    type: []const u8,
-    true: ?[]const u8 = null,
-    false: ?[]const u8 = null,
+/// Argument formatting specification declared in adapter command `args`.
+/// Deserialized directly from YAML/TOML; interpretation deferred to precompile.
+pub const ArgSpec = struct {
+    true_text: ?[]const u8 = null,
+    false_text: ?[]const u8 = null,
     separator: ?[]const u8 = null,
+    precision: ?u8 = null,
+    options: ?[]const []const u8 = null,
     default: ?ArgDefault = null,
+
+    pub const serde = .{
+        .rename = .{
+            .true_text = "true",
+            .false_text = "false",
+        },
+    };
 };
 
 /// Response type specification declared in adapter command `read`.
