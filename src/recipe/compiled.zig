@@ -16,8 +16,11 @@ fn writeFloatFixed(writer: anytype, value: f64, decimal_places: u8) !void {
 }
 
 pub const Value = union(enum) {
+    /// Runtime string value that either borrows arena/static bytes or owns a mutable buffer.
     pub const String = union(enum) {
+        /// Caller-owned bytes; lifetime must outlive the consumer of this `Value`.
         borrowed: []const u8,
+        /// Allocator-owned buffer with a logical length that may be shorter than capacity.
         owned: struct { items: []u8, len: usize },
 
         pub fn borrow(items_: []const u8) String {
@@ -40,8 +43,11 @@ pub const Value = union(enum) {
         }
     };
 
+    /// Runtime list value that either borrows immutable items or owns a mutable backing buffer.
     pub const List = union(enum) {
+        /// Caller-owned items; lifetime must outlive the consumer of this `Value`.
         borrowed: []const Value,
+        /// Allocator-owned item buffer with a logical length that may be shorter than capacity.
         owned: struct { items: []Value, len: usize },
 
         pub fn borrow(items_: []const Value) List {
@@ -97,10 +103,15 @@ pub const Value = union(enum) {
         }
     };
 
+    /// Floating-point scalar used by expressions and command rendering.
     float: f64,
+    /// Integer scalar used by expressions and command rendering.
     int: i64,
+    /// Boolean scalar, optionally mapped to adapter-specific text at render/parse boundaries.
     bool: bool,
+    /// UTF-8/text payload; ownership is carried by the nested `String` tag.
     string: String,
+    /// Ordered scalar values; nested lists are intentionally not supported by runtime slots.
     list: List,
 
     pub fn toResolvedValue(self: Value) expr.ResolvedValue {
@@ -151,14 +162,21 @@ pub const RenderedCommand = struct {
     }
 };
 
+/// Arena-owned command template segment after placeholder names have been resolved to indices.
 pub const CompiledSegment = union(enum) {
+    /// Literal bytes copied directly into the rendered command.
     literal: []const u8,
+    /// Index into `PrecompiledCommand.args` and the per-step resolved argument array.
     arg: usize,
+    /// Nested segment list rendered only when at least one contained argument is non-empty.
     optional: []CompiledSegment,
 };
 
+/// Precompiled step argument expression aligned to one command placeholder.
 pub const StepArg = union(enum) {
+    /// Single expression evaluated to one runtime value immediately before rendering.
     scalar: expr.Expression,
+    /// Expressions evaluated independently, then rendered with the placeholder's list separator.
     list: []expr.Expression,
 
     fn deinit(self: *StepArg, allocator: std.mem.Allocator) void {
@@ -236,6 +254,7 @@ pub const PrecompiledCommand = struct {
         return self.argIndex(name) != null;
     }
 
+    /// Returns the stable placeholder index assigned during template compilation.
     pub fn argIndex(self: *const PrecompiledCommand, name: []const u8) ?usize {
         for (self.args, 0..) |arg, idx| {
             if (std.mem.eql(u8, arg.name, name)) return idx;
@@ -499,6 +518,7 @@ fn writeValueWithFormat(writer: anytype, value: Value, fmt: ArgFormat, float_pre
             const sep = fmt.list_separator orelse ",";
             for (items.items(), 0..) |item, idx| {
                 if (idx > 0) try writer.writeAll(sep);
+                // List elements inherit the same placeholder formatting rules.
                 try writeValueWithFormat(writer, item, fmt, float_precision);
             }
         },
@@ -520,6 +540,7 @@ fn renderInternal(
                 try writeValueWithFormat(writer, args[arg_idx], fmt, float_precision);
             },
             .optional => |inner| {
+                // Optional groups are present only when at least one inner argument has content.
                 const has_value = for (inner) |s| {
                     if (s == .arg and args[s.arg].isEmpty()) continue;
                     if (s == .arg) break true;

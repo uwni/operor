@@ -82,6 +82,8 @@ pub fn executeCompute(
     try ctx.setSlot(comp.save_slot, value);
 }
 
+/// Resolves step arguments against the current context and renders the precompiled command.
+/// Returned bytes may borrow `stack_buffer`, so callers must keep it alive until `deinit`.
 pub fn renderInstrumentCall(
     allocator: std.mem.Allocator,
     step: *const recipe_mod.Step.InstrumentCall,
@@ -106,6 +108,7 @@ pub fn renderInstrumentCall(
     );
 }
 
+/// Parses and stores a response only when both the recipe assignment and adapter response exist.
 pub fn storeInstrumentResponse(
     step: *const recipe_mod.Step.InstrumentCall,
     ctx: *session.Context,
@@ -169,6 +172,7 @@ fn parseScalarResponseValue(
 ) !session.Value {
     const trimmed = std.mem.trim(u8, response_bytes, &std.ascii.whitespace);
     return switch (encoding) {
+        // Raw responses intentionally preserve leading/trailing bytes exactly as received.
         .raw => .{ .string = session.Value.String.borrow(response_bytes) },
         .float => .{ .float = try std.fmt.parseFloat(f64, trimmed) },
         .int => .{ .int = try std.fmt.parseInt(i64, trimmed, 10) },
@@ -184,11 +188,13 @@ fn parseListResponseIntoSlot(
     response_bytes: []const u8,
     bool_map: ?recipe_mod.BoolTextMap,
 ) !void {
+    // Prepare the destination before parsing so repeated list responses can reuse capacity.
     const items = try ctx.prepareListSlot(slot, response_spec.items.len);
 
     var remaining = std.mem.trim(u8, response_bytes, &std.ascii.whitespace);
     for (response_spec.items, 0..) |encoding, idx| {
         const field = if (idx + 1 == response_spec.items.len) blk: {
+            // Extra separators after the final expected field indicate a response shape mismatch.
             if (findSeparatorOutsideQuotes(remaining, response_spec.separator) != null) return error.ResponseFieldCountMismatch;
             break :blk remaining;
         } else blk: {
@@ -208,6 +214,8 @@ fn parseListResponseIntoSlot(
     }
 }
 
+/// Finds a response separator while ignoring separators inside double-quoted fields.
+/// Doubled quotes inside quoted strings are treated as escaped quotes.
 fn findSeparatorOutsideQuotes(source: []const u8, separator: []const u8) ?usize {
     if (separator.len == 0) return null;
 
@@ -229,6 +237,7 @@ fn findSeparatorOutsideQuotes(source: []const u8, separator: []const u8) ?usize 
     return null;
 }
 
+/// Removes one surrounding double-quote pair; escaping is handled only for separator scanning.
 fn unwrapQuotedString(value: []const u8) []const u8 {
     if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') {
         return value[1 .. value.len - 1];
@@ -236,6 +245,7 @@ fn unwrapQuotedString(value: []const u8) []const u8 {
     return value;
 }
 
+/// Parses adapter-specific boolean text when configured, otherwise accepts legacy `1` truthiness.
 fn parseBoolResponse(trimmed: []const u8, bool_map: ?recipe_mod.BoolTextMap) !bool {
     if (bool_map) |map| {
         if (std.ascii.eqlIgnoreCase(trimmed, map.true_text)) return true;
@@ -270,6 +280,7 @@ pub fn resolveStepArg(
     return switch (value) {
         .scalar => |e| try evalToValue(&e, ctx, allocator),
         .list => |items| blk: {
+            // The returned list borrows scratch-owned items for the duration of command rendering.
             const resolved = try allocator.alloc(session.Value, items.len);
             for (items, 0..) |*item, idx| {
                 resolved[idx] = try evalToValue(item, ctx, allocator);

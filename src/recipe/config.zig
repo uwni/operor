@@ -33,7 +33,9 @@ pub const ArgValueDoc = union(enum) {
 
 /// Parsed instrument object straight from the recipe document.
 pub const InstrumentConfig = struct {
+    /// Adapter document name resolved from the configured adapter directory.
     adapter: []const u8,
+    /// VISA resource address used when opening the instrument.
     resource: []const u8,
 };
 
@@ -124,13 +126,21 @@ pub const PipelineConfig = recipe_ir.PipelineConfig;
 
 /// Parsed top-level recipe document.
 pub const RecipeConfig = struct {
+    /// Named instruments available to task steps.
     instruments: std.array_hash_map.String(InstrumentConfig),
+    /// Ordered task list executed by the scheduler.
     tasks: []TaskConfig,
+    /// Optional sampling pipeline configuration.
     pipeline: ?PipelineConfig = null,
+    /// Optional global stop condition checked between task iterations.
     stop_when: ?BooleanExpr = null,
+    /// Immutable values available to expression compilation and constant folding.
     consts: ?std.array_hash_map.String(ArgValueDoc) = null,
+    /// Mutable runtime variables stored in executor context slots.
     vars: ?std.array_hash_map.String(ArgValueDoc) = null,
+    /// User-provided finite iteration estimate used for progress reporting.
     expected_iterations: ?u64 = null,
+    /// Optional global decimal precision for float command rendering.
     float_precision: ?u8 = null,
 };
 

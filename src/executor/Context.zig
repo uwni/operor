@@ -9,11 +9,16 @@ const String = Value.String;
 const List = Value.List;
 
 /// Execution-time value store used for `${name}` substitutions and `assign` outputs.
+/// Slot positions are assigned during precompile; runtime never looks values up by name.
 allocator: std.mem.Allocator,
 io: std.Io,
+/// Monotonic start timestamp used by the `$ELAPSED_MS` built-in.
 start_ns: i96 = 0,
+/// Count of completed task iterations exposed through `$ITER`.
 iteration: u64 = 0,
+/// Index of the task currently being executed, exposed through `$TASK_IDX`.
 task_idx: usize = 0,
+/// Context-owned runtime slots, aligned to `PrecompiledRecipe.initial_values`.
 values: []Slot,
 
 const Slot = union(enum) {
@@ -112,6 +117,8 @@ pub fn getSlot(self: *const Context, slot_idx: usize) Value {
     };
 }
 
+/// Resizes a list slot for in-place population and returns its mutable item slice.
+/// Existing elements beyond the new length are freed before the slot is reused.
 pub fn prepareListSlot(self: *Context, slot_idx: usize, len: usize) ![]Value {
     const stored = &self.values[slot_idx];
     switch (stored.*) {
@@ -135,10 +142,12 @@ pub fn prepareListSlot(self: *Context, slot_idx: usize, len: usize) ![]Value {
     }
 }
 
+/// Stores one value into a slice returned by `prepareListSlot`, preserving ownership rules.
 pub fn setPreparedListItem(self: *Context, items: []Value, index: usize, value: Value) !void {
     try self.setValue(&items[index], value);
 }
 
+/// Resolves either a compiled recipe slot or one of the executor built-ins.
 pub fn resolveBinding(self: *const Context, binding: expr.VariableBinding) Value {
     return switch (binding) {
         .slot => |slot_idx| self.getSlot(slot_idx),
@@ -157,6 +166,7 @@ pub fn resolveBinding(self: *const Context, binding: expr.VariableBinding) Value
     };
 }
 
+/// Converts finite floats to integers using truncation toward zero and explicit range checks.
 fn floatToIntFloor(f: f64) !i64 {
     if (!std.math.isFinite(f)) return error.InvalidNumericConversion;
 
@@ -240,6 +250,7 @@ fn setString(self: *Context, stored: *String, bytes: []const u8) !void {
 }
 
 fn setValue(self: *Context, stored: *Value, value: Value) !void {
+    // String slots keep and reuse their buffer when capacity is sufficient.
     if (stored.* == .string and value == .string) {
         return self.setString(&stored.string, value.string.items());
     }
@@ -264,6 +275,7 @@ fn dupeList(self: *Context, items: []const Value, capacity_hint: usize) !List {
     var initialized: usize = 0;
     const dest = duped.mutItems();
     errdefer for (dest[0..initialized]) |item| self.freeValue(item);
+    // Only the logical prefix is initialized; spare capacity is reserved for future list responses.
     for (items, 0..) |item, idx| {
         dest[idx] = try self.dupeValue(item);
         initialized += 1;
