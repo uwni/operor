@@ -32,7 +32,6 @@ pub const InstrumentRuntime = struct {
 };
 
 pub const Value = Context.Value;
-pub const RenderValue = Context.RenderValue;
 
 /// Type-erased fire-and-forget log sink for executor diagnostics.
 pub const LogSink = struct {

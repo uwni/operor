@@ -5,7 +5,6 @@ const diagnostic = @import("../diagnostic.zig");
 const recipe_compiled = @import("../recipe/compiled.zig");
 
 pub const Value = recipe_compiled.Value;
-pub const RenderValue = recipe_compiled.RenderValue;
 const String = Value.String;
 const List = Value.List;
 
@@ -272,7 +271,7 @@ fn dupeList(self: *Context, items: []const Value, capacity_hint: usize) !List {
     return duped;
 }
 
-test "Value and RenderValue format support formatter specifier" {
+test "Value format supports formatter specifier" {
     const testing = std.testing;
     const list = [_]Value{
         .{ .int = 1 },
@@ -288,10 +287,10 @@ test "Value and RenderValue format support formatter specifier" {
         Value{ .int = 42 },
         Value{ .bool = true },
         Value{ .string = String.borrow("ok") },
-        RenderValue{ .list = List.borrow(list[0..]) },
+        Value{ .list = List.borrow(list[0..]) },
     });
 
-    try testing.expectEqualStrings("1.25|42|true|ok|1,2.5,ch3", out.written());
+    try testing.expectEqualStrings("1.25|42|true|ok|1, 2.5, ch3", out.written());
 }
 
 test "Context exposes built-ins alongside stored values" {

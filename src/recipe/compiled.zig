@@ -113,6 +113,14 @@ pub const Value = union(enum) {
         };
     }
 
+    pub fn isEmpty(self: Value) bool {
+        return switch (self) {
+            .string => |s| s.items().len == 0,
+            .list => |items| items.len() == 0,
+            else => false,
+        };
+    }
+
     pub fn format(self: Value, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self) {
             .float => |f| try writer.print("{d}", .{f}),
@@ -122,35 +130,6 @@ pub const Value = union(enum) {
             .list => |list| {
                 for (list.items(), 0..) |item, idx| {
                     if (idx > 0) try writer.writeAll(", ");
-                    try item.format(writer);
-                }
-            },
-        }
-    }
-};
-
-/// Render-time value used by command templates.
-pub const RenderValue = union(enum) {
-    scalar: Value,
-    list: Value.List,
-
-    /// Returns true when this value would produce no output when rendered.
-    pub fn isEmpty(self: RenderValue) bool {
-        return switch (self) {
-            .scalar => |v| switch (v) {
-                .string => |s| s.items().len == 0,
-                else => false,
-            },
-            .list => |items| items.len() == 0,
-        };
-    }
-
-    pub fn format(self: RenderValue, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        switch (self) {
-            .scalar => |value| try value.format(writer),
-            .list => |items| {
-                for (items.items(), 0..) |item, idx| {
-                    if (idx > 0) try writer.writeByte(',');
                     try item.format(writer);
                 }
             },
@@ -269,7 +248,7 @@ pub const PrecompiledCommand = struct {
         self: *const PrecompiledCommand,
         allocator: std.mem.Allocator,
         stack_buffer: []u8,
-        args: []const RenderValue,
+        args: []const Value,
         suffix: []const u8,
         float_precision: ?u8,
     ) RenderError!RenderedCommand {
@@ -529,7 +508,7 @@ fn writeValueWithFormat(writer: anytype, value: Value, fmt: ArgFormat, float_pre
 fn renderInternal(
     writer: anytype,
     segments: []const CompiledSegment,
-    args: []const RenderValue,
+    args: []const Value,
     arg_meta: []const CommandArg,
     float_precision: ?u8,
 ) !void {
@@ -537,18 +516,8 @@ fn renderInternal(
         switch (segment) {
             .literal => |literal| try writer.writeAll(literal),
             .arg => |arg_idx| {
-                const rv = args[arg_idx];
                 const fmt = arg_meta[arg_idx].format;
-                switch (rv) {
-                    .scalar => |value| try writeValueWithFormat(writer, value, fmt, float_precision),
-                    .list => |items| {
-                        const sep = fmt.list_separator orelse ",";
-                        for (items.items(), 0..) |item, idx| {
-                            if (idx > 0) try writer.writeAll(sep);
-                            try writeValueWithFormat(writer, item, fmt, float_precision);
-                        }
-                    },
-                }
+                try writeValueWithFormat(writer, args[arg_idx], fmt, float_precision);
             },
             .optional => |inner| {
                 const has_value = for (inner) |s| {
@@ -573,7 +542,7 @@ fn freeCompiledSegments(allocator: std.mem.Allocator, segments: []CompiledSegmen
 fn renderAllocWithSuffix(
     allocator: std.mem.Allocator,
     segments: []const CompiledSegment,
-    args: []const RenderValue,
+    args: []const Value,
     arg_meta: []const CommandArg,
     suffix: []const u8,
     float_precision: ?u8,

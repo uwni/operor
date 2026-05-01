@@ -2281,8 +2281,8 @@ test "precompiled command renders via helper" {
     try std.testing.expectEqual(@as(usize, 1), compiled.args.len);
     try std.testing.expectEqualStrings("voltage", compiled.args[0].name);
 
-    const args = [_]recipe_ir.RenderValue{
-        .{ .scalar = .{ .float = 3.3 } },
+    const args = [_]recipe_ir.Value{
+        .{ .float = 3.3 },
     };
 
     var stack_buf: [32]u8 = undefined;
@@ -2315,8 +2315,8 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     var compiled = try compileCommand(gpa, gpa, source, &instrument, null, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
-    const args = [_]recipe_ir.RenderValue{
-        .{ .scalar = .{ .string = recipe_ir.Value.String.borrow("1234567890") } },
+    const args = [_]recipe_ir.Value{
+        .{ .string = recipe_ir.Value.String.borrow("1234567890") },
     };
 
     var stack_buf: [8]u8 = undefined;
@@ -2349,8 +2349,8 @@ test "float_precision controls decimal places in rendered command" {
     var compiled = try compileCommand(gpa, gpa, source, &instrument, null, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
-    const args = [_]recipe_ir.RenderValue{
-        .{ .scalar = .{ .float = 3.14159265 } },
+    const args = [_]recipe_ir.Value{
+        .{ .float = 3.14159265 },
     };
 
     var stack_buf: [64]u8 = undefined;
@@ -2393,8 +2393,8 @@ test "precompiled command applies bool format from adapter defaults" {
     var compiled = try compileCommand(gpa, gpa, source, &instrument, .{ .true = "ON", .false = "OFF" }, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
-    const args = [_]recipe_ir.RenderValue{
-        .{ .scalar = .{ .bool = true } },
+    const args = [_]recipe_ir.Value{
+        .{ .bool = true },
     };
 
     var stack_buf: [32]u8 = undefined;

@@ -92,7 +92,7 @@ pub fn renderInstrumentCall(
 ) !recipe_mod.RenderedCommand {
     scratch.reset();
     const alloc = scratch.tempAllocator();
-    const resolved_args = try alloc.alloc(session.RenderValue, step.args.len);
+    const resolved_args = try alloc.alloc(session.Value, step.args.len);
     for (step.args, 0..) |arg, idx| {
         resolved_args[idx] = try resolveStepArg(ctx, arg, alloc);
     }
@@ -266,9 +266,9 @@ pub fn resolveStepArg(
     ctx: *const session.Context,
     value: recipe_mod.StepArg,
     allocator: std.mem.Allocator,
-) !session.RenderValue {
+) !session.Value {
     return switch (value) {
-        .scalar => |e| .{ .scalar = try evalToValue(&e, ctx, allocator) },
+        .scalar => |e| try evalToValue(&e, ctx, allocator),
         .list => |items| blk: {
             const resolved = try allocator.alloc(session.Value, items.len);
             for (items, 0..) |*item, idx| {
