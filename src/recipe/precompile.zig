@@ -1704,7 +1704,7 @@ test "load recipe and adapters" {
     }
 }
 
-test "parse durations and stop conditions" {
+test "precompile parses stop_when expression" {
     const gpa = std.testing.allocator;
 
     var workspace: testing.TestWorkspace = .init(gpa);
@@ -1806,7 +1806,7 @@ test "precompile preserves initial variables" {
     try std.testing.expect(found_string);
 }
 
-test "precompile estimates iterations for run-once recipes" {
+test "precompile preserves explicit expected_iterations and leaves omitted value null" {
     const gpa = std.testing.allocator;
 
     var workspace: testing.TestWorkspace = .init(gpa);
@@ -1834,11 +1834,27 @@ test "precompile estimates iterations for run-once recipes" {
         \\      - call: d1.set
         \\        args: {}
     );
+    try workspace.writeFile("recipes/with_expected_iterations.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.yaml
+        \\    resource: R
+        \\pipeline:
+        \\  record: all
+        \\expected_iterations: 12
+        \\vars: {}
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.set
+        \\        args: {}
+    );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
     defer gpa.free(adapter_dir);
     const recipe_path = try workspace.realpathAlloc("recipes/run_once.yaml");
     defer gpa.free(recipe_path);
+    const explicit_recipe_path = try workspace.realpathAlloc("recipes/with_expected_iterations.yaml");
+    defer gpa.free(explicit_recipe_path);
 
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
@@ -1846,8 +1862,12 @@ test "precompile estimates iterations for run-once recipes" {
     var compiled = try precompilePath(gpa, std.testing.io, recipe_path, dir, null);
     defer compiled.deinit();
 
-    // No expected_iterations in recipe, so null.
     try std.testing.expectEqual(@as(?u64, null), compiled.expected_iterations);
+
+    var explicit_compiled = try precompilePath(gpa, std.testing.io, explicit_recipe_path, dir, null);
+    defer explicit_compiled.deinit();
+
+    try std.testing.expectEqual(@as(?u64, 12), explicit_compiled.expected_iterations);
 }
 
 test "precompile preserves typed literal step arguments" {
@@ -2098,10 +2118,9 @@ test "precompile rejects missing instrument references" {
     const recipe_path = try workspace.realpathAlloc("recipes/missing_instrument.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
-    defer dir.close(std.testing.io);
-
-    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try expectPrecompileAnalysisFail(gpa, adapter_dir, recipe_path, &.{
+        "instrument '\x1b[4mmissing\x1b[0m' is not declared in recipe",
+    });
 }
 
 test "precompile validates command arguments" {
@@ -2145,11 +2164,13 @@ test "precompile validates command arguments" {
     const unexpected_argument_path = try workspace.realpathAlloc("recipes/unexpected_argument.yaml");
     defer gpa.free(unexpected_argument_path);
 
-    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
-    defer dir.close(std.testing.io);
+    var missing_dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
+    defer missing_dir.close(std.testing.io);
+    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, missing_argument_path, missing_dir, null));
 
-    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, missing_argument_path, dir, null));
-    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, unexpected_argument_path, dir, null));
+    try expectPrecompileAnalysisFail(gpa, adapter_dir, unexpected_argument_path, &.{
+        "unexpected command argument '\x1b[4mchannel\x1b[0m'",
+    });
 }
 
 test "precompile allows omitted optional group arguments" {
@@ -2404,6 +2425,67 @@ test "precompiled command applies bool format from adapter defaults" {
     try std.testing.expectEqualStrings("OUTP ON\n", rendered.bytes);
 }
 
+test "precompiled command applies list separators and element formats" {
+    const gpa = std.testing.allocator;
+
+    var workspace: testing.TestWorkspace = .init(gpa);
+    defer workspace.deinit();
+
+    try workspace.writeFile("adapters/psu.yaml",
+        \\metadata: {}
+        \\commands:
+        \\  configure:
+        \\    write: "OUTP {states};VOLT {voltages}"
+        \\    args:
+        \\      states:
+        \\        type: bool
+        \\        true: "ON"
+        \\        false: "OFF"
+        \\        separator: "|"
+        \\      voltages:
+        \\        type: list
+        \\        separator: ";"
+    );
+    try workspace.writeFile("recipes/list_format.yaml",
+        \\instruments:
+        \\  d1:
+        \\    adapter: psu.yaml
+        \\    resource: "USB0::1::INSTR"
+        \\pipeline:
+        \\  record: all
+        \\tasks:
+        \\  - steps:
+        \\      - call: d1.configure
+        \\        args:
+        \\          states: [true, false]
+        \\          voltages: [1.0, 2.5]
+    );
+
+    const adapter_dir = try workspace.realpathAlloc("adapters");
+    defer gpa.free(adapter_dir);
+    const recipe_path = try workspace.realpathAlloc("recipes/list_format.yaml");
+    defer gpa.free(recipe_path);
+
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
+    defer dir.close(std.testing.io);
+
+    var compiled = try precompilePath(gpa, std.testing.io, recipe_path, dir, null);
+    defer compiled.deinit();
+
+    const call = compiled.tasks[0].steps()[0].action.instrument_call;
+    const state_items = [_]recipe_ir.Value{ .{ .bool = true }, .{ .bool = false } };
+    const voltage_items = [_]recipe_ir.Value{ .{ .float = 1.0 }, .{ .float = 2.5 } };
+    var args: [2]recipe_ir.Value = undefined;
+    args[call.command.argIndex("states").?] = .{ .list = recipe_ir.Value.List.borrow(state_items[0..]) };
+    args[call.command.argIndex("voltages").?] = .{ .list = recipe_ir.Value.List.borrow(voltage_items[0..]) };
+
+    var stack_buf: [64]u8 = undefined;
+    var rendered = try call.command.render(gpa, stack_buf[0..], args[0..], call.command.instrument.write_termination, 1);
+    defer rendered.deinit(gpa);
+
+    try std.testing.expectEqualStrings("OUTP ON|OFF;VOLT 1.0;2.5", rendered.bytes);
+}
+
 test "precompile rejects partial bool arg map" {
     const gpa = std.testing.allocator;
 
@@ -2574,10 +2656,9 @@ test "precompile compute step rejects missing assign" {
     const recipe_path = try workspace.realpathAlloc("recipes/compute_no_save.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
-    defer dir.close(std.testing.io);
-
-    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try expectPrecompileAnalysisFail(gpa, adapter_dir, recipe_path, &.{
+        "invalid configuration value type",
+    });
 }
 
 test "precompile step with if guard" {
@@ -2643,10 +2724,9 @@ test "precompile rejects invalid step (neither call nor compute)" {
     const recipe_path = try workspace.realpathAlloc("recipes/invalid_step.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
-    defer dir.close(std.testing.io);
-
-    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try expectPrecompileAnalysisFail(gpa, adapter_dir, recipe_path, &.{
+        "invalid configuration value type",
+    });
 }
 
 test "precompile accepts record with declared unassigned variable" {
@@ -2962,10 +3042,9 @@ test "precompile rejects undeclared variable use" {
     const recipe_path = try workspace.realpathAlloc("recipes/undeclared.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
-    defer dir.close(std.testing.io);
-
-    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try expectPrecompileAnalysisFail(gpa, adapter_dir, recipe_path, &.{
+        "variable '\x1b[4mundeclared_var\x1b[0m' is not declared in recipe 'vars' section",
+    });
 }
 
 test "precompile rejects undeclared variable in expression" {
@@ -2992,10 +3071,9 @@ test "precompile rejects undeclared variable in expression" {
     const recipe_path = try workspace.realpathAlloc("recipes/undeclared_expr.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
-    defer dir.close(std.testing.io);
-
-    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try expectPrecompileAnalysisFail(gpa, adapter_dir, recipe_path, &.{
+        "variable '\x1b[4mx\x1b[0m' is not declared in recipe 'vars' section",
+    });
 }
 
 test "precompile rejects variable shadowing builtin" {
@@ -3022,10 +3100,9 @@ test "precompile rejects variable shadowing builtin" {
     const recipe_path = try workspace.realpathAlloc("recipes/shadow_builtin.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
-    defer dir.close(std.testing.io);
-
-    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try expectPrecompileAnalysisFail(gpa, adapter_dir, recipe_path, &.{
+        "variable name '\x1b[4m$ITER\x1b[0m' conflicts with a built-in variable",
+    });
 }
 
 test "precompile sequential task" {
@@ -3426,10 +3503,9 @@ test "precompile rejects assign to const" {
     const recipe_path = try workspace.realpathAlloc("recipes/assign_const.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
-    defer dir.close(std.testing.io);
-
-    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try expectPrecompileAnalysisFail(gpa, adapter_dir, recipe_path, &.{
+        "cannot assign to const variable '\x1b[4mfixed\x1b[0m'",
+    });
 }
 
 test "precompile rejects duplicate const and var names" {
@@ -3455,10 +3531,9 @@ test "precompile rejects duplicate const and var names" {
     const recipe_path = try workspace.realpathAlloc("recipes/dup.yaml");
     defer gpa.free(recipe_path);
 
-    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
-    defer dir.close(std.testing.io);
-
-    try std.testing.expectError(error.AnalysisFail, precompilePath(gpa, std.testing.io, recipe_path, dir, null));
+    try expectPrecompileAnalysisFail(gpa, adapter_dir, recipe_path, &.{
+        "const and var sections both define variable '\x1b[4mx\x1b[0m'",
+    });
 }
 
 test "precompile does not fold expressions referencing runtime vars" {
@@ -3502,11 +3577,21 @@ test "precompile does not fold expressions referencing runtime vars" {
 
     const step = compiled.tasks[0].steps()[0].action.instrument_call;
     const voltage_arg = step.args[step.command.argIndex("voltage").?];
-    // Expression references a runtime var, so it should NOT be const-folded;
-    // it is compiled as a proper expression with load_var + arithmetic ops.
     switch (voltage_arg) {
         .scalar => |e| {
-            try std.testing.expect(e.ops.len > 1);
+            try std.testing.expectEqual(@as(usize, 3), e.ops.len);
+            switch (e.ops[0]) {
+                .load_var => |binding| switch (binding) {
+                    .slot => |slot| try std.testing.expectEqual(@as(usize, 0), slot),
+                    .builtin => return error.TestUnexpectedResult,
+                },
+                else => return error.TestUnexpectedResult,
+            }
+            switch (e.ops[1]) {
+                .push_int => |value| try std.testing.expectEqual(@as(i64, 2), value),
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expect(e.ops[2] == .mul);
         },
         .list => return error.TestUnexpectedResult,
     }
@@ -3663,4 +3748,27 @@ test "precompile simplifies logical rhs constant" {
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expect(stop_when.ops[1] == .to_bool);
+}
+
+fn expectPrecompileAnalysisFail(
+    allocator: std.mem.Allocator,
+    adapter_dir_path: []const u8,
+    recipe_path: []const u8,
+    expected_messages: []const []const u8,
+) !void {
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir_path, .{});
+    defer dir.close(std.testing.io);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    _ = precompilePath(allocator, std.testing.io, recipe_path, dir, &out.writer) catch |err| {
+        try std.testing.expectEqual(error.AnalysisFail, err);
+        for (expected_messages) |message| {
+            try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, message));
+        }
+        return;
+    };
+
+    return error.TestUnexpectedResult;
 }

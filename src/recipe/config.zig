@@ -159,6 +159,7 @@ test "parse recipe arg object values" {
         \\  channels:
         \\    - 1
         \\    - 2
+        \\  gain: 1.25
         \\  enabled: true
     ;
 
@@ -187,6 +188,15 @@ test "parse recipe arg object values" {
                 else => return error.TestUnexpectedResult,
             }
         },
+    }
+
+    const gain = parsed.args.get("gain") orelse return error.TestUnexpectedResult;
+    switch (gain) {
+        .scalar => |scalar| switch (scalar) {
+            .float => |value| try std.testing.expectApproxEqAbs(@as(f64, 1.25), value, 1e-9),
+            else => return error.TestUnexpectedResult,
+        },
+        .list => return error.TestUnexpectedResult,
     }
 
     const enabled = parsed.args.get("enabled") orelse return error.TestUnexpectedResult;

@@ -296,38 +296,59 @@ fn logDryRun(log_sink: session.LogSink, adapter_name: []const u8, rendered: []co
     log_sink.writeAll(text);
 }
 
-test "executor parse response" {
-    var scalar_ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{
+test "executor parses scalar responses" {
+    var ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{
         .{ .float = 0 },
         .{ .int = 0 },
+        .{ .string = session.Value.String.borrow("") },
+        .{ .string = session.Value.String.borrow("") },
+    }, &.{});
+    defer ctx.deinit();
+
+    try parseResponseIntoSlot(.{ .scalar = .float }, "  2.5 \n", null, &ctx, 0);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.5), ctx.getSlot(0).float, 1e-9);
+
+    try parseResponseIntoSlot(.{ .scalar = .int }, "7", null, &ctx, 1);
+    try std.testing.expectEqual(@as(i64, 7), ctx.getSlot(1).int);
+
+    try parseResponseIntoSlot(.{ .scalar = .string }, "  ready \n", null, &ctx, 2);
+    try std.testing.expectEqualStrings("ready", ctx.getSlot(2).string.items());
+
+    try parseResponseIntoSlot(.{ .scalar = .raw }, "  raw \n", null, &ctx, 3);
+    try std.testing.expectEqualStrings("  raw \n", ctx.getSlot(3).string.items());
+}
+
+test "executor parses bool responses with optional adapter mapping" {
+    var ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{
         .{ .bool = false },
         .{ .bool = true },
         .{ .bool = false },
     }, &.{});
-    defer scalar_ctx.deinit();
+    defer ctx.deinit();
 
-    try parseResponseIntoSlot(.{ .scalar = .float }, "  2.5 \n", null, &scalar_ctx, 0);
-    try std.testing.expectApproxEqAbs(@as(f64, 2.5), scalar_ctx.getSlot(0).float, 1e-9);
+    try parseResponseIntoSlot(.{ .scalar = .bool }, "1", null, &ctx, 0);
+    try std.testing.expect(ctx.getSlot(0).bool);
 
-    try parseResponseIntoSlot(.{ .scalar = .int }, "7", null, &scalar_ctx, 1);
-    try std.testing.expectEqual(@as(i64, 7), scalar_ctx.getSlot(1).int);
+    try parseResponseIntoSlot(.{ .scalar = .bool }, "ON", null, &ctx, 1);
+    try std.testing.expect(!ctx.getSlot(1).bool);
 
-    try parseResponseIntoSlot(.{ .scalar = .bool }, "1", null, &scalar_ctx, 2);
-    try std.testing.expect(scalar_ctx.getSlot(2).bool);
+    const map: recipe_mod.BoolTextMap = .{ .true_text = "ENABLE", .false_text = "DISABLE" };
+    try parseResponseIntoSlot(.{ .scalar = .bool }, "ENABLE", map, &ctx, 2);
+    try std.testing.expect(ctx.getSlot(2).bool);
 
-    try parseResponseIntoSlot(.{ .scalar = .bool }, "ON", null, &scalar_ctx, 3);
-    try std.testing.expect(!scalar_ctx.getSlot(3).bool);
+    try parseResponseIntoSlot(.{ .scalar = .bool }, "disable", map, &ctx, 2);
+    try std.testing.expect(!ctx.getSlot(2).bool);
 
-    try parseResponseIntoSlot(.{ .scalar = .bool }, "ENABLE", .{ .true_text = "ENABLE", .false_text = "DISABLE" }, &scalar_ctx, 4);
-    try std.testing.expect(scalar_ctx.getSlot(4).bool);
+    try std.testing.expectError(error.InvalidBoolResponse, parseResponseIntoSlot(.{ .scalar = .bool }, "ON", map, &ctx, 2));
+}
 
-    try std.testing.expectError(error.InvalidBoolResponse, parseResponseIntoSlot(.{ .scalar = .bool }, "ON", .{ .true_text = "ENABLE", .false_text = "DISABLE" }, &scalar_ctx, 4));
-
-    var list_ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{
+test "executor parses list responses and reuses list slot capacity" {
+    var ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{
         .{ .list = session.Value.List.borrow(&.{}) },
     }, &.{2});
-    defer list_ctx.deinit();
-    switch (list_ctx.getSlot(0)) {
+    defer ctx.deinit();
+
+    switch (ctx.getSlot(0)) {
         .list => |items| try std.testing.expectEqual(@as(usize, 0), items.len()),
         else => return error.TestUnexpectedResult,
     }
@@ -335,8 +356,9 @@ test "executor parse response" {
     try parseResponseIntoSlot(.{ .list = .{
         .separator = ",",
         .items = &.{ .float, .float },
-    } }, " 1.25, 2.5\n", null, &list_ctx, 0);
-    switch (list_ctx.getSlot(0)) {
+    } }, " 1.25, 2.5\n", null, &ctx, 0);
+
+    switch (ctx.getSlot(0)) {
         .list => |items| {
             try std.testing.expectEqual(@as(usize, 2), items.len());
             try std.testing.expectApproxEqAbs(@as(f64, 1.25), items.items()[0].float, 1e-9);
@@ -344,18 +366,21 @@ test "executor parse response" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
 
-    const initial_error_items = [_]session.Value{ .{ .int = 0 }, .{ .string = session.Value.String.borrow("") } };
-    var error_ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{
-        .{ .list = session.Value.List.borrow(initial_error_items[0..]) },
+test "executor parses quoted list fields without splitting embedded separators" {
+    const initial_items = [_]session.Value{ .{ .int = 0 }, .{ .string = session.Value.String.borrow("") } };
+    var ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{
+        .{ .list = session.Value.List.borrow(initial_items[0..]) },
     }, &.{});
-    defer error_ctx.deinit();
+    defer ctx.deinit();
 
     try parseResponseIntoSlot(.{ .list = .{
         .separator = ",",
         .items = &.{ .int, .string },
-    } }, "-221,\"Settings conflict, channel 1\"", null, &error_ctx, 0);
-    switch (error_ctx.getSlot(0)) {
+    } }, "-221,\"Settings conflict, channel 1\"", null, &ctx, 0);
+
+    switch (ctx.getSlot(0)) {
         .list => |items| {
             try std.testing.expectEqual(@as(usize, 2), items.len());
             try std.testing.expectEqual(@as(i64, -221), items.items()[0].int);
@@ -363,9 +388,17 @@ test "executor parse response" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "executor rejects list response field count mismatches" {
+    const initial_items = [_]session.Value{ .{ .int = 0 }, .{ .string = session.Value.String.borrow("") } };
+    var ctx: session.Context = try .init(std.testing.allocator, std.testing.io, &.{
+        .{ .list = session.Value.List.borrow(initial_items[0..]) },
+    }, &.{});
+    defer ctx.deinit();
 
     try std.testing.expectError(error.ResponseFieldCountMismatch, parseResponseIntoSlot(.{ .list = .{
         .separator = ",",
         .items = &.{ .int, .string },
-    } }, "1,a,b", null, &error_ctx, 0));
+    } }, "1,a,b", null, &ctx, 0));
 }
