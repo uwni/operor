@@ -105,34 +105,54 @@ instrument:
   models:
     - E36312A
   firmware: "1.10"
+  bool_format:
+    "true": "ON"
+    "false": "OFF"
+  float_precision: 3
 commands:
   set_voltage:
     write: "VOLT {voltage:float},(@{channels:list})"
     args:
-      voltage:
-        precision: 2
+      channels:
+        separator: ","
   set_trigger_source:
     write: "TRIG:SOUR {source:option}"
     args:
       source:
-        options: [IMM, BUS, EXT]
+        options:
+          IMM: IMM
+          BUS: BUS
+          EXT: EXT
   measure_voltage:
     write: "MEAS:VOLT?"
     read: float
   measure_all:
     write: "MEAS:ALL?"
     read: [float, float]
+  measure_channels:
+    write: "MEAS:VOLT?[ (@{channels:list})]"
+    args:
+      channels:
+        separator: ","
+    read:
+      split: ","
+      type: float
 ```
 
 Notes:
 
-- Command template placeholders use `{name:type}` syntax.
+- Command template placeholders use `{name:type}` syntax, where `type` is one of `int`, `float`, `bool`, `string`, `option`, or `list`.
 - Placeholder names must be valid identifiers.
-- Command `args` can define formatting rules. `precision` on an argument overrides recipe-level `float_precision` for that placeholder.
-- Use `{name:option}` with `options: [...]` for string-like enumerated command parameters.
-- A command with `read: raw | float | int | string | bool` reads and parses a scalar response after the write.
-- Use `read: [float, float]` for comma-separated multi-field responses; the parsed result is stored as a list.
-- For non-comma separators, use `read: { split: ";", items: [int, string] }`.
+- `{name:list}` renders a list argument joined by the `separator` specified in `args`.
+- Wrapping a template segment in `[...]` makes it optional — emitted only when the argument is provided.
+- Command `args` can define formatting rules. `precision` on an argument overrides `float_precision` for that placeholder.
+- `options` defines a key-to-SCPI-value mapping. The key is used in the recipe; the value is sent to the instrument. Both are strings.
+- Use `{name:bool}` with `bool_format` to send instrument-specific true/false text (e.g. `"ON"`/`"OFF"`). `bool_format` can be set adapter-wide in `instrument` or per-argument in `args`.
+- A command with `read: float | int | string | bool` reads and parses a scalar response after the write.
+- Use `read: [float, float]` for a fixed-length comma-separated response; the parsed result is stored as a list.
+- Use `read: {split: ",", type: float}` for a variable-length response split by separator — the result length matches the number of tokens returned by the instrument.
+- For a fixed-length response with a non-comma separator or heterogeneous types, use `read: {split: ";", items: [int, string]}`.
+- `float_precision` sets the default number of decimal places for all `float` arguments in this adapter.
 - `write_termination` is appended automatically to every command sent through that adapter.
 - `read_termination`, `timeout_ms`, `query_delay_ms`, and `chunk_size` tune the VISA session used for instruments that reference the adapter.
 
@@ -141,8 +161,9 @@ Notes:
 Recipe documents are YAML files with these top-level sections:
 
 - `instruments`: named instrument instances with an adapter file and VISA resource string
+- `consts`: optional compile-time constant values used by expressions
 - `vars`: initial variable values used by expressions and `assign` slots
-- `tasks`: periodic work definitions
+- `tasks`: ordered list of task definitions
 - `pipeline`: optional CSV and TCP sink configuration
 - `stop_when`: optional stop condition expression
 
@@ -153,8 +174,9 @@ instruments:
   psu:
     adapter: psu.yaml
     resource: "USB0::1::INSTR"
-vars:
+consts:
   target_voltage: 5
+vars:
   measured_voltage: 0
   delta: 0
 pipeline:
@@ -162,7 +184,8 @@ pipeline:
   record: [measured_voltage, delta]
   file_path: samples.csv
 tasks:
-  - while: true
+  - name: Measure Loop
+    while: true
     steps:
       - call: psu.set_voltage
         args:
@@ -178,6 +201,7 @@ stop_when: "$ELAPSED_MS >= 2000 || $ITER >= 20"
 
 Recipe notes:
 
+- Each task requires a `name` field used for logging.
 - Tasks can be sequential (just `steps`), conditional (`if` guard), or looping (`while` condition).
 - `if` is optional on both `call` and `compute` steps — the step is skipped when the expression is falsy.
 - Use `sleep_ms: 100` as a step to pause between iterations.
@@ -185,10 +209,12 @@ Recipe notes:
 - A string argument written exactly as `${name}` is treated as a runtime variable reference.
 - `assign` stores a response or compute result into a declared variable slot.
 - Variables referenced by `${name}` or `assign` must be declared in `vars`.
+- `consts` are resolved at compile time; they cannot be reassigned at runtime.
+- `float_precision` at the recipe top level sets a global default for float rendering that applies to all adapters used by this recipe.
 
 ## Iterations
 
-An **iteration** is one complete execution of a task's step list. Every time a task finishes running all of its steps from top to bottom, that counts as one iteration. The global iteration counter `$ITER` starts at 0 and increments by 1 after each iteration, regardless of which task produced it.
+An **iteration** is one complete execution of a task's step list. Every time a task finishes running all of its steps from top to bottom, that counts as one iteration. The global iteration counter `$ITER` starts at 0 and increments by 1 after each iteration.
 
 Iterations drive two key behaviors:
 
@@ -196,6 +222,27 @@ Iterations drive two key behaviors:
 2. **Stop conditions** — `stop_when` is evaluated between iterations. `$ITER` reflects the number of completed iterations so far.
 
 For a **sequential** task (no `while` or `if`), the steps run exactly once — that is one iteration. For a **loop** task (`while: true`), each pass through the step list is one iteration. For a **conditional** task (`if: ...`), the steps run at most once, producing zero or one iteration depending on the guard.
+
+### Non-iterating tasks
+
+Set `iter: false` on a task to mark it as setup work that should not count as an iteration:
+
+```yaml
+tasks:
+  - name: Configure
+    iter: false
+    steps:
+      - call: psu.set_range
+        args:
+          range: 10
+  - name: Measure Loop
+    while: "$ITER < 100"
+    steps:
+      - call: psu.measure_voltage
+        assign: measured
+```
+
+A task with `iter: false` does not increment `$ITER` and does not emit a pipeline frame. `$ITER` is still `0` when the first iterating task starts. This is useful for one-time initialization steps (configuring a sensor, enabling outputs, waiting for settling) that precede the main measurement loop.
 
 Set `expected_iterations` at the recipe top level to tell the runtime how many iterations to expect. This enables progress reporting (e.g. progress bars).
 

@@ -1,12 +1,8 @@
 const std = @import("std");
 const instrument = @import("../instrument.zig");
 
-/// Raw VISA C bindings imported from `visa.h`.
-pub const c = @cImport({
-    // The VISA library uses `__int64` in some APIs, but this type is not defined by default in Zig's C importer. We define it here to ensure the bindings compile correctly.
-    @cDefine("__int64", "long long");
-    @cInclude("visa.h");
-});
+/// Raw VISA C bindings translated from `visa_c.h`.
+pub const c = @import("visa_c");
 
 pub const default_chunk_size = instrument.default_chunk_size;
 

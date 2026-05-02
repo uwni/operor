@@ -14,6 +14,15 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
     operor_mod.addIncludePath(b.path("include/"));
+
+    const visa_translate = b.addTranslateC(.{
+        .root_source_file = b.path("src/visa/visa_c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    visa_translate.addIncludePath(b.path("include/"));
+    operor_mod.addImport("visa_c", visa_translate.createModule());
+
     const serde_dep = b.dependency("serde", .{
         .target = target,
         .optimize = optimize,
