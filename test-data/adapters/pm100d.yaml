@@ -1,0 +1,344 @@
+metadata:
+  version: "1.0.0"
+  description: Thorlabs PM100D Power Meter
+  author: uenohara
+
+instrument:
+  manufacturer: "Thorlabs"
+  models: ["PM100D"]
+  bool_format:
+    true: "1"
+    false: "0"
+
+commands:
+  # System
+  beep:
+    write: "SYST:BEEP"
+  set_beep:
+    write: "SYST:BEEP:STAT {state:bool}"
+  get_beep:
+    write: "SYST:BEEP:STAT?"
+    read: bool
+  get_error:
+    write: "SYST:ERR?"
+    read: "{code:int},{message:string}"
+  get_scpi_version:
+    write: "SYST:VERS?"
+    read: string
+  set_date:
+    write: "SYST:DATE {year:int},{month:int},{day:int}"
+  get_date:
+    write: "SYST:DATE?"
+    read: "{year:int},{month:int},{day:int}"
+  set_time:
+    write: "SYST:TIME {hour:int},{minute:int},{second:int}"
+  get_time:
+    write: "SYST:TIME?"
+    read: "{hour:int},{minute:int},{second:int}"
+  set_line_frequency:
+    write: "SYST:LFR {freq:option}"
+    args:
+      freq:
+        options: ["50", "60"]
+  get_line_frequency:
+    write: "SYST:LFR?"
+    read: int
+  get_sensor_info:
+    write: "SYST:SENS:IDN?"
+    read:
+      split: ","
+      items: [string, string, string, string, string, string]
+
+  # Calibration
+  get_calibration_message:
+    write: "CAL:STR?"
+    read: string
+
+  # Display
+  set_brightness:
+    write: "DISP:BRIG {value:float}"
+  get_brightness:
+    write: "DISP:BRIG?"
+    read: float
+  set_contrast:
+    write: "DISP:CONT {value:float}"
+  get_contrast:
+    write: "DISP:CONT?"
+    read: float
+
+  # Sense — Averaging
+  set_average_count:
+    write: "SENS:AVER:COUN {count:int}"
+  get_average_count:
+    write: "SENS:AVER:COUN?"
+    read: int
+
+  # Sense — Correction
+  set_attenuation:
+    write: "SENS:CORR:LOSS {db:float}"
+  get_attenuation:
+    write: "SENS:CORR:LOSS?"
+    read: float
+  zero_init:
+    write: "SENS:CORR:COLL:ZERO:INIT"
+  zero_abort:
+    write: "SENS:CORR:COLL:ZERO:ABOR"
+  get_zero_state:
+    write: "SENS:CORR:COLL:ZERO:STAT?"
+    read: int
+  get_zero_magnitude:
+    write: "SENS:CORR:COLL:ZERO:MAGN?"
+    read: float
+  set_beam_diameter:
+    write: "SENS:CORR:BEAM {diameter:float}"
+  get_beam_diameter:
+    write: "SENS:CORR:BEAM?"
+    read: float
+  set_wavelength:
+    write: "SENS:CORR:WAV {wavelength:float}"
+  get_wavelength:
+    write: "SENS:CORR:WAV?"
+    read: float
+  get_wavelength_min:
+    write: "SENS:CORR:WAV? MIN"
+    read: float
+  get_wavelength_max:
+    write: "SENS:CORR:WAV? MAX"
+    read: float
+  set_photodiode_responsivity:
+    write: "SENS:CORR:POW:PDIO:RESP {responsivity:float}"
+  get_photodiode_responsivity:
+    write: "SENS:CORR:POW:PDIO:RESP?"
+    read: float
+  set_thermopile_responsivity:
+    write: "SENS:CORR:POW:THER:RESP {responsivity:float}"
+  get_thermopile_responsivity:
+    write: "SENS:CORR:POW:THER:RESP?"
+    read: float
+  set_pyroelectric_responsivity:
+    write: "SENS:CORR:ENER:PYRO:RESP {responsivity:float}"
+  get_pyroelectric_responsivity:
+    write: "SENS:CORR:ENER:PYRO:RESP?"
+    read: float
+
+  # Sense — Current Range
+  set_current_range_auto:
+    write: "SENS:CURR:RANG:AUTO {state:bool}"
+  get_current_range_auto:
+    write: "SENS:CURR:RANG:AUTO?"
+    read: bool
+  set_current_range:
+    write: "SENS:CURR:RANG {range:float}"
+  get_current_range:
+    write: "SENS:CURR:RANG?"
+    read: float
+  set_current_ref:
+    write: "SENS:CURR:REF {value:float}"
+  get_current_ref:
+    write: "SENS:CURR:REF?"
+    read: float
+  set_current_ref_state:
+    write: "SENS:CURR:REF:STAT {state:bool}"
+  get_current_ref_state:
+    write: "SENS:CURR:REF:STAT?"
+    read: bool
+
+  # Sense — Power Range
+  set_power_range_auto:
+    write: "SENS:POW:RANG:AUTO {state:bool}"
+  get_power_range_auto:
+    write: "SENS:POW:RANG:AUTO?"
+    read: bool
+  set_power_range:
+    write: "SENS:POW:RANG {range:float}"
+  get_power_range:
+    write: "SENS:POW:RANG?"
+    read: float
+  set_power_ref:
+    write: "SENS:POW:REF {value:float}"
+  get_power_ref:
+    write: "SENS:POW:REF?"
+    read: float
+  set_power_ref_state:
+    write: "SENS:POW:REF:STAT {state:bool}"
+  get_power_ref_state:
+    write: "SENS:POW:REF:STAT?"
+    read: bool
+  set_power_unit:
+    write: "SENS:POW:UNIT {unit:option}"
+    args:
+      unit:
+        options: [W, DBM]
+  get_power_unit:
+    write: "SENS:POW:UNIT?"
+    read: string
+
+  # Sense — Energy Range
+  set_energy_range:
+    write: "SENS:ENER:RANG {range:float}"
+  get_energy_range:
+    write: "SENS:ENER:RANG?"
+    read: float
+  set_energy_ref:
+    write: "SENS:ENER:REF {value:float}"
+  get_energy_ref:
+    write: "SENS:ENER:REF?"
+    read: float
+  set_energy_ref_state:
+    write: "SENS:ENER:REF:STAT {state:bool}"
+  get_energy_ref_state:
+    write: "SENS:ENER:REF:STAT?"
+    read: bool
+
+  # Sense — Voltage Range
+  set_voltage_range_auto:
+    write: "SENS:VOLT:RANG:AUTO {state:bool}"
+  get_voltage_range_auto:
+    write: "SENS:VOLT:RANG:AUTO?"
+    read: bool
+  set_voltage_range:
+    write: "SENS:VOLT:RANG {range:float}"
+  get_voltage_range:
+    write: "SENS:VOLT:RANG?"
+    read: float
+  set_voltage_ref:
+    write: "SENS:VOLT:REF {value:float}"
+  get_voltage_ref:
+    write: "SENS:VOLT:REF?"
+    read: float
+  set_voltage_ref_state:
+    write: "SENS:VOLT:REF:STAT {state:bool}"
+  get_voltage_ref_state:
+    write: "SENS:VOLT:REF:STAT?"
+    read: bool
+
+  # Sense — Frequency Range
+  get_frequency_range_upper:
+    write: "SENS:FREQ:RANG?"
+    read: float
+  get_frequency_range_lower:
+    write: "SENS:FREQ:RANG:LOW?"
+    read: float
+
+  # Sense — Peak Detector
+  set_peak_threshold:
+    write: "SENS:PEAK:THR {percent:float}"
+  get_peak_threshold:
+    write: "SENS:PEAK:THR?"
+    read: float
+
+  # Input
+  set_photodiode_filter:
+    write: "INP:PDI:FILT:LPAS:STAT {state:bool}"
+  get_photodiode_filter:
+    write: "INP:PDI:FILT:LPAS:STAT?"
+    read: bool
+  set_thermopile_accelerator:
+    write: "INP:THER:ACC:STAT {state:bool}"
+  get_thermopile_accelerator:
+    write: "INP:THER:ACC:STAT?"
+    read: bool
+  set_thermopile_accelerator_auto:
+    write: "INP:THER:ACC:AUTO {state:bool}"
+  get_thermopile_accelerator_auto:
+    write: "INP:THER:ACC:AUTO?"
+    read: bool
+  set_thermopile_time_constant:
+    write: "INP:THER:ACC:TAU {tau:float}"
+  get_thermopile_time_constant:
+    write: "INP:THER:ACC:TAU?"
+    read: float
+  set_sensor_type:
+    write: "INP:ADAP:TYPE {sensor_type:option}"
+    args:
+      sensor_type:
+        options: [PHOT, THER, PYR]
+  get_sensor_type:
+    write: "INP:ADAP:TYPE?"
+    read: string
+
+  # Measurement
+  initiate:
+    write: "INIT"
+  abort:
+    write: "ABOR"
+  configure_power:
+    write: "CONF:POW"
+  configure_current:
+    write: "CONF:CURR"
+  configure_voltage:
+    write: "CONF:VOLT"
+  configure_energy:
+    write: "CONF:ENER"
+  configure_frequency:
+    write: "CONF:FREQ"
+  configure_power_density:
+    write: "CONF:PDEN"
+  configure_energy_density:
+    write: "CONF:EDEN"
+  configure_resistance:
+    write: "CONF:RES"
+  configure_temperature:
+    write: "CONF:TEMP"
+  get_configuration:
+    write: "CONF?"
+    read: string
+  measure_power:
+    write: "MEAS:POW?"
+    read: float
+  measure_current:
+    write: "MEAS:CURR?"
+    read: float
+  measure_voltage:
+    write: "MEAS:VOLT?"
+    read: float
+  measure_energy:
+    write: "MEAS:ENER?"
+    read: float
+  measure_frequency:
+    write: "MEAS:FREQ?"
+    read: float
+  measure_power_density:
+    write: "MEAS:PDEN?"
+    read: float
+  measure_energy_density:
+    write: "MEAS:EDEN?"
+    read: float
+  measure_resistance:
+    write: "MEAS:RES?"
+    read: float
+  measure_temperature:
+    write: "MEAS:TEMP?"
+    read: float
+  fetch:
+    write: "FETC?"
+    read: float
+  read:
+    write: "READ?"
+    read: float
+
+  # Status
+  preset_status:
+    write: "STAT:PRES"
+  get_questionable_event:
+    write: "STAT:QUES:EVEN?"
+    read: int
+  get_questionable_condition:
+    write: "STAT:QUES:COND?"
+    read: int
+  set_questionable_enable:
+    write: "STAT:QUES:ENAB {value:int}"
+  get_questionable_enable:
+    write: "STAT:QUES:ENAB?"
+    read: int
+  get_operation_event:
+    write: "STAT:OPER:EVEN?"
+    read: int
+  get_operation_condition:
+    write: "STAT:OPER:COND?"
+    read: int
+  set_operation_enable:
+    write: "STAT:OPER:ENAB {value:int}"
+  get_operation_enable:
+    write: "STAT:OPER:ENAB?"
+    read: int

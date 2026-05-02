@@ -104,7 +104,17 @@ pub fn preview(
             switch (step.action) {
                 .instrument_call => |ic| {
                     try log.print("    [{d}] call={s} instrument={s}", .{ step_idx, ic.call, ic.instrument });
-                    if (ic.save_slot) |slot| try log.print(" slot={d}", .{slot});
+                    if (ic.save_result) |save| switch (save) {
+                        .scalar => |slot| try log.print(" slot={d}", .{slot}),
+                        .object => |slots| {
+                            try log.print(" object_slots=[", .{});
+                            for (slots, 0..) |s, i| {
+                                if (i > 0) try log.print(",", .{});
+                                try log.print("{d}", .{s});
+                            }
+                            try log.print("]", .{});
+                        },
+                    };
                     try log.print("\n", .{});
                 },
                 .compute => |comp| {

@@ -18,6 +18,7 @@
     .record_const_not_recordable = "pipeline record references const '{[variable]s}'; consts are compile-time values and cannot be recorded. Declare it in 'vars' to record a runtime value",
     .unknown_variable = "variable '{[variable]s}' is not declared in recipe 'vars' section",
     .assign_to_const = "cannot assign to const variable '{[variable]s}'",
+    .object_assign_to_var = "object response cannot be saved to variable '{[variable]s}'; declare '{[variable]s}.field' variables instead",
     .builtin_variable_conflict = "variable name '{[variable]s}' conflicts with a built-in variable",
     .duplicate_variable = "const and var sections both define variable '{[variable]s}'",
     .duplicate_record_column = "pipeline record lists duplicate column '{[column]s}'",

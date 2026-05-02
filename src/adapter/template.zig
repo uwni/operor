@@ -29,6 +29,16 @@ pub fn parseTemplate(
     return parseTemplateInner(allocator, source, source, 0, false, reporter.withSource(.adapter_write_template, source));
 }
 
+/// Parse a read template string (e.g. `"{hour:int},{minute:int}"`) into segments.
+/// Reports errors under the `adapter_read_type` source kind.
+pub fn parseReadTemplate(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    reporter: diagnostic.Reporter,
+) diagnostic.Error![]Segment {
+    return parseTemplateInner(allocator, source, source, 0, false, reporter.withSource(.adapter_read_type, source));
+}
+
 fn parseTemplateInner(
     allocator: std.mem.Allocator,
     source: []const u8,

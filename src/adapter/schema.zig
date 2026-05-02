@@ -100,7 +100,7 @@ pub const ArgSpec = struct {
 };
 
 /// Response type specification declared in adapter command `read`.
-/// Short scalar form: `float`; tuple/list form: `[float, float]`.
+/// Short scalar form: `float`; object/list form: `[float, float]`.
 pub const ReadSpec = union(enum) {
     scalar: []const u8,
     list: []const []const u8,
@@ -160,10 +160,60 @@ fn parseReadType(
 ) diagnostic.Error!?ResponseSpec {
     const read = read_value orelse return null;
     return switch (read) {
-        .scalar => |name| .{ .scalar = try parseEncoding(name, reporter) },
+        .scalar => |name| {
+            if (std.mem.indexOfScalar(u8, name, '{') != null) {
+                return .{ .object = try parseObjectReadTemplate(allocator, name, reporter) };
+            }
+            return .{ .scalar = try parseEncoding(name, reporter) };
+        },
         .list => |items| .{ .list = try parseReadList(allocator, default_response_separator, items, reporter) },
         .object => |object| .{ .list = try parseReadList(allocator, object.split orelse default_response_separator, object.items, reporter) },
     };
+}
+
+fn parseObjectReadTemplate(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    reporter: diagnostic.Reporter,
+) diagnostic.Error!instrument.ObjectResponseSpec {
+    const raw_segments = try template.parseReadTemplate(allocator, source, reporter);
+    defer template.freeSegments(allocator, raw_segments);
+
+    const scoped = reporter.withSource(.adapter_read_type, source);
+
+    var out: std.ArrayList(instrument.ObjectSegment) = .empty;
+    errdefer {
+        for (out.items) |seg| switch (seg) {
+            .literal => |lit| allocator.free(lit),
+            .field => |f| allocator.free(f.name),
+        };
+        out.deinit(allocator);
+    }
+
+    var has_field = false;
+    var last_was_field = false;
+    for (raw_segments) |seg| switch (seg) {
+        .optional => return scoped.fail(.{ .start = 0, .end = source.len }, .{ .invalid_read_type = .{ .read_type = source } }),
+        .literal => |lit| {
+            try out.append(allocator, .{ .literal = try allocator.dupe(u8, lit) });
+            last_was_field = false;
+        },
+        .placeholder => |ph| {
+            if (last_was_field) return scoped.fail(.{ .start = 0, .end = source.len }, .{ .invalid_read_type = .{ .read_type = source } });
+            try out.append(allocator, .{ .field = .{
+                .name = try allocator.dupe(u8, ph.name),
+                .encoding = try parseEncoding(ph.arg_type, reporter),
+            } });
+            has_field = true;
+            last_was_field = true;
+        },
+    };
+
+    if (!has_field) {
+        return scoped.fail(.{ .start = 0, .end = source.len }, .{ .invalid_read_type = .{ .read_type = source } });
+    }
+
+    return .{ .segments = try out.toOwnedSlice(allocator) };
 }
 
 fn parseReadList(

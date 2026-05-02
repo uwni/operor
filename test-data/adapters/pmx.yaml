@@ -1,0 +1,424 @@
+metadata:
+  version: "1.0.0"
+  description: Kikusui PMX-A / PMX-Multi DC Power Supply
+  author: uenohara
+
+instrument:
+  manufacturer: "KIKUSUI"
+  models: ["PMX-A", "PMX-Multi"]
+  bool_format:
+    true: "ON"
+    false: "OFF"
+
+commands:
+  # IEEE 488.2 common (PMX-A only)
+  recall_memory:
+    description: "PMX-A only"
+    write: "*RCL {slot:option}"
+    args:
+      slot:
+        options: [A, B, C]
+  save_memory:
+    description: "PMX-A only"
+    write: "*SAV {slot:option}"
+    args:
+      slot:
+        options: [A, B, C]
+  software_trigger:
+    description: "PMX-A only"
+    write: "*TRG"
+
+  # System
+  beep:
+    description: "PMX-Multi only"
+    write: "SYST:BEEP"
+  get_error:
+    write: "SYST:ERR?"
+    read: "{code:int},{message:string}"
+  get_error_count:
+    description: "PMX-Multi only"
+    write: "SYST:ERR:COUN?"
+    read: int
+  set_error_trace:
+    write: "SYST:ERR:TRAC {state:bool}"
+  get_error_trace:
+    write: "SYST:ERR:TRAC?"
+    read: bool
+  get_scpi_version:
+    write: "SYST:VERS?"
+    read: string
+  set_keylock:
+    write: "SYST:KLOC {state:bool}"
+  get_keylock:
+    write: "SYST:KLOC?"
+    read: bool
+  set_keylock_mode:
+    write: "SYST:KLOC:MODE {mode:option}"
+    args:
+      mode:
+        options: [ALL, PART]
+  get_keylock_mode:
+    write: "SYST:KLOC:MODE?"
+    read: string
+  set_local:
+    description: "PMX-A only"
+    write: "SYST:LOC"
+  set_remote:
+    description: "PMX-A only"
+    write: "SYST:REM"
+  set_remote_with_lockout:
+    description: "PMX-A only"
+    write: "SYST:RWL"
+  set_remote_state:
+    description: "PMX-Multi only"
+    write: "SYST:COMM:RLST {state:string}"
+  get_remote_state:
+    description: "PMX-Multi only"
+    write: "SYST:COMM:RLST?"
+    read: string
+  set_startup_priority:
+    write: "SYST:CONF:STAR:PRI {priority:string}"
+  get_startup_priority:
+    write: "SYST:CONF:STAR:PRI?"
+    read: string
+  sanitize_memory:
+    description: "PMX-Multi only — DESTRUCTIVE"
+    write: "SYST:SEC:IMM"
+  get_dual_tracking_state:
+    description: "PMX-Multi only"
+    write: "SYST:DTF?"
+    read: string
+
+  # Channel selection (PMX-Multi)
+  select_channel:
+    description: "PMX-Multi only"
+    write: "INST {channel:int}"
+  get_channel_catalog:
+    description: "PMX-Multi only"
+    write: "INST:CAT?"
+    read: string
+  get_channel_info:
+    description: "PMX-Multi only"
+    write: "INST:INFO?"
+    read: string
+  release_channel:
+    description: "PMX-Multi only"
+    write: "INST:UNS"
+
+  # Output control
+  set_output:
+    write: "OUTP {state:bool}[,(@{channel:int})]"
+  get_output:
+    write: "OUTP?[ (@{channel:int})]"
+    read: bool
+  set_output_all:
+    description: "PMX-Multi only"
+    write: "OUTP:ALL {state:bool}"
+  set_power_on_state:
+    write: "OUTP:PON {state:option}"
+    args:
+      state:
+        options: [OFF, ON, RST]
+  get_power_on_state:
+    write: "OUTP:PON?"
+    read: string
+  set_external_control:
+    write: "OUTP:EXT {state:bool}"
+  get_external_control:
+    write: "OUTP:EXT?"
+    read: bool
+  set_external_logic:
+    write: "OUTP:EXT:LOG {logic:option}"
+    args:
+      logic:
+        options: [POS, NEG]
+  get_external_logic:
+    write: "OUTP:EXT:LOG?"
+    read: string
+  set_output_delay:
+    description: "PMX-Multi only"
+    write: "OUTP:DEL {state:bool}"
+  get_output_delay:
+    description: "PMX-Multi only"
+    write: "OUTP:DEL?"
+    read: bool
+  set_output_delay_on:
+    description: "PMX-Multi only"
+    write: "OUTP:DEL:ON {delay:float}"
+  get_output_delay_on:
+    description: "PMX-Multi only"
+    write: "OUTP:DEL:ON?"
+    read: float
+  set_output_delay_off:
+    description: "PMX-Multi only"
+    write: "OUTP:DEL:OFF {delay:float}"
+  get_output_delay_off:
+    description: "PMX-Multi only"
+    write: "OUTP:DEL:OFF?"
+    read: float
+  set_output_rise_time:
+    description: "PMX-Multi only"
+    write: "OUTP:RISE:TIME {time:float}"
+  get_output_rise_time:
+    description: "PMX-Multi only"
+    write: "OUTP:RISE:TIME?"
+    read: float
+
+  # Protection
+  clear_protection:
+    write: "OUTP:PROT:CLE"
+  set_isolation_on_protection:
+    description: "PMX-Multi only"
+    write: "OUTP:PROT:ISO {state:bool}"
+  get_isolation_on_protection:
+    description: "PMX-Multi only"
+    write: "OUTP:PROT:ISO?"
+    read: bool
+  set_watchdog:
+    description: "PMX-Multi only"
+    write: "OUTP:PROT:WDOG {timeout:float}"
+  get_watchdog:
+    description: "PMX-Multi only"
+    write: "OUTP:PROT:WDOG?"
+    read: float
+
+  # Voltage
+  set_voltage:
+    write: "VOLT {voltage:float}[,(@{channel:int})]"
+  get_voltage:
+    write: "VOLT?[ (@{channel:int})]"
+    read: float
+  set_ovp:
+    write: "VOLT:PROT {voltage:float}[,(@{channel:int})]"
+  get_ovp:
+    write: "VOLT:PROT?[ (@{channel:int})]"
+    read: float
+  set_trigger_voltage:
+    description: "PMX-A only"
+    write: "VOLT:TRIG {voltage:float}"
+  get_trigger_voltage:
+    description: "PMX-A only"
+    write: "VOLT:TRIG?"
+    read: float
+  set_voltage_external_source:
+    description: "PMX-A only"
+    write: "VOLT:EXT:SOUR {state:bool}"
+  get_voltage_external_source:
+    description: "PMX-A only"
+    write: "VOLT:EXT:SOUR?"
+    read: bool
+
+  # Current
+  set_current:
+    write: "CURR {current:float}[,(@{channel:int})]"
+  get_current:
+    write: "CURR?[ (@{channel:int})]"
+    read: float
+  set_ocp:
+    write: "CURR:PROT {current:float}[,(@{channel:int})]"
+  get_ocp:
+    write: "CURR:PROT?[ (@{channel:int})]"
+    read: float
+  set_trigger_current:
+    description: "PMX-A only"
+    write: "CURR:TRIG {current:float}"
+  get_trigger_current:
+    description: "PMX-A only"
+    write: "CURR:TRIG?"
+    read: float
+  set_current_external_source:
+    description: "PMX-A only"
+    write: "CURR:EXT:SOUR {state:bool}"
+  get_current_external_source:
+    description: "PMX-A only"
+    write: "CURR:EXT:SOUR?"
+    read: bool
+
+  # Measurement
+  measure_voltage:
+    write: "MEAS:VOLT?[ (@{channel:int})]"
+    read: float
+  measure_current:
+    write: "MEAS:CURR?[ (@{channel:int})]"
+    read: float
+  measure_all:
+    description: "PMX-Multi only"
+    write: "MEAS:ALL?[ (@{channel:int})]"
+    read: "{voltage:float},{current:float}"
+  fetch_voltage:
+    description: "PMX-Multi only"
+    write: "FETC:VOLT?[ (@{channel:int})]"
+    read: float
+  fetch_current:
+    description: "PMX-Multi only"
+    write: "FETC:CURR?[ (@{channel:int})]"
+    read: float
+  fetch_all:
+    description: "PMX-Multi only"
+    write: "FETC:ALL?[ (@{channel:int})]"
+    read: "{voltage:float},{current:float}"
+
+  # Memory
+  save_to_memory:
+    write: "MEM:SAVE {slot:option}"
+    args:
+      slot:
+        options: [A, B, C]
+  recall_from_memory:
+    write: "MEM:REC {slot:option}"
+    args:
+      slot:
+        options: [A, B, C]
+  preview_memory:
+    write: "MEM:REC:PREV? {slot:option}"
+    args:
+      slot:
+        options: [A, B, C]
+    read: string
+  set_memory_confirm:
+    write: "MEM:REC:CONF {state:bool}"
+  get_memory_confirm:
+    write: "MEM:REC:CONF?"
+    read: bool
+
+  # Trigger (PMX-A only)
+  initiate_transient:
+    description: "PMX-A only"
+    write: "INIT:TRAN"
+  abort:
+    description: "PMX-A only"
+    write: "ABOR"
+  set_trigger_source:
+    description: "PMX-A only"
+    write: "TRIG:TRAN:SOUR {source:option}"
+    args:
+      source:
+        options: [BUS, IMM, EXT]
+  get_trigger_source:
+    description: "PMX-A only"
+    write: "TRIG:TRAN:SOUR?"
+    read: string
+  send_trigger:
+    description: "PMX-A only"
+    write: "TRIG:TRAN"
+
+  # Dual tracking (PMX-Multi only)
+  initiate_parallel_tracking:
+    description: "PMX-Multi only"
+    write: "INIT:DTF:PARA"
+  initiate_series_tracking:
+    description: "PMX-Multi only"
+    write: "INIT:DTF:SER"
+  abort_tracking:
+    description: "PMX-Multi only"
+    write: "ABOR:DTF"
+
+  # Tracking function (PMX-Multi only)
+  set_tracking:
+    description: "PMX-Multi only"
+    write: "TRAC {state:bool}"
+  get_tracking:
+    description: "PMX-Multi only"
+    write: "TRAC?"
+    read: bool
+  set_tracking_sync:
+    description: "PMX-Multi only"
+    write: "TRAC:SYNC {channels:string}"
+  get_tracking_sync:
+    description: "PMX-Multi only"
+    write: "TRAC:SYNC?"
+    read: string
+  set_tracking_mode:
+    description: "PMX-Multi only"
+    write: "TRAC:MODE {mode:option}"
+    args:
+      mode:
+        options: [ABS, RAT]
+  get_tracking_mode:
+    description: "PMX-Multi only"
+    write: "TRAC:MODE?"
+    read: string
+  set_tracking_base_channel:
+    description: "PMX-Multi only"
+    write: "TRAC:BASE:CHAN {channel:int}"
+  get_tracking_base:
+    description: "PMX-Multi only"
+    write: "TRAC:BASE?"
+    read: "{voltage:float},{current:float}"
+  anchor_tracking_base:
+    description: "PMX-Multi only"
+    write: "TRAC:BASE:ANCH"
+  set_tracking_abs_voltage:
+    description: "PMX-Multi only"
+    write: "TRAC:ABS:VOLT {voltage:float}"
+  get_tracking_abs_voltage:
+    description: "PMX-Multi only"
+    write: "TRAC:ABS:VOLT?"
+    read: float
+  set_tracking_abs_current:
+    description: "PMX-Multi only"
+    write: "TRAC:ABS:CURR {current:float}"
+  get_tracking_abs_current:
+    description: "PMX-Multi only"
+    write: "TRAC:ABS:CURR?"
+    read: float
+  set_tracking_ratio_voltage:
+    description: "PMX-Multi only"
+    write: "TRAC:RAT:VOLT {ratio:float}"
+  get_tracking_ratio_voltage:
+    description: "PMX-Multi only"
+    write: "TRAC:RAT:VOLT?"
+    read: float
+  set_tracking_ratio_current:
+    description: "PMX-Multi only"
+    write: "TRAC:RAT:CURR {ratio:float}"
+  get_tracking_ratio_current:
+    description: "PMX-Multi only"
+    write: "TRAC:RAT:CURR?"
+    read: float
+
+  # Status
+  preset_status:
+    write: "STAT:PRES"
+  get_operation_event:
+    write: "STAT:OPER?"
+    read: int
+  get_operation_condition:
+    write: "STAT:OPER:COND?"
+    read: int
+  set_operation_enable:
+    write: "STAT:OPER:ENAB {value:int}"
+  get_operation_enable:
+    write: "STAT:OPER:ENAB?"
+    read: int
+  set_operation_ptr:
+    write: "STAT:OPER:PTR {value:int}"
+  get_operation_ptr:
+    write: "STAT:OPER:PTR?"
+    read: int
+  set_operation_ntr:
+    write: "STAT:OPER:NTR {value:int}"
+  get_operation_ntr:
+    write: "STAT:OPER:NTR?"
+    read: int
+  get_questionable_event:
+    write: "STAT:QUES?"
+    read: int
+  get_questionable_condition:
+    write: "STAT:QUES:COND?"
+    read: int
+  set_questionable_enable:
+    write: "STAT:QUES:ENAB {value:int}"
+  get_questionable_enable:
+    write: "STAT:QUES:ENAB?"
+    read: int
+  set_questionable_ptr:
+    write: "STAT:QUES:PTR {value:int}"
+  get_questionable_ptr:
+    write: "STAT:QUES:PTR?"
+    read: int
+  set_questionable_ntr:
+    write: "STAT:QUES:NTR {value:int}"
+  get_questionable_ntr:
+    write: "STAT:QUES:NTR?"
+    read: int

@@ -1,6 +1,6 @@
 const std = @import("std");
 const diagnostic = @import("../diagnostic.zig");
-const precompile = @import("precompile.zig");
+const precompile = @import("precompile/root.zig");
 const recipe_ir = @import("compiled.zig");
 const tty = @import("../tty.zig");
 

@@ -1,0 +1,82 @@
+metadata:
+  version: "1.0.0"
+  description: Santec TSL-210 Tunable Laser Source (proprietary protocol)
+  author: uenohara
+
+commands:
+  set_wavelength:
+    write: "WA{wavelength:float}"
+    args:
+      wavelength:
+        precision: 2
+  get_wavelength:
+    write: "WA"
+    read: float
+
+  set_current:
+    write: "CU{current:float}"
+    args:
+      current:
+        precision: 2
+  get_current:
+    write: "CU"
+    read: float
+
+  set_temperature:
+    write: "TL{temperature:float}"
+    args:
+      temperature:
+        precision: 2
+  get_temperature:
+    write: "TL"
+    read: float
+
+  set_acc_mode:
+    write: "AO"
+  set_apc_mode:
+    write: "AF"
+  set_output_to_status:
+    write: "SU"
+
+  set_optical_power_dbm:
+    write: "OP{power:float}"
+    args:
+      power:
+        precision: 2
+  get_optical_power_dbm:
+    write: "OP"
+    read: float
+
+  set_optical_power_mw:
+    write: "LP{power:float}"
+    args:
+      power:
+        precision: 2
+  get_optical_power_mw:
+    write: "LP"
+    read: float
+
+  enable_coherence_control:
+    write: "CO"
+  disable_coherence_control:
+    write: "CF"
+
+  set_wavelength_monitor:
+    write: "CV{value:float}"
+    args:
+      value:
+        precision: 2
+
+  enable_output:
+    write: "LO"
+  disable_output:
+    write: "LF"
+
+  set_fine_tuning:
+    write: "FT{value:float}"
+    args:
+      value:
+        precision: 2
+
+  set_att:
+    write: "AT{number:int}"

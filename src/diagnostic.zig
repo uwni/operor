@@ -67,6 +67,7 @@ pub const Message = union(enum) {
     record_const_not_recordable: struct { variable: []const u8 },
     unknown_variable: struct { variable: []const u8 },
     assign_to_const: struct { variable: []const u8 },
+    object_assign_to_var: struct { variable: []const u8 },
     builtin_variable_conflict: struct { variable: []const u8 },
     duplicate_variable: struct { variable: []const u8 },
     duplicate_record_column: struct { column: []const u8 },

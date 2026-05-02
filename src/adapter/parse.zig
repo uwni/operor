@@ -146,7 +146,7 @@ test "parse adapter response encoding" {
     const cmd = adapter.commands.get("measure_voltage") orelse return error.TestUnexpectedResult;
     switch (cmd.response.?) {
         .scalar => |encoding| try std.testing.expectEqual(schema.Encoding.float, encoding),
-        .list => return error.TestUnexpectedResult,
+        .list, .object => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(@as(usize, 1), cmd.template.len);
 }
@@ -164,7 +164,7 @@ test "parse adapter list response encoding" {
 
     const cmd = adapter.commands.get("measure_all") orelse return error.TestUnexpectedResult;
     switch (cmd.response.?) {
-        .scalar => return error.TestUnexpectedResult,
+        .scalar, .object => return error.TestUnexpectedResult,
         .list => |list| {
             try std.testing.expectEqualStrings(",", list.separator);
             try std.testing.expectEqual(@as(usize, 2), list.items.len);
@@ -189,7 +189,7 @@ test "parse adapter list response with custom separator" {
 
     const cmd = adapter.commands.get("read_pair") orelse return error.TestUnexpectedResult;
     switch (cmd.response.?) {
-        .scalar => return error.TestUnexpectedResult,
+        .scalar, .object => return error.TestUnexpectedResult,
         .list => |list| {
             try std.testing.expectEqualStrings(";", list.separator);
             try std.testing.expectEqual(@as(usize, 2), list.items.len);

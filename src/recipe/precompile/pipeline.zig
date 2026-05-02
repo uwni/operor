@@ -1,0 +1,153 @@
+const std = @import("std");
+const config = @import("../config.zig");
+const diagnostic = @import("../../diagnostic.zig");
+const recipe_ir = @import("../compiled.zig");
+const expr = @import("../../expr.zig");
+const slot_map_mod = @import("slot_map.zig");
+
+const SlotMap = slot_map_mod.SlotMap;
+const DiagnosticContext = slot_map_mod.DiagnosticContext;
+
+pub const RecordResolution = struct {
+    pipeline: recipe_ir.PipelineConfig,
+    bindings: []const expr.VariableBinding,
+};
+
+pub const AllRecordSources = struct {
+    columns: []const []const u8,
+    bindings: []const expr.VariableBinding,
+};
+
+pub fn resolvePipelineConfig(
+    scratch_alloc: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    recipe: *const config.RecipeConfig,
+    slot_map: *const SlotMap,
+    diag: diagnostic.Reporter,
+) !RecordResolution {
+    const empty_columns: []const []const u8 = &.{};
+    const empty_bindings: []const expr.VariableBinding = &.{};
+    const pipeline_cfg = recipe.pipeline orelse {
+        try diag.add(.fatal, null, .{ .missing_pipeline = {} });
+        return error.AnalysisFail;
+    };
+    var has_error = false;
+    if (pipeline_cfg.record == null) {
+        try diag.add(.fatal, null, .{ .missing_record_config = {} });
+        has_error = true;
+    }
+
+    try validatePipelineConfig(&pipeline_cfg, diag);
+
+    var pipeline = blk: {
+        var _pipeline_cfg = pipeline_cfg;
+        _pipeline_cfg.record = null;
+        break :blk try _pipeline_cfg.clone(arena);
+    };
+
+    var bindings: []const expr.VariableBinding = empty_bindings;
+
+    const record_cfg: recipe_ir.RecordConfig = pipeline_cfg.record orelse .{ .explicit = empty_columns };
+    switch (record_cfg) {
+        .all => {
+            const all = try resolveAllRecordSources(arena, slot_map);
+            pipeline.record = .{ .explicit = all.columns };
+            bindings = all.bindings;
+        },
+        .explicit => |columns| {
+            var seen: std.StringArrayHashMapUnmanaged(void) = .empty;
+            defer seen.deinit(scratch_alloc);
+            var unique_columns: std.ArrayList([]const u8) = .empty;
+            var unique_bindings: std.ArrayList(expr.VariableBinding) = .empty;
+
+            for (columns) |name| {
+                const column_context: DiagnosticContext = .{ .variable_name = name };
+                const column_reporter = diag.withContext(column_context);
+                if (seen.getIndex(name) != null) {
+                    try column_reporter.warn(null, .{ .duplicate_record_column = .{ .column = name } });
+                    continue;
+                }
+                try seen.put(scratch_alloc, name, {});
+
+                const binding = resolveRecordSource(slot_map, column_reporter, name) catch |err| switch (err) {
+                    error.AnalysisFail => {
+                        has_error = true;
+                        continue;
+                    },
+                    else => return err,
+                };
+                try unique_columns.append(arena, try arena.dupe(u8, name));
+                try unique_bindings.append(arena, binding);
+            }
+            pipeline.record = .{ .explicit = try unique_columns.toOwnedSlice(arena) };
+            bindings = try unique_bindings.toOwnedSlice(arena);
+        },
+    }
+    if (has_error) return error.AnalysisFail;
+    return .{
+        .pipeline = pipeline,
+        .bindings = bindings,
+    };
+}
+
+pub fn resolveAllRecordSources(arena: std.mem.Allocator, slot_map: *const SlotMap) !AllRecordSources {
+    const var_names = slot_map.varNames();
+    const total = var_names.len + expr.BuiltinVar.vars.len;
+    const columns = try arena.alloc([]const u8, total);
+    const bindings = try arena.alloc(expr.VariableBinding, total);
+
+    var out_idx: usize = 0;
+    for (var_names, 0..) |name, slot| {
+        columns[out_idx] = try arena.dupe(u8, name);
+        bindings[out_idx] = .{ .slot = slot };
+        out_idx += 1;
+    }
+    inline for (expr.BuiltinVar.vars) |builtin| {
+        columns[out_idx] = try arena.dupe(u8, builtin.name());
+        bindings[out_idx] = .{ .builtin = builtin };
+        out_idx += 1;
+    }
+
+    return .{
+        .columns = columns,
+        .bindings = bindings,
+    };
+}
+
+pub fn resolveRecordSource(
+    slot_map: *const SlotMap,
+    diag: diagnostic.Reporter,
+    name: []const u8,
+) diagnostic.Error!expr.VariableBinding {
+    const resolved = slot_map.resolveName(name) orelse {
+        try diag.add(.fatal, null, .{ .unknown_variable = .{ .variable = name } });
+        return error.AnalysisFail;
+    };
+    return switch (resolved) {
+        .binding => |binding| binding,
+        .const_value => {
+            try diag.add(.fatal, null, .{ .record_const_not_recordable = .{ .variable = name } });
+            return error.AnalysisFail;
+        },
+    };
+}
+
+pub fn validatePipelineConfig(cfg: *const recipe_ir.PipelineConfig, diag: diagnostic.Reporter) !void {
+    var has_error = false;
+    if (cfg.buffer_size) |size| {
+        if (size == 0) has_error = true;
+    }
+    if (cfg.warn_usage_percent) |percent| {
+        if (percent == 0 or percent > 100) has_error = true;
+    }
+    const has_network_host = cfg.network_host != null;
+    const has_network_port = cfg.network_port != null;
+    if (has_network_host != has_network_port) has_error = true;
+    if (cfg.network_port) |port| {
+        if (port == 0) has_error = true;
+    }
+    if (!has_error) return;
+
+    try diag.add(.fatal, null, .{ .invalid_pipeline_config = {} });
+    return error.AnalysisFail;
+}

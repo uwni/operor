@@ -1,0 +1,815 @@
+metadata:
+  version: "1.0.0"
+  description: Keysight 8163B Lightwave Multimeter (8163A/B, 8164A/B, 8166A/B mainframes)
+  author: uenohara
+
+instrument:
+  manufacturer: "Keysight Technologies"
+  models: ["8163A", "8163B", "8164A", "8164B", "8166A", "8166B"]
+  bool_format:
+    true: "1"
+    false: "0"
+
+commands:
+  # System
+  get_scpi_version:
+    write: "SYST:VERS?"
+    read: string
+  set_date:
+    write: "SYST:DATE {year:int},{month:int},{day:int}"
+  get_date:
+    write: "SYST:DATE?"
+    read: string
+  set_time:
+    write: "SYST:TIME {hour:int},{minute:int},{second:int}"
+  get_time:
+    write: "SYST:TIME?"
+    read: string
+  get_help_headers:
+    write: "SYST:HELP:HEAD?"
+    read: string
+  preset:
+    write: "SYST:PRES"
+  reboot:
+    write: "SPEC:REBO"
+  get_error:
+    write: "SYST:ERR?"
+    read: "{code:int},{message:string}"
+
+  # Network — GPIB
+  set_gpib_address:
+    write: "SYST:COMM:GPIB:ADDR {address:int}"
+  get_gpib_address:
+    write: "SYST:COMM:GPIB:ADDR?"
+    read: int
+
+  # Network — Ethernet
+  get_mac_address:
+    write: "SYST:COMM:ETH:MACA?"
+    read: string
+  get_current_ip:
+    write: "SYST:COMM:ETH:IPAD:CURR?"
+    read: string
+  get_current_subnet_mask:
+    write: "SYST:COMM:ETH:SMAS:CURR?"
+    read: string
+  get_current_hostname:
+    write: "SYST:COMM:ETH:HOST:CURR?"
+    read: string
+  get_current_domain:
+    write: "SYST:COMM:ETH:DOM:CURR?"
+    read: string
+  get_current_gateway:
+    write: "SYST:COMM:ETH:DGAT:CURR?"
+    read: string
+  set_dhcp:
+    write: "SYST:COMM:ETH:DHCP:ENAB {state:bool}"
+  get_dhcp:
+    write: "SYST:COMM:ETH:DHCP:ENAB?"
+    read: bool
+  set_hostname:
+    write: 'SYST:COMM:ETH:HOST "{hostname:string}"'
+  get_hostname:
+    write: "SYST:COMM:ETH:HOST?"
+    read: string
+  set_ip_address:
+    write: 'SYST:COMM:ETH:IPAD "{ip:string}"'
+  get_ip_address:
+    write: "SYST:COMM:ETH:IPAD?"
+    read: string
+  set_domain:
+    write: 'SYST:COMM:ETH:DOM "{domain:string}"'
+  get_domain:
+    write: "SYST:COMM:ETH:DOM?"
+    read: string
+  set_subnet_mask:
+    write: 'SYST:COMM:ETH:SMAS "{mask:string}"'
+  get_subnet_mask:
+    write: "SYST:COMM:ETH:SMAS?"
+    read: string
+  set_gateway:
+    write: 'SYST:COMM:ETH:DGAT "{gateway:string}"'
+  get_gateway:
+    write: "SYST:COMM:ETH:DGAT?"
+    read: string
+  restart_network:
+    write: "SYST:COMM:ETH:REST"
+
+  # Display
+  set_brightness:
+    write: "DISP:BRIG {value:float}"
+  get_brightness:
+    write: "DISP:BRIG?"
+    read: float
+  set_contrast:
+    write: "DISP:CONT {value:float}"
+  get_contrast:
+    write: "DISP:CONT?"
+    read: float
+  set_display:
+    write: "DISP:ENAB {state:bool}"
+  get_display:
+    write: "DISP:ENAB?"
+    read: bool
+  set_display_lock:
+    write: "DISP:LOCK {state:bool}"
+  get_display_lock:
+    write: "DISP:LOCK?"
+    read: bool
+
+  # Slot / Module identification
+  get_slot_empty:
+    write: "SLOT{slot:int}:EMPT?"
+    read: bool
+  get_slot_idn:
+    write: "SLOT{slot:int}:IDN?"
+    read: string
+  get_slot_options:
+    write: "SLOT{slot:int}:OPT?"
+    read: string
+  get_slot_self_test:
+    write: "SLOT{slot:int}:TST?"
+    read: int
+  get_slot_head_empty:
+    write: "SLOT{slot:int}[:HEAD{head:int}]:EMPT?"
+    read: bool
+  get_slot_head_idn:
+    write: "SLOT{slot:int}[:HEAD{head:int}]:IDN?"
+    read: string
+  get_slot_head_options:
+    write: "SLOT{slot:int}[:HEAD{head:int}]:OPT?"
+    read: string
+  get_slot_head_self_test:
+    write: "SLOT{slot:int}[:HEAD{head:int}]:TST?"
+    read: int
+  get_slot_head_wavelength_response:
+    write: "SLOT{slot:int}[:HEAD{head:int}]:WAV:RESP?"
+    read: string
+  get_slot_head_wavelength_response_size:
+    write: "SLOT{slot:int}[:HEAD{head:int}]:WAV:RESP:SIZE?"
+    read: int
+  get_slot_head_wavelength_response_csv:
+    write: "SLOT{slot:int}[:HEAD{head:int}]:WAV:RESP:CSV?"
+    read: string
+
+  # Lock
+  set_lock:
+    write: "LOCK {state:bool}"
+  get_lock:
+    write: "LOCK?"
+    read: bool
+
+  # Power meter — Measurement
+  read_power:
+    write: "READ{slot:int}[:CHAN{channel:int}]:POW:DC?"
+    read: float
+  fetch_power:
+    write: "FETC{slot:int}[:CHAN{channel:int}]:POW:DC?"
+    read: float
+  read_power_all:
+    write: "READ:POW:DC:ALL?"
+    read: string
+  read_power_all_config:
+    write: "READ:POW:DC:ALL:CONF?"
+    read: string
+  read_return_loss:
+    write: "READ{slot:int}[:CHAN{channel:int}]:RETL?"
+    read: float
+  fetch_return_loss:
+    write: "FETC{slot:int}[:CHAN{channel:int}]:RETL?"
+    read: float
+  initiate_measurement:
+    write: "INIT{slot:int}[:CHAN{channel:int}]"
+  set_continuous_measurement:
+    write: "INIT{slot:int}[:CHAN{channel:int}]:CONT {state:bool}"
+  get_continuous_measurement:
+    write: "INIT{slot:int}[:CHAN{channel:int}]:CONT?"
+    read: bool
+
+  # Power meter — Configuration
+  set_sensor_wavelength:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:WAV {wavelength:float}NM"
+  get_sensor_wavelength:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:WAV?"
+    read: float
+  set_sensor_power_unit:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:UNIT {unit:option}"
+    args:
+      unit:
+        options: [W, DBM]
+  get_sensor_power_unit:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:UNIT?"
+    read: string
+  set_averaging_time:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:ATIM {time:float}"
+  get_averaging_time:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:ATIM?"
+    read: float
+  set_power_range:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:RANG {range:float}"
+  get_power_range:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:RANG?"
+    read: float
+  set_power_range_auto:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:RANG:AUTO {state:bool}"
+  get_power_range_auto:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:RANG:AUTO?"
+    read: bool
+  set_power_ref:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF {power:float}"
+  get_power_ref:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF?"
+    read: float
+  set_power_ref_from_display:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF:DISP"
+  set_power_ref_state:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF:STAT {state:bool}"
+  get_power_ref_state:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF:STAT?"
+    read: bool
+  set_loss_correction:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:CORR:LOSS:INP:MAGN {loss:float}"
+  get_loss_correction:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:CORR:LOSS:INP:MAGN?"
+    read: float
+  zero_sensor:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:CORR:COLL:ZERO"
+  zero_all_sensors:
+    write: "SENS:CORR:COLL:ZERO:ALL"
+  get_zero_state:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:CORR:COLL:ZERO?"
+    read: int
+
+  # Power meter — Return loss module
+  set_monitor_diode_range:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:RANG:MON {range:float}"
+  get_monitor_diode_range:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:RANG:MON?"
+    read: float
+  set_front_panel_delta:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:RETL:CORR:FPDE {loss:float}"
+  get_front_panel_delta:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:RETL:CORR:FPDE?"
+    read: float
+  set_return_loss_ref:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:RETL:CORR:REFL {return_loss:float}"
+  get_return_loss_ref:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:RETL:CORR:REFL?"
+    read: float
+  restore_factory_calibration:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:RETL:CAL:FACT"
+  calibrate_with_reflectance:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:RETL:CAL:COLL:REFL"
+  calibrate_with_termination:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:RETL:CAL:COLL:TERM"
+  get_t_value:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:RETL:CAL:TERM?"
+    read: float
+  get_calibration_values:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:RETL:CAL:VAL?"
+    read: string
+  get_ref_calibration_values:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF:COLL:VAL?"
+    read: string
+  get_power_meter_t_value:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF:TERM?"
+    read: float
+  set_ref_stat_ratio:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF:STAT:RAT {state:bool}"
+  get_ref_stat_ratio:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF:STAT:RAT?"
+    read: bool
+
+  # Power meter — Function mode
+  set_logging_params:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:PAR:LOGG {samples:int},{averaging_time:float}"
+  get_logging_params:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:PAR:LOGG?"
+    read: string
+  set_minmax_params:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:PAR:MINM {mode:string},{window_size:int}"
+  get_minmax_params:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:PAR:MINM?"
+    read: string
+  set_stability_params:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:PAR:STAB {total_time:float},{delay_time:float},{averaging_time:float}"
+  get_stability_params:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:PAR:STAB?"
+    read: string
+  get_function_result:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:RES?"
+    read: string
+  get_function_result_block:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:RES:BLOC {block_number:int}?"
+    read: raw
+  get_function_result_max_block:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:RES:MAXB?"
+    read: int
+  get_function_result_monitor:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:RES:MON?"
+    read: string
+  set_function_mode:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:STAT {state:bool}"
+  get_function_mode:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:STAT?"
+    read: bool
+  set_function_threshold:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:THR {threshold:float},{start_mode:string}"
+  get_function_threshold:
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:THR?"
+    read: string
+
+  # Tunable laser — Basic
+  set_laser_wavelength:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV {wavelength:float}NM"
+  get_laser_wavelength:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV?"
+    read: float
+  set_laser_power:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW {power:float}"
+  get_laser_power:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW?"
+    read: float
+  set_laser_power_unit:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:UNIT {unit:option}"
+    args:
+      unit:
+        options: [W, DBM]
+  get_laser_power_unit:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:UNIT?"
+    read: string
+  set_laser_output:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:STAT {state:bool}"
+  get_laser_output:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:STAT?"
+    read: bool
+  set_laser_attenuation:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:ATT {attenuation:float}"
+  get_laser_attenuation:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:ATT?"
+    read: float
+  set_laser_attenuation_auto:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:ATT:AUTO {state:bool}"
+  get_laser_attenuation_auto:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:ATT:AUTO?"
+    read: bool
+  set_laser_dark:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:ATT:DARK {state:bool}"
+  get_laser_dark:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:ATT:DARK?"
+    read: bool
+  set_laser_rise_time:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:LEV:RIS {risetime:float}"
+  get_laser_rise_time:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:LEV:RIS?"
+    read: float
+  set_laser_power_wavelength:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:WAV {wavelength_source:int}"
+  get_laser_power_wavelength:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:WAV?"
+    read: int
+
+  # Tunable laser — Wavelength calibration
+  zero_laser_wavelength:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:CORR:ZERO"
+  zero_all_laser_wavelengths:
+    write: "SOUR:WAV:CORR:ZERO:ALL"
+  auto_realign_laser:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:CORR:ARA"
+  auto_realign_all_lasers:
+    write: "SOUR:WAV:CORR:ARA:ALL"
+  set_auto_calibration:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:CORR:AUTOC {state:bool}"
+  get_auto_calibration:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:CORR:AUTOC?"
+    read: bool
+  get_lambda_zero_temp_current:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:CORR:ZERO:TEMP:ACT?"
+    read: float
+  get_lambda_zero_temp_diff:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:CORR:ZERO:TEMP:DIFF?"
+    read: float
+  get_lambda_zero_temp_last:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:CORR:ZERO:TEMP:LAST?"
+    read: float
+  force_auto_lambda_zero:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:CORR:ZERO:AUTO"
+  set_frequency_offset:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:FREQ {frequency:float}"
+  get_frequency_offset:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:FREQ?"
+    read: float
+  get_reference_wavelength:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:REF?"
+    read: float
+  set_ref_wavelength_from_output:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:REF:DISP"
+
+  # Tunable laser — Sweep
+  set_sweep_start:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:STAR {wavelength:float}NM"
+  get_sweep_start:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:STAR?"
+    read: float
+  set_sweep_stop:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:STOP {wavelength:float}NM"
+  get_sweep_stop:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:STOP?"
+    read: float
+  set_sweep_step:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:STEP {step:float}NM"
+  get_sweep_step:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:STEP?"
+    read: float
+  set_sweep_dwell:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:DWEL {time:float}"
+  get_sweep_dwell:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:DWEL?"
+    read: float
+  set_sweep_cycles:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:CYCL {cycles:int}"
+  get_sweep_cycles:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:CYCL?"
+    read: int
+  set_sweep_mode:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:MODE {mode:option}"
+    args:
+      mode:
+        options: [STEP, MAN, CONT]
+  get_sweep_mode:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:MODE?"
+    read: string
+  set_sweep_repeat:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:REP {repeat:option}"
+    args:
+      repeat:
+        options: [ONEW, TWOW]
+  get_sweep_repeat:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:REP?"
+    read: string
+  start_sweep:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:STAT 1"
+  stop_sweep:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:STAT 0"
+  get_sweep_state:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:STAT?"
+    read: int
+  set_sweep_speed:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:SPE {speed:float}"
+  get_sweep_speed:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:SPE?"
+    read: float
+  check_sweep_params:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:CHEC?"
+    read: bool
+  sweep_next_step:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:STEP:NEXT"
+  sweep_prev_step:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:STEP:PREV"
+  sweep_soft_trigger:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:SOFT"
+  set_lambda_logging:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:LLOG {state:bool}"
+  get_lambda_logging:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:LLOG?"
+    read: bool
+  get_sweep_expected_triggers:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:EXP?"
+    read: int
+  get_sweep_flag:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:FLAG?"
+    read: int
+  get_sweep_max_power:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:PMAX?"
+    read: float
+  get_lambda_log_datapoint_count:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:READ:DATA?"
+    read: int
+  get_lambda_log_data_block:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:READ:DATA:BLOC {block_number:int}?"
+    read: raw
+  get_lambda_log_max_block:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:READ:DATA:MAXB?"
+    read: int
+  get_lambda_log_binary_stream:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:READ:POIN?"
+    read: raw
+
+  # Tunable laser — AM modulation
+  set_am_internal_frequency:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:AM:INT:FREQ {frequency:float}"
+  get_am_internal_frequency:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:AM:INT:FREQ?"
+    read: float
+  set_am_source:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:AM:SOUR {am_source:option}"
+    args:
+      am_source:
+        options: [INT, EXT, COH]
+  get_am_source:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:AM:SOUR?"
+    read: string
+  set_am_state:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:AM:STAT {state:bool}"
+  get_am_state:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:AM:STAT?"
+    read: bool
+  set_coherence_level:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:AM:COHC:COHL {level:float}"
+  get_coherence_level:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:AM:COHC:COHL?"
+    read: float
+
+  # Tunable laser — FM modulation
+  set_fm_source:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:FM:SOUR {fm_source:option}"
+    args:
+      fm_source:
+        options: [INT, SBS]
+  get_fm_source:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:FM:SOUR?"
+    read: string
+  set_fm_state:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:FM:STAT {state:bool}"
+  get_fm_state:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:FM:STAT?"
+    read: bool
+  set_sbs_frequency:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:FM:SBSC:FREQ {frequency:float}"
+  get_sbs_frequency:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:FM:SBSC:FREQ?"
+    read: float
+  set_sbs_level:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:FM:SBSC:LEV {level:float}"
+  get_sbs_level:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:FM:SBSC:LEV?"
+    read: float
+  set_modulation_output:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:MOD {mode:option}"
+    args:
+      mode:
+        options: [DIS, TINP, TOUT]
+  get_modulation_output:
+    write: "SOURCE{source:int}[:CHAN{channel:int}]:MOD?"
+    read: string
+
+  # Attenuator — Input
+  set_attenuation:
+    write: "INP{input:int}[:CHAN{channel:int}]:ATT {attenuation:float}"
+  get_attenuation:
+    write: "INP{input:int}[:CHAN{channel:int}]:ATT?"
+    read: float
+  set_att_offset:
+    write: "INP{input:int}[:CHAN{channel:int}]:OFFS {offset:float}"
+  get_att_offset:
+    write: "INP{input:int}[:CHAN{channel:int}]:OFFS?"
+    read: float
+  zero_attenuation_offset:
+    write: "INP{input:int}[:CHAN{channel:int}]:OFFS:DISP"
+  set_att_offset_from_power_meter:
+    write: "INP{input:int}[:CHAN{channel:int}]:OFFS:POW"
+  set_att_transition_speed:
+    write: "INP{input:int}[:CHAN{channel:int}]:ATT:SPE {speed:float}"
+  get_att_transition_speed:
+    write: "INP{input:int}[:CHAN{channel:int}]:ATT:SPE?"
+    read: float
+  set_att_wavelength:
+    write: "INP{input:int}[:CHAN{channel:int}]:WAV {wavelength:float}NM"
+  get_att_wavelength:
+    write: "INP{input:int}[:CHAN{channel:int}]:WAV?"
+    read: float
+
+  # Attenuator — Output
+  set_ap_mode:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:APMO {mode:int}"
+  get_ap_mode:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:APMO?"
+    read: int
+  set_output_power:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW {power:float}"
+  get_output_power:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW?"
+    read: float
+  set_output_power_offset:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:OFFS {offset:float}"
+  get_output_power_offset:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:OFFS?"
+    read: float
+  set_output_power_offset_from_meter:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:OFFS:POW"
+  set_output_power_ref:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:REF {power:float}"
+  get_output_power_ref:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:REF?"
+    read: float
+  copy_output_power_ref_from_meter:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:REF:POW"
+  set_output_power_control:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:CONT {state:bool}"
+  get_output_power_control:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:CONT?"
+    read: bool
+  set_output_power_unit:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:UNIT {unit:option}"
+    args:
+      unit:
+        options: [W, DBM]
+  get_output_power_unit:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:UNIT?"
+    read: string
+  set_shutter_at_power_on:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:APON {state:bool}"
+  get_shutter_at_power_on:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:APON?"
+    read: bool
+  set_output_averaging_time:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:ATIM {time:float}"
+  get_output_averaging_time:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:ATIM?"
+    read: float
+  zero_output_powermeter:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:CORR:COLL:ZERO"
+  zero_all_output_powermeters:
+    write: "OUTP:CORR:COLL:ZERO:ALL"
+  get_output_zero_state:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:CORR:COLL:ZERO:STAT?"
+    read: int
+  set_output_state:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:STAT {state:bool}"
+  get_output_state:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:STAT?"
+    read: bool
+  set_analog_output_parameter:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:CONN {parameter:string}"
+  get_analog_output_parameter:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:CONN?"
+    read: string
+  set_regulated_path:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:PATH {path:int}"
+  get_regulated_path:
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:PATH?"
+    read: int
+
+  # Offset table
+  set_offset_wavelength_pair:
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:VAL {wavelength:float},{offset:float}"
+  get_offset_by_wavelength:
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:VAL:OFFS {wavelength:float}?"
+    read: float
+  get_wavelength_by_index:
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:VAL:WAV {index:int}?"
+    read: float
+  get_offset_pair:
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:VAL:PAIR {wavelength:float}?"
+    read: string
+  delete_offset_pair:
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:VAL:DEL {wavelength:float}"
+  delete_all_offset_pairs:
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:VAL:DEL:ALL"
+  get_offset_table:
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:TABL?"
+    read: string
+  get_offset_table_size:
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:TABL:SIZE?"
+    read: int
+  set_offset_table_state:
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:STAT {state:bool}"
+  get_offset_table_state:
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:STAT?"
+    read: bool
+  set_offset_table_ref:
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:REF {ref_slot:int},{ref_channel:int}"
+  get_offset_table_ref:
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:REF?"
+    read: string
+
+  # Switch / Route
+  set_route:
+    write: "ROUT{slot:int}[:CHAN{channel:int}] {route:string}"
+  get_route:
+    write: "ROUT{slot:int}[:CHAN{channel:int}]?"
+    read: string
+  get_route_config:
+    write: "ROUT{slot:int}[:CHAN{channel:int}]:CONF?"
+    read: string
+  get_allowed_routes:
+    write: "ROUT{slot:int}[:CHAN{channel:int}]:CONF:ROUT?"
+    read: string
+
+  # Trigger — Global
+  send_trigger:
+    write: "TRIG"
+  set_trigger_config:
+    write: "TRIG:CONF {config:string}"
+  get_trigger_config:
+    write: "TRIG:CONF?"
+    read: string
+  set_trigger_extended_config:
+    write: "TRIG:CONF:EXT {config:string}"
+  get_trigger_extended_config:
+    write: "TRIG:CONF:EXT?"
+    read: string
+  set_foot_pedal:
+    write: "TRIG:CONF:FPED {state:bool}"
+  get_foot_pedal:
+    write: "TRIG:CONF:FPED?"
+    read: bool
+
+  # Trigger — Per slot/channel
+  set_trigger_input:
+    write: "TRIG{slot:int}[:CHAN{channel:int}]:INP {mode:option}"
+    args:
+      mode:
+        options: [IGN, NEXT, COMP, STNEXT, STPREV, STBEG]
+  get_trigger_input:
+    write: "TRIG{slot:int}[:CHAN{channel:int}]:INP?"
+    read: string
+  rearm_trigger_input:
+    write: "TRIG{slot:int}[:CHAN{channel:int}]:INP:REAR"
+  set_trigger_offset:
+    write: "TRIG{slot:int}[:CHAN{channel:int}]:OFFS {count:int}"
+  get_trigger_offset:
+    write: "TRIG{slot:int}[:CHAN{channel:int}]:OFFS?"
+    read: int
+  set_trigger_output:
+    write: "TRIG{slot:int}[:CHAN{channel:int}]:OUTP {mode:option}"
+    args:
+      mode:
+        options: [NONE, COMP, STEP]
+  get_trigger_output:
+    write: "TRIG{slot:int}[:CHAN{channel:int}]:OUTP?"
+    read: string
+  rearm_trigger_output:
+    write: "TRIG{slot:int}[:CHAN{channel:int}]:OUTP:REAR"
+
+  # Status — Global
+  preset_status:
+    write: "STAT:PRES"
+  get_operation_event:
+    write: "STAT:OPER:EVEN?"
+    read: int
+  get_operation_event_level1:
+    write: "STAT:OPER:EVEN:LEV1?"
+    read: int
+  get_operation_condition:
+    write: "STAT:OPER:COND?"
+    read: int
+  get_operation_condition_level1:
+    write: "STAT:OPER:COND:LEV1?"
+    read: int
+  set_operation_enable:
+    write: "STAT:OPER:ENAB {value:int}"
+  get_operation_enable:
+    write: "STAT:OPER:ENAB?"
+    read: int
+  set_operation_enable_level1:
+    write: "STAT:OPER:ENAB:LEV1 {value:int}"
+  get_operation_enable_level1:
+    write: "STAT:OPER:ENAB:LEV1?"
+    read: int
+  get_questionable_event:
+    write: "STAT:QUES:EVEN?"
+    read: int
+  get_questionable_event_level1:
+    write: "STAT:QUES:EVEN:LEV1?"
+    read: int
+  get_questionable_condition:
+    write: "STAT:QUES:COND?"
+    read: int
+  get_questionable_condition_level1:
+    write: "STAT:QUES:COND:LEV1?"
+    read: int
+  set_questionable_enable:
+    write: "STAT:QUES:ENAB {value:int}"
+  get_questionable_enable:
+    write: "STAT:QUES:ENAB?"
+    read: int
+  set_questionable_enable_level1:
+    write: "STAT:QUES:ENAB:LEV1 {value:int}"
+  get_questionable_enable_level1:
+    write: "STAT:QUES:ENAB:LEV1?"
+    read: int
+
+  # Status — Per slot
+  get_slot_operation_event:
+    write: "STAT{slot:int}:OPER:EVEN?"
+    read: int
+  get_slot_operation_condition:
+    write: "STAT{slot:int}:OPER:COND?"
+    read: int
+  set_slot_operation_enable:
+    write: "STAT{slot:int}:OPER:ENAB {value:int}"
+  get_slot_operation_enable:
+    write: "STAT{slot:int}:OPER:ENAB?"
+    read: int
+  get_slot_questionable_event:
+    write: "STAT{slot:int}:QUES:EVEN?"
+    read: int
+  get_slot_questionable_condition:
+    write: "STAT{slot:int}:QUES:COND?"
+    read: int
+  set_slot_questionable_enable:
+    write: "STAT{slot:int}:QUES:ENAB {value:int}"
+  get_slot_questionable_enable:
+    write: "STAT{slot:int}:QUES:ENAB?"
+    read: int

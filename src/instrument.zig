@@ -73,6 +73,7 @@ pub const Encoding = enum {
 pub const ResponseSpec = union(enum) {
     scalar: Encoding,
     list: ListResponseSpec,
+    object: ObjectResponseSpec,
 
     pub fn deinit(self: ResponseSpec, allocator: std.mem.Allocator) void {
         switch (self) {
@@ -80,6 +81,13 @@ pub const ResponseSpec = union(enum) {
             .list => |list| {
                 allocator.free(list.separator);
                 allocator.free(list.items);
+            },
+            .object => |obj| {
+                for (obj.segments) |seg| switch (seg) {
+                    .literal => |lit| allocator.free(lit),
+                    .field => |f| allocator.free(f.name),
+                };
+                allocator.free(obj.segments);
             },
         }
     }
@@ -90,4 +98,23 @@ pub const ResponseSpec = union(enum) {
 pub const ListResponseSpec = struct {
     separator: []const u8,
     items: []const Encoding,
+};
+
+/// One named field in an object response.
+pub const ObjectField = struct {
+    name: []const u8,
+    encoding: Encoding,
+};
+
+/// One segment in a structured response template: either a literal to match or a named field to capture.
+pub const ObjectSegment = union(enum) {
+    literal: []const u8,
+    field: ObjectField,
+};
+
+/// Structured response parsed by matching a read template against the response string.
+/// Segments alternate between literals (matched/consumed) and fields (captured and parsed).
+/// Fields are accessible by name in recipe expressions (e.g. `${result.hour}`).
+pub const ObjectResponseSpec = struct {
+    segments: []const ObjectSegment,
 };

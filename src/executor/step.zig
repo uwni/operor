@@ -114,10 +114,58 @@ pub fn storeInstrumentResponse(
     ctx: *session.Context,
     response_bytes: []const u8,
 ) !void {
-    const slot = step.save_slot orelse return;
+    const save = step.save_result orelse return;
     const response_spec = step.command.response orelse return;
+    const bool_map = step.command.instrument.bool_map;
 
-    try parseResponseIntoSlot(response_spec, response_bytes, step.command.instrument.bool_map, ctx, slot);
+    switch (save) {
+        .scalar => |slot| try parseResponseIntoSlot(response_spec, response_bytes, bool_map, ctx, slot),
+        .object => |object_field_slots| {
+            const object_spec = switch (response_spec) {
+                .object => |t| t,
+                else => return error.ResponseSpecMismatch,
+            };
+            try parseObjectResponseIntoSlots(ctx, object_field_slots, object_spec, response_bytes, bool_map);
+        },
+    }
+}
+
+fn parseObjectResponseIntoSlots(
+    ctx: *session.Context,
+    object_field_slots: []const usize,
+    spec: instrument_types.ObjectResponseSpec,
+    response_bytes: []const u8,
+    bool_map: ?recipe_mod.BoolTextMap,
+) !void {
+    var remaining = std.mem.trim(u8, response_bytes, &std.ascii.whitespace);
+    var field_idx: usize = 0;
+    // Pending field waiting to learn its right boundary from the next literal.
+    var pending: ?instrument_types.ObjectField = null;
+
+    for (spec.segments) |seg| switch (seg) {
+        .literal => |lit| {
+            if (pending) |f| {
+                // This literal terminates the pending field — find, capture, consume both.
+                const sep_idx = findSeparatorOutsideQuotes(remaining, lit) orelse return error.ObjectResponseMismatch;
+                const parsed = try parseScalarResponseValue(f.encoding, std.mem.trim(u8, remaining[0..sep_idx], &std.ascii.whitespace), bool_map);
+                try ctx.setSlot(object_field_slots[field_idx], parsed);
+                field_idx += 1;
+                remaining = remaining[sep_idx + lit.len ..];
+                pending = null;
+            } else {
+                // Prefix literal — match and consume.
+                if (!std.mem.startsWith(u8, remaining, lit)) return error.ObjectResponseMismatch;
+                remaining = remaining[lit.len..];
+            }
+        },
+        .field => |f| pending = f,
+    };
+
+    // Last field has no following literal: rest of remaining is its value.
+    if (pending) |f| {
+        const parsed = try parseScalarResponseValue(f.encoding, std.mem.trim(u8, remaining, &std.ascii.whitespace), bool_map);
+        try ctx.setSlot(object_field_slots[field_idx], parsed);
+    }
 }
 
 /// Sends an instrument command and optionally saves the parsed response.
@@ -159,8 +207,9 @@ pub fn parseResponseIntoSlot(
     slot: usize,
 ) !void {
     switch (response_spec) {
-        .scalar => |encoding| try ctx.setSlot(slot, try parseScalarResponseValue(encoding, response_bytes, bool_map, false)),
+        .scalar => |encoding| try ctx.setSlot(slot, try parseScalarResponseValue(encoding, response_bytes, bool_map)),
         .list => |list_spec| try parseListResponseIntoSlot(ctx, slot, list_spec, response_bytes, bool_map),
+        .object => return error.ResponseSpecMismatch,
     }
 }
 
@@ -168,7 +217,6 @@ fn parseScalarResponseValue(
     encoding: instrument_types.Encoding,
     response_bytes: []const u8,
     bool_map: ?recipe_mod.BoolTextMap,
-    unwrap_string: bool,
 ) !session.Value {
     const trimmed = std.mem.trim(u8, response_bytes, &std.ascii.whitespace);
     return switch (encoding) {
@@ -176,7 +224,7 @@ fn parseScalarResponseValue(
         .raw => .{ .string = session.Value.String.borrow(response_bytes) },
         .float => .{ .float = try std.fmt.parseFloat(f64, trimmed) },
         .int => .{ .int = try std.fmt.parseInt(i64, trimmed, 10) },
-        .string => .{ .string = session.Value.String.borrow(if (unwrap_string) unwrapQuotedString(trimmed) else trimmed) },
+        .string => .{ .string = session.Value.String.borrow(unwrapQuotedString(trimmed)) },
         .bool => .{ .bool = try parseBoolResponse(trimmed, bool_map) },
     };
 }
@@ -208,7 +256,6 @@ fn parseListResponseIntoSlot(
             encoding,
             std.mem.trim(u8, field, &std.ascii.whitespace),
             bool_map,
-            true,
         );
         try ctx.setPreparedListItem(items, idx, parsed);
     }

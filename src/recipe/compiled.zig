@@ -336,6 +336,14 @@ pub const Step = struct {
         parallel: Parallel,
     };
 
+    /// Where a parsed instrument response is stored after execution.
+    pub const SaveResult = union(enum) {
+        /// Single scalar or list slot index.
+        scalar: usize,
+        /// One slot index per object field, aligned to `ResponseSpec.object.fields`.
+        object: []const usize,
+    };
+
     pub const InstrumentCall = struct {
         /// Adapter command name preserved for preview and diagnostics.
         call: []const u8,
@@ -347,8 +355,8 @@ pub const Step = struct {
         command: *const PrecompiledCommand,
         /// Compiled argument values aligned to `command.args`.
         args: []const StepArg,
-        /// Optional slot that receives the parsed response value.
-        save_slot: ?usize = null,
+        /// Where to store the parsed response, if the recipe requests it.
+        save_result: ?SaveResult = null,
     };
 
     pub const Compute = struct {
