@@ -661,6 +661,72 @@ test "expr join() on non-list is error" {
     try std.testing.expectError(error.InvalidExpression, e.eval(tc.resolver(), std.testing.allocator));
 }
 
+// ── Pratt precedence and associativity ─────────────────────────────────────
+
+test "expr precedence: * before +" {
+    const r = VarResolver.none();
+    // 2 + 3 * 4 = 2 + 12 = 14,  not (2+3)*4 = 20
+    try expectInt(14, try testEval(std.testing.allocator, "2 + 3 * 4", r));
+    // 10 - 2 * 3 = 10 - 6 = 4
+    try expectInt(4, try testEval(std.testing.allocator, "10 - 2 * 3", r));
+}
+
+test "expr precedence: comparison before logical" {
+    const r = VarResolver.none();
+    // 1 < 2 && 3 < 4  →  true && true  →  true
+    try expectBool(true, try testEval(std.testing.allocator, "1 < 2 && 3 < 4", r));
+    // 1 > 2 || 3 < 4  →  false || true  →  true
+    try expectBool(true, try testEval(std.testing.allocator, "1 > 2 || 3 < 4", r));
+    // 1 > 2 || 3 > 4  →  false || false  →  false
+    try expectBool(false, try testEval(std.testing.allocator, "1 > 2 || 3 > 4", r));
+}
+
+test "expr precedence: && before ||" {
+    const r = VarResolver.none();
+    // 0 || 1 && 0  →  0 || (1 && 0)  →  0 || 0  →  false
+    try expectBool(false, try testEval(std.testing.allocator, "0 || 1 && 0", r));
+    // 1 || 0 && 0  →  1 || (0 && 0)  →  1 || 0  →  true
+    try expectBool(true, try testEval(std.testing.allocator, "1 || 0 && 0", r));
+}
+
+test "expr left-associativity of -" {
+    const r = VarResolver.none();
+    // 10 - 3 - 2 = (10-3) - 2 = 5,  not 10 - (3-2) = 9
+    try expectInt(5, try testEval(std.testing.allocator, "10 - 3 - 2", r));
+}
+
+test "expr left-associativity of /" {
+    const r = VarResolver.none();
+    // 24 / 4 / 2 = (24/4) / 2 = 3.0,  not 24 / (4/2) = 12.0
+    try expectFloat(3.0, try testEval(std.testing.allocator, "24 / 4 / 2", r));
+}
+
+test "expr unary prefix binds tighter than infix" {
+    const r = VarResolver.none();
+    // -3 * 2 = (-3) * 2 = -6,  not -(3*2) = -6 (same value; check sign matters)
+    try expectInt(-6, try testEval(std.testing.allocator, "-3 * 2", r));
+    // -2 + 5 = (-2) + 5 = 3
+    try expectInt(3, try testEval(std.testing.allocator, "-2 + 5", r));
+    // !0 && 1  →  (!0) && 1  →  true && 1  →  true
+    try expectBool(true, try testEval(std.testing.allocator, "!0 && 1", r));
+}
+
+test "expr double negation" {
+    const r = VarResolver.none();
+    // !!1  →  !(!1)  →  !(false)  →  true
+    try expectBool(true, try testEval(std.testing.allocator, "!!1", r));
+    // !!0  →  false
+    try expectBool(false, try testEval(std.testing.allocator, "!!0", r));
+}
+
+test "expr float notation" {
+    const r = VarResolver.none();
+    try expectFloat(0.5, try testEval(std.testing.allocator, ".5", r));
+    try expectFloat(1.0, try testEval(std.testing.allocator, ".5 + .5", r));
+    try expectFloat(1000.0, try testEval(std.testing.allocator, "1e3", r));
+    try expectFloat(0.01, try testEval(std.testing.allocator, "1e-2", r));
+}
+
 test "expr join() tracks more than four temporary strings" {
     var tc: ListTestContext = .{};
     tc.addList("items", &.{ 1.0, 2.0 });
