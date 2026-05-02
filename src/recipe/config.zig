@@ -113,6 +113,10 @@ pub const ParallelStepConfig = struct {
 
 /// Parsed task object supporting loop, sequential, and conditional variants.
 pub const TaskConfig = struct {
+    /// Display name for this task.
+    name: []const u8,
+    /// When false, this task does not increment $ITER and produces no pipeline frame.
+    iter: ?bool = null,
     /// Steps to execute.
     steps: []StepConfig,
     /// When present, task loops while this expression is truthy.

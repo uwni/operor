@@ -56,6 +56,8 @@ pub const InstrumentSpec = struct {
     /// Default bool format for all commands in this adapter.
     /// Must be set explicitly when any command uses bool args.
     bool_format: ?BoolFormat = null,
+    /// Default float precision (decimal places) for all float args in this adapter.
+    float_precision: ?u8 = null,
 };
 
 /// Literal default value for an adapter command argument.
@@ -88,7 +90,7 @@ pub const ArgSpec = struct {
     false_text: ?[]const u8 = null,
     separator: ?[]const u8 = null,
     precision: ?u8 = null,
-    options: ?[]const []const u8 = null,
+    options: ?std.StringHashMap([]const u8) = null,
     default: ?ArgDefault = null,
 
     pub const serde = .{
@@ -111,10 +113,12 @@ pub const ReadSpec = union(enum) {
     };
 };
 
-/// Extended response list form for non-comma separated responses.
+/// Extended response list form.
+/// Use `items` for a fixed-length heterogeneous list, or `type` for a variable-length homogeneous spread.
 pub const ReadSpecObject = struct {
     split: ?[]const u8 = null,
-    items: []const []const u8,
+    items: ?[]const []const u8 = null,
+    type: ?[]const u8 = null,
 };
 
 /// Parsed command entry from a adapter document.
@@ -167,7 +171,16 @@ fn parseReadType(
             return .{ .scalar = try parseEncoding(name, reporter) };
         },
         .list => |items| .{ .list = try parseReadList(allocator, default_response_separator, items, reporter) },
-        .object => |object| .{ .list = try parseReadList(allocator, object.split orelse default_response_separator, object.items, reporter) },
+        .object => |object| blk: {
+            const sep = object.split orelse default_response_separator;
+            if (object.type) |t| {
+                break :blk .{ .spread = .{
+                    .separator = try allocator.dupe(u8, sep),
+                    .type = try parseEncoding(t, reporter),
+                } };
+            }
+            break :blk .{ .list = try parseReadList(allocator, sep, object.items orelse &.{}, reporter) };
+        },
     };
 }
 

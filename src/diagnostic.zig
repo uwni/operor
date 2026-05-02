@@ -100,6 +100,7 @@ pub const Message = union(enum) {
     invalid_identifier: struct { identifier: []const u8 },
     invalid_argument_type: struct { arg_type: []const u8 },
     invalid_read_type: struct { read_type: []const u8 },
+    missing_list_separator,
     missing_option_values,
     invalid_option_value,
     conflicting_argument_type,
@@ -167,21 +168,15 @@ pub const Reporter = struct {
 };
 
 pub const Diagnostics = struct {
-    allocator: std.mem.Allocator,
+    writer: ?*std.Io.Writer,
     file_path: []const u8,
-    items: std.ArrayList(Diagnostic) = .empty,
+    count: usize = 0,
 
-    /// Diagnostic payload slices are borrowed and must outlive writeAll.
-    pub fn init(allocator: std.mem.Allocator, file_path: []const u8) Diagnostics {
-        return .{
-            .allocator = allocator,
-            .file_path = file_path,
-        };
+    pub fn init(writer: ?*std.Io.Writer, file_path: []const u8) Diagnostics {
+        return .{ .writer = writer, .file_path = file_path };
     }
 
-    pub fn deinit(self: *Diagnostics) void {
-        self.items.deinit(self.allocator);
-    }
+    pub fn deinit(_: *Diagnostics) void {}
 
     pub fn reporter(self: *Diagnostics) Reporter {
         return .{
@@ -190,14 +185,10 @@ pub const Diagnostics = struct {
         };
     }
 
-    pub fn add(self: *Diagnostics, diagnostic: Diagnostic) error{OutOfMemory}!void {
-        try self.items.append(self.allocator, diagnostic);
-    }
-
-    pub fn writeAll(self: *const Diagnostics, writer: *std.Io.Writer) !void {
-        for (self.items.items) |item| {
-            try self.writeItem(writer, item);
-        }
+    pub fn add(self: *Diagnostics, d: Diagnostic) error{OutOfMemory}!void {
+        self.count += 1;
+        const w = self.writer orelse return;
+        self.writeItem(w, d) catch {};
     }
 
     fn writeItem(self: *const Diagnostics, writer: *std.Io.Writer, item: Diagnostic) !void {
@@ -235,31 +226,10 @@ pub const Diagnostics = struct {
 
     const reporter_vtable = Reporter.VTable{ .add = reportAdd };
 
-    fn reportAdd(ctx: *anyopaque, diagnostic: Diagnostic) error{OutOfMemory}!void {
+    fn reportAdd(ctx: *anyopaque, d: Diagnostic) error{OutOfMemory}!void {
         const self: *Diagnostics = @ptrCast(@alignCast(ctx));
-        try self.add(diagnostic);
+        try self.add(d);
     }
-};
-
-pub const EmptyDiagnostics = struct {
-    pub fn init() EmptyDiagnostics {
-        return .{};
-    }
-
-    pub fn deinit(_: *EmptyDiagnostics) void {}
-
-    pub fn reporter(self: *EmptyDiagnostics) Reporter {
-        return .{
-            .diagnostics = @ptrCast(self),
-            .vtable = &reporter_vtable,
-        };
-    }
-
-    pub fn writeAll(_: *const EmptyDiagnostics, _: *std.Io.Writer) !void {}
-
-    const reporter_vtable = Reporter.VTable{ .add = reportAdd };
-
-    fn reportAdd(_: *anyopaque, _: Diagnostic) error{OutOfMemory}!void {}
 };
 
 fn writeMessage(writer: *std.Io.Writer, item: Diagnostic) !void {
@@ -315,8 +285,9 @@ fn writeMessage(writer: *std.Io.Writer, item: Diagnostic) !void {
 test "document diagnostics do not add duplicate source separator" {
     const gpa = std.testing.allocator;
 
-    var diagnostics = Diagnostics.init(gpa, "new.yaml");
-    defer diagnostics.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var diagnostics = Diagnostics.init(&out.writer, "new.yaml");
 
     try diagnostics.add(.{
         .severity = .fatal,
@@ -324,10 +295,6 @@ test "document diagnostics do not add duplicate source separator" {
         .message = .{ .file_not_found = {} },
     });
 
-    var out: std.Io.Writer.Allocating = .init(gpa);
-    defer out.deinit();
-
-    try diagnostics.writeAll(&out.writer);
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "'new.yaml': file not found\n"));
     try std.testing.expect(!std.mem.containsAtLeast(u8, out.written(), 1, ": :"));
 }
@@ -335,18 +302,15 @@ test "document diagnostics do not add duplicate source separator" {
 test "diagnostic message payloads are underlined" {
     const gpa = std.testing.allocator;
 
-    var diagnostics = Diagnostics.init(gpa, "recipe.yaml");
-    defer diagnostics.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var diagnostics = Diagnostics.init(&out.writer, "recipe.yaml");
 
     try diagnostics.add(.{
         .severity = .fatal,
         .message = .{ .duplicate_parallel_instrument = .{ .instrument = "smu" } },
     });
 
-    var out: std.Io.Writer.Allocating = .init(gpa);
-    defer out.deinit();
-
-    try diagnostics.writeAll(&out.writer);
     try std.testing.expect(std.mem.containsAtLeast(
         u8,
         out.written(),
@@ -358,35 +322,25 @@ test "diagnostic message payloads are underlined" {
 test "diagnostic escaped braces are not styled as placeholders" {
     const gpa = std.testing.allocator;
 
-    var diagnostics = Diagnostics.init(gpa, "recipe.yaml");
-    defer diagnostics.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var diagnostics = Diagnostics.init(&out.writer, "recipe.yaml");
 
     try diagnostics.add(.{
         .severity = .fatal,
         .message = .{ .missing_closing_brace = {} },
     });
 
-    var out: std.Io.Writer.Allocating = .init(gpa);
-    defer out.deinit();
-
-    try diagnostics.writeAll(&out.writer);
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "'recipe.yaml': missing closing '}'\n"));
     try std.testing.expect(!std.mem.containsAtLeast(u8, out.written(), 1, "\x1b[4m"));
 }
 
-test "empty diagnostics has no output" {
-    const gpa = std.testing.allocator;
-
-    var diagnostics = EmptyDiagnostics.init();
-    defer diagnostics.deinit();
+test "null writer discards output" {
+    var diagnostics = Diagnostics.init(null, "");
     const reporter = diagnostics.reporter();
 
     try reporter.add(.warning, null, .{ .duplicate_record_column = .{ .column = "v" } });
     try std.testing.expectEqual(error.AnalysisFail, reporter.fail(null, .{ .missing_pipeline = {} }));
 
-    var out: std.Io.Writer.Allocating = .init(gpa);
-    defer out.deinit();
-
-    try diagnostics.writeAll(&out.writer);
-    try std.testing.expectEqual(@as(usize, 0), out.written().len);
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.count);
 }

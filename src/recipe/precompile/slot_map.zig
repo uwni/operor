@@ -54,7 +54,7 @@ pub const SlotMap = struct {
 
     pub fn recordListResponseCapacity(self: *SlotMap, slot_idx: usize, response: recipe_ir.ResponseSpec) void {
         const list = switch (response) {
-            .scalar, .object => return,
+            .scalar, .object, .spread => return,
             .list => |list| list,
         };
         switch (self.initial_values[self.const_count + slot_idx]) {

@@ -46,6 +46,7 @@
     .invalid_identifier = "template placeholder '{[identifier]s}' is not a valid identifier",
     .invalid_argument_type = "template placeholder type '{[arg_type]s}' is not supported",
     .invalid_read_type = "read type '{[read_type]s}' is not supported",
+    .missing_list_separator = "list argument must define a separator",
     .missing_option_values = "option argument must define at least one option value",
     .invalid_option_value = "argument value is not one of the adapter option values",
     .conflicting_argument_type = "template placeholder uses conflicting type annotations",

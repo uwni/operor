@@ -7,8 +7,8 @@ instrument:
   manufacturer: "Keysight Technologies"
   models: ["8163A", "8163B", "8164A", "8164B", "8166A", "8166B"]
   bool_format:
-    true: "1"
-    false: "0"
+    "true": "1"
+    "false": "0"
 
 commands:
   # System
@@ -196,7 +196,9 @@ commands:
     write: "SENS{slot:int}[:CHAN{channel:int}]:POW:UNIT {unit:option}"
     args:
       unit:
-        options: [W, DBM]
+        options:
+          W: W
+          DBM: DBM
   get_sensor_power_unit:
     write: "SENS{slot:int}[:CHAN{channel:int}]:POW:UNIT?"
     read: string
@@ -334,7 +336,9 @@ commands:
     write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:UNIT {unit:option}"
     args:
       unit:
-        options: [W, DBM]
+        options:
+          W: W
+          DBM: DBM
   get_laser_power_unit:
     write: "SOURCE{source:int}[:CHAN{channel:int}]:POW:UNIT?"
     read: string
@@ -435,7 +439,10 @@ commands:
     write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:MODE {mode:option}"
     args:
       mode:
-        options: [STEP, MAN, CONT]
+        options:
+          STEP: STEP
+          MAN: MAN
+          CONT: CONT
   get_sweep_mode:
     write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:MODE?"
     read: string
@@ -443,7 +450,9 @@ commands:
     write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:REP {repeat:option}"
     args:
       repeat:
-        options: [ONEW, TWOW]
+        options:
+          ONEW: ONEW
+          TWOW: TWOW
   get_sweep_repeat:
     write: "SOURCE{source:int}[:CHAN{channel:int}]:WAV:SWE:REP?"
     read: string
@@ -505,7 +514,10 @@ commands:
     write: "SOURCE{source:int}[:CHAN{channel:int}]:AM:SOUR {am_source:option}"
     args:
       am_source:
-        options: [INT, EXT, COH]
+        options:
+          INT: INT
+          EXT: EXT
+          COH: COH
   get_am_source:
     write: "SOURCE{source:int}[:CHAN{channel:int}]:AM:SOUR?"
     read: string
@@ -525,7 +537,9 @@ commands:
     write: "SOURCE{source:int}[:CHAN{channel:int}]:FM:SOUR {fm_source:option}"
     args:
       fm_source:
-        options: [INT, SBS]
+        options:
+          INT: INT
+          SBS: SBS
   get_fm_source:
     write: "SOURCE{source:int}[:CHAN{channel:int}]:FM:SOUR?"
     read: string
@@ -548,7 +562,10 @@ commands:
     write: "SOURCE{source:int}[:CHAN{channel:int}]:MOD {mode:option}"
     args:
       mode:
-        options: [DIS, TINP, TOUT]
+        options:
+          DIS: DIS
+          TINP: TINP
+          TOUT: TOUT
   get_modulation_output:
     write: "SOURCE{source:int}[:CHAN{channel:int}]:MOD?"
     read: string
@@ -613,7 +630,9 @@ commands:
     write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:UNIT {unit:option}"
     args:
       unit:
-        options: [W, DBM]
+        options:
+          W: W
+          DBM: DBM
   get_output_power_unit:
     write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:UNIT?"
     read: string
@@ -720,7 +739,13 @@ commands:
     write: "TRIG{slot:int}[:CHAN{channel:int}]:INP {mode:option}"
     args:
       mode:
-        options: [IGN, NEXT, COMP, STNEXT, STPREV, STBEG]
+        options:
+          IGN: IGN
+          NEXT: NEXT
+          COMP: COMP
+          STNEXT: STNEXT
+          STPREV: STPREV
+          STBEG: STBEG
   get_trigger_input:
     write: "TRIG{slot:int}[:CHAN{channel:int}]:INP?"
     read: string
@@ -735,7 +760,10 @@ commands:
     write: "TRIG{slot:int}[:CHAN{channel:int}]:OUTP {mode:option}"
     args:
       mode:
-        options: [NONE, COMP, STEP]
+        options:
+          NONE: NONE
+          COMP: COMP
+          STEP: STEP
   get_trigger_output:
     write: "TRIG{slot:int}[:CHAN{channel:int}]:OUTP?"
     read: string

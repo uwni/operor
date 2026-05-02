@@ -1,0 +1,72 @@
+instruments:
+  pm:
+    adapter: pm100d.yaml
+    resource: "USB0::0x1313::0x8078::P0027344::INSTR"
+  dc:
+    adapter: pmx.yaml
+    resource: "USB0::0x0B3E::0x102C::CQ003500::INSTR"
+
+pipeline:
+  record: all
+  file_path: phase_power.csv
+
+expected_iterations: 4500
+float_precision: 1
+
+vars:
+  voltage: 0.0
+  power: 0.0
+  dc_voltages: [0.0, 0.0, 0.0, 0.0]
+  dc_currents: [0.0, 0.0, 0.0, 0.0]
+
+tasks:
+  - name: Configure PM100D
+    iter: false
+    steps:
+      - call: pm.set_wavelength
+        args:
+          wavelength: 1550.0
+      - call: pm.set_power_range_auto
+        args:
+          state: true
+      - call: pm.set_power_unit
+        args:
+          unit: DBM
+      - call: pm.configure_power
+      - call: pm.set_average_count
+        args:
+          count: 1
+
+  - name: Enable PMX Channels
+    iter: false
+    steps:
+      - call: dc.set_output
+        args:
+          state: true
+          channels: [1, 2, 3, 4]
+      - call: dc.set_current
+        args:
+          current: 0.02
+          channels: [1, 2, 3, 4]
+      - sleep_ms: 5000
+
+  - name: Voltage Sweep
+    while: "$ITER < 4500"
+    steps:
+      - compute: "$ITER * 0.001"
+        assign: voltage
+      - call: dc.set_voltage
+        args:
+          voltage: "${voltage}"
+          channels: [4]
+      - sleep_ms: 40
+      - call: pm.read
+        assign: power
+      - call: dc.measure_voltage
+        args:
+          channels: [1, 2, 3, 4]
+        assign: dc_voltages
+      - call: dc.measure_current
+        args:
+          channels: [1, 2, 3, 4]
+        assign: dc_currents

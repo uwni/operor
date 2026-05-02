@@ -57,7 +57,7 @@ fn lowerTestExpr(allocator: std.mem.Allocator, source: []const u8) !Expression {
     var temp_arena = std.heap.ArenaAllocator.init(allocator);
     defer temp_arena.deinit();
 
-    var common_diagnostics = diagnostic_mod.Diagnostics.init(temp_arena.allocator(), "<expr-test>");
+    var common_diagnostics = diagnostic_mod.Diagnostics.init(null, "<expr-test>");
     defer common_diagnostics.deinit();
     const diagnostics = common_diagnostics.reporter().withSource(.expression, source);
 
@@ -69,7 +69,7 @@ fn lowerBoundTestExpr(allocator: std.mem.Allocator, source: []const u8, slots: a
     var temp_arena = std.heap.ArenaAllocator.init(allocator);
     defer temp_arena.deinit();
 
-    var common_diagnostics = diagnostic_mod.Diagnostics.init(temp_arena.allocator(), "<expr-test>");
+    var common_diagnostics = diagnostic_mod.Diagnostics.init(null, "<expr-test>");
     defer common_diagnostics.deinit();
     const diagnostics = common_diagnostics.reporter().withSource(.expression, source);
 
@@ -136,7 +136,7 @@ fn testBoundEval(source: []const u8, vars: *const std.StringHashMap([]const u8))
     defer slots.deinit(std.testing.allocator);
     var temp_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer temp_arena.deinit();
-    var common_diagnostics = diagnostic_mod.Diagnostics.init(temp_arena.allocator(), "<expr-test>");
+    var common_diagnostics = diagnostic_mod.Diagnostics.init(null, "<expr-test>");
     defer common_diagnostics.deinit();
     const diagnostics = common_diagnostics.reporter().withSource(.expression, source);
     const ast = try parseAst(temp_arena.allocator(), source, diagnostics);

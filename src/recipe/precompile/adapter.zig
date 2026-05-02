@@ -66,13 +66,14 @@ pub fn getOrCompileCommand(
     source: Adapter.Command,
     call: []const u8,
     adapter_bool_format: ?adapter_schema.BoolFormat,
+    adapter_float_precision: ?u8,
     diag: diagnostic.Reporter,
     context: DiagnosticContext,
 ) !*const recipe_ir.PrecompiledCommand {
     if (instrument.commands.get(call)) |command| return command;
 
     const key = try arena.dupe(u8, call);
-    const compiled_value = try compileCommand(scratch_alloc, arena, source, instrument, adapter_bool_format, diag, context);
+    const compiled_value = try compileCommand(scratch_alloc, arena, source, instrument, adapter_bool_format, adapter_float_precision, diag, context);
 
     const compiled = try arena.create(recipe_ir.PrecompiledCommand);
     compiled.* = compiled_value;
@@ -89,6 +90,7 @@ pub fn compileCommand(
     source: Adapter.Command,
     instrument: *const recipe_ir.PrecompiledInstrument,
     adapter_bool_format: ?adapter_schema.BoolFormat,
+    adapter_float_precision: ?u8,
     diag: diagnostic.Reporter,
     base_context: DiagnosticContext,
 ) !recipe_ir.PrecompiledCommand {
@@ -104,7 +106,7 @@ pub fn compileCommand(
             .name = entry.name,
             .is_optional = !entry.required,
             .default = try compileArgDefault(arena, source.args, entry.name),
-            .format = try compileArgFormat(arena, source.args, entry.name, entry.arg_type, adapter_bool_format, diag, arg_context),
+            .format = try compileArgFormat(arena, source.args, entry.name, entry.arg_type, adapter_bool_format, adapter_float_precision, diag, arg_context),
         };
     }
 
@@ -122,11 +124,13 @@ pub fn compileArgFormat(
     arg_name: []const u8,
     arg_type: []const u8,
     adapter_bool_format: ?adapter_schema.BoolFormat,
+    adapter_float_precision: ?u8,
     diag: diagnostic.Reporter,
     context: DiagnosticContext,
 ) !recipe_ir.ArgFormat {
     var format: recipe_ir.ArgFormat = .{};
     var bool_format = adapter_bool_format;
+    format.float_precision = adapter_float_precision;
     const obj_spec: ?adapter_schema.ArgSpec = if (source_args) |args_map| args_map.get(arg_name) else null;
 
     if (obj_spec) |obj| {
@@ -147,14 +151,19 @@ pub fn compileArgFormat(
         }
         if (isArgType(arg_type, "option") or obj.options != null) {
             const options = obj.options orelse return diag.withContext(context).fail(null, .{ .missing_option_values = {} });
-            if (options.len == 0) return diag.withContext(context).fail(null, .{ .missing_option_values = {} });
+            if (options.count() == 0) return diag.withContext(context).fail(null, .{ .missing_option_values = {} });
             if (obj.default) |default_value| {
                 try validateAdapterDefaultOption(default_value, options, diag, context);
             }
-            format.option_values = try cloneStringList(arena, options);
+            format.option_entries = try compileOptionEntries(arena, options);
+        }
+        if (isArgType(arg_type, "list") and format.list_separator == null) {
+            return diag.withContext(context).fail(null, .{ .missing_list_separator = {} });
         }
     } else if (isArgType(arg_type, "option")) {
         return diag.withContext(context).fail(null, .{ .missing_option_values = {} });
+    } else if (isArgType(arg_type, "list")) {
+        return diag.withContext(context).fail(null, .{ .missing_list_separator = {} });
     }
 
     if (bool_format) |bf| {
@@ -177,6 +186,10 @@ pub fn cloneResponseSpec(
         .list => |list| .{ .list = .{
             .separator = try arena.dupe(u8, list.separator),
             .items = try arena.dupe(adapter_schema.Encoding, list.items),
+        } },
+        .spread => |s| .{ .spread = .{
+            .separator = try arena.dupe(u8, s.separator),
+            .type = s.type,
         } },
         .object => |obj| blk: {
             const segs = try arena.alloc(instrument_mod.ObjectSegment, obj.segments.len);
@@ -230,9 +243,25 @@ pub fn isKnownArgType(arg_type: []const u8) bool {
     return false;
 }
 
+pub fn compileOptionEntries(
+    arena: std.mem.Allocator,
+    options: std.StringHashMap([]const u8),
+) ![]recipe_ir.OptionEntry {
+    const entries = try arena.alloc(recipe_ir.OptionEntry, options.count());
+    var it = options.iterator();
+    var idx: usize = 0;
+    while (it.next()) |kv| : (idx += 1) {
+        entries[idx] = .{
+            .key = try arena.dupe(u8, kv.key_ptr.*),
+            .value = try arena.dupe(u8, kv.value_ptr.*),
+        };
+    }
+    return entries;
+}
+
 pub fn validateAdapterDefaultOption(
     value: adapter_schema.ArgDefault,
-    options: []const []const u8,
+    options: std.StringHashMap([]const u8),
     diag: diagnostic.Reporter,
     context: DiagnosticContext,
 ) diagnostic.Error!void {
@@ -246,24 +275,17 @@ pub fn validateAdapterDefaultOption(
 
 pub fn validateAdapterDefaultOptionScalar(
     value: adapter_schema.ArgDefaultScalar,
-    options: []const []const u8,
+    options: std.StringHashMap([]const u8),
     diag: diagnostic.Reporter,
     context: DiagnosticContext,
 ) diagnostic.Error!void {
-    const text = switch (value) {
+    const key = switch (value) {
         .string => |s| s,
         else => return diag.withContext(context).fail(null, .{ .invalid_option_value = {} }),
     };
-    if (!containsOptionValue(options, text)) {
+    if (!options.contains(key)) {
         return diag.withContext(context).fail(null, .{ .invalid_option_value = {} });
     }
-}
-
-pub fn containsOptionValue(options: []const []const u8, text: []const u8) bool {
-    for (options) |option| {
-        if (std.mem.eql(u8, option, text)) return true;
-    }
-    return false;
 }
 
 /// `scratch_alloc` owns command argument builder backing; `arena` owns returned

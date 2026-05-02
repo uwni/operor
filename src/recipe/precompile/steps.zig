@@ -35,6 +35,9 @@ pub fn precompileTasks(
             else => return err,
         };
 
+        const task_name = try arena.dupe(u8, task_cfg.name);
+        const task_iter = task_cfg.iter orelse true;
+
         if (task_cfg.@"while") |while_src| {
             const task_context: DiagnosticContext = .{ .task_idx = task_idx };
             const condition = expr_compile.compileExpr(slot_map, arena, diag, task_context, while_src.source(), .expression) catch |err| {
@@ -46,11 +49,10 @@ pub fn precompileTasks(
                     else => return err,
                 }
             };
-            // Loop task
-            try tasks.append(arena, .{ .loop = .{
+            try tasks.append(arena, .{ .name = task_name, .iter = task_iter, .kind = .{ .loop = .{
                 .condition = condition,
                 .steps = steps,
-            } });
+            } } });
         } else if (task_cfg.@"if") |guard_src| {
             const task_context: DiagnosticContext = .{ .task_idx = task_idx };
             const condition = expr_compile.compileExpr(slot_map, arena, diag, task_context, guard_src.source(), .expression) catch |err| {
@@ -62,16 +64,14 @@ pub fn precompileTasks(
                     else => return err,
                 }
             };
-            // Conditional task
-            try tasks.append(arena, .{ .conditional = .{
+            try tasks.append(arena, .{ .name = task_name, .iter = task_iter, .kind = .{ .conditional = .{
                 .@"if" = condition,
                 .steps = steps,
-            } });
+            } } });
         } else {
-            // Sequential task
-            try tasks.append(arena, .{ .sequential = .{
+            try tasks.append(arena, .{ .name = task_name, .iter = task_iter, .kind = .{ .sequential = .{
                 .steps = steps,
-            } });
+            } } });
         }
     }
     if (has_error) return error.AnalysisFail;
@@ -181,7 +181,7 @@ pub fn precompileCallStep(
             .command = command_name,
         } });
     };
-    const command = try adapter_mod.getOrCompileCommand(scratch_alloc, arena, precompiled_instrument, command_source, command_name, loaded_adapter.instrument.bool_format, diag, call_context);
+    const command = try adapter_mod.getOrCompileCommand(scratch_alloc, arena, precompiled_instrument, command_source, command_name, loaded_adapter.instrument.bool_format, loaded_adapter.instrument.float_precision, diag, call_context);
 
     const call_copy = try arena.dupe(u8, command_name);
     const instrument_copy = try arena.dupe(u8, instrument_name);

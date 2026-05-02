@@ -139,6 +139,9 @@ const vendor_psu_adapter =
     \\commands:
     \\  set_voltage:
     \\    write: "VOLT {voltage:float},(@{channels:list})"
+    \\    args:
+    \\      channels:
+    \\        separator: ","
 ;
 
 test "executor execute dry run" {
@@ -156,7 +159,8 @@ test "executor execute dry run" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: 5
@@ -205,7 +209,8 @@ test "executor pipeline creates csv frame sink during dry run" {
         \\  record: all
         \\stop_when: "$ITER >= 2"
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: 5
@@ -252,7 +257,8 @@ test "executor propagates conditional task expression failures" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - if: "1 / 0"
+        \\  - name: task
+        \\    if: "1 / 0"
         \\    steps: []
     );
 
@@ -288,7 +294,8 @@ test "executor propagates parallel step failures" {
         \\vars:
         \\  out: 0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - parallel:
         \\          - compute: "1 / 0"
         \\            assign: out

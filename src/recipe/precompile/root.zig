@@ -29,18 +29,12 @@ pub fn precompilePath(
     adapter_dir: std.Io.Dir,
     log: ?*std.Io.Writer,
 ) !recipe_ir.PrecompiledRecipe {
-    var diagnostics: diagnostic.Diagnostics = .init(gpa, recipe_path);
-    defer diagnostics.deinit();
-    var empty_diagnostics: diagnostic.EmptyDiagnostics = .init();
-    defer empty_diagnostics.deinit();
-    const reporter = if (log != null) diagnostics.reporter() else empty_diagnostics.reporter();
+    var diagnostics: diagnostic.Diagnostics = .init(log, recipe_path);
+    const reporter = diagnostics.reporter();
 
     var precompile_arena: std.heap.ArenaAllocator = .init(gpa);
     defer precompile_arena.deinit();
     const precompile_allocator = precompile_arena.allocator();
-    defer if (log) |writer| {
-        diagnostics.writeAll(writer) catch {};
-    };
 
     var recipe_parse_arena: std.heap.ArenaAllocator = .init(precompile_allocator);
 
@@ -203,7 +197,8 @@ test "load recipe and adapters" {
         \\vars:
         \\  voltage: 0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set
         \\        args:
         \\          voltage: "5"
@@ -272,7 +267,8 @@ test "precompile parses stop_when expression" {
         \\  record: all
         \\stop_when: "$ELAPSED_MS >= 2000 || $ITER >= 3"
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set
         \\        args:
         \\          voltage: "5"
@@ -374,10 +370,12 @@ test "precompile preserves explicit expected_iterations and leaves omitted value
         \\  record: all
         \\vars: {}
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set
         \\        args: {}
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set
         \\        args: {}
     );
@@ -391,7 +389,8 @@ test "precompile preserves explicit expected_iterations and leaves omitted value
         \\expected_iterations: 12
         \\vars: {}
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set
         \\        args: {}
     );
@@ -428,6 +427,9 @@ test "precompile preserves typed literal step arguments" {
         \\commands:
         \\  configure:
         \\    write: "CONF {count:int} {voltage:float} {enabled:bool} {channels:list} {mirror:string}"
+        \\    args:
+        \\      channels:
+        \\        separator: ","
     );
     try workspace.writeFile("recipes/typed_args.yaml",
         \\instruments:
@@ -439,7 +441,8 @@ test "precompile preserves typed literal step arguments" {
         \\vars:
         \\  target: mir
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.configure
         \\        args:
         \\          count: 5
@@ -539,6 +542,9 @@ const vendor_psu_adapter =
     \\commands:
     \\  set_voltage:
     \\    write: "VOLT {voltage:float},(@{channels:list})"
+    \\    args:
+    \\      channels:
+    \\        separator: ","
 ;
 
 test "precompile rejects duplicate instrument in parallel block" {
@@ -564,7 +570,8 @@ test "precompile rejects duplicate instrument in parallel block" {
         \\  record: all
         \\vars: {}
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - parallel:
         \\          - call: d1.set_voltage
         \\            args:
@@ -615,7 +622,8 @@ test "precompile stores only referenced commands" {
         \\  record: all
         \\vars: {}
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: "1.0"
@@ -654,7 +662,8 @@ test "precompile rejects missing instrument references" {
         \\  record: all
         \\vars: {}
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: missing.set_voltage
         \\        args:
         \\          voltage: "1.0"
@@ -685,7 +694,8 @@ test "precompile validates command arguments" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set_voltage
     );
     try workspace.writeFile("recipes/unexpected_argument.yaml",
@@ -696,7 +706,8 @@ test "precompile validates command arguments" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: "1.0"
@@ -731,6 +742,9 @@ test "precompile allows omitted optional group arguments" {
         \\commands:
         \\  set_voltage:
         \\    write: "VOLT {voltage:float}[,(@{channels:list})]"
+        \\    args:
+        \\      channels:
+        \\        separator: ","
     );
     try workspace.writeFile("recipes/r.yaml",
         \\instruments:
@@ -740,7 +754,8 @@ test "precompile allows omitted optional group arguments" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: 1.0
@@ -794,7 +809,8 @@ test "precompile uses adapter argument defaults for omitted arguments" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: sw.select_channel
     );
 
@@ -827,8 +843,7 @@ test "precompiled command renders via helper" {
     var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
     defer cmd_arena.deinit();
     const alloc = cmd_arena.allocator();
-    var diags: diagnostic.Diagnostics = .init(gpa, "<test>");
-    defer diags.deinit();
+    var diags: diagnostic.Diagnostics = .init(null, "<test>");
 
     const source = try Adapter.Command.parse(alloc, "VOLT {voltage:float}", null, null, diags.reporter());
 
@@ -841,7 +856,7 @@ test "precompiled command renders via helper" {
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, gpa, source, &instrument, null, diags.reporter(), .{});
+    var compiled = try compileCommand(gpa, gpa, source, &instrument, null, null, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
     try std.testing.expect(compiled.instrument == &instrument);
@@ -865,8 +880,7 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
     defer cmd_arena.deinit();
     const alloc = cmd_arena.allocator();
-    var diags: diagnostic.Diagnostics = .init(gpa, "<test>");
-    defer diags.deinit();
+    var diags: diagnostic.Diagnostics = .init(null, "<test>");
 
     const source = try Adapter.Command.parse(alloc, "VOLT {voltage:float}", null, null, diags.reporter());
 
@@ -879,7 +893,7 @@ test "precompiled command render falls back to heap when suffix leaves too littl
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, gpa, source, &instrument, null, diags.reporter(), .{});
+    var compiled = try compileCommand(gpa, gpa, source, &instrument, null, null, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.Value{
@@ -899,8 +913,7 @@ test "float_precision controls decimal places in rendered command" {
     var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
     defer cmd_arena.deinit();
     const alloc = cmd_arena.allocator();
-    var diags: diagnostic.Diagnostics = .init(gpa, "<test>");
-    defer diags.deinit();
+    var diags: diagnostic.Diagnostics = .init(null, "<test>");
 
     const source = try Adapter.Command.parse(alloc, "VOLT {voltage:float}", null, null, diags.reporter());
 
@@ -913,7 +926,7 @@ test "float_precision controls decimal places in rendered command" {
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, gpa, source, &instrument, null, diags.reporter(), .{});
+    var compiled = try compileCommand(gpa, gpa, source, &instrument, null, null, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.Value{
@@ -962,7 +975,8 @@ test "adapter arg precision overrides recipe global float precision" {
         \\  record: all
         \\float_precision: 0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: laser.tune
         \\        args:
         \\          wavelength: 1550.126
@@ -997,8 +1011,7 @@ test "precompiled command applies bool format from adapter defaults" {
     var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
     defer cmd_arena.deinit();
     const alloc = cmd_arena.allocator();
-    var diags: diagnostic.Diagnostics = .init(gpa, "<test>");
-    defer diags.deinit();
+    var diags: diagnostic.Diagnostics = .init(null, "<test>");
 
     const source = try Adapter.Command.parse(alloc, "OUTP {state:bool}", null, null, diags.reporter());
 
@@ -1011,7 +1024,7 @@ test "precompiled command applies bool format from adapter defaults" {
     };
     defer instrument.commands.deinit();
 
-    var compiled = try compileCommand(gpa, gpa, source, &instrument, .{ .true_text = "ON", .false_text = "OFF" }, diags.reporter(), .{});
+    var compiled = try compileCommand(gpa, gpa, source, &instrument, .{ .true_text = "ON", .false_text = "OFF" }, null, diags.reporter(), .{});
     defer compiled.deinit(gpa);
 
     const args = [_]recipe_ir.Value{
@@ -1052,7 +1065,8 @@ test "precompiled command applies list separators and element formats" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.configure
         \\        args:
         \\          states: [true, false]
@@ -1097,7 +1111,9 @@ test "option args validate static values and dynamic renders" {
         \\    write: "TRIG:SOUR {source:option}"
         \\    args:
         \\      source:
-        \\        options: [IMM, BUS]
+        \\        options:
+        \\          IMM: IMM
+        \\          BUS: BUS
     );
     try workspace.writeFile("recipes/invalid_option.yaml",
         \\instruments:
@@ -1107,7 +1123,8 @@ test "option args validate static values and dynamic renders" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: trig.source
         \\        args:
         \\          source: EXT
@@ -1122,7 +1139,8 @@ test "option args validate static values and dynamic renders" {
         \\vars:
         \\  source: EXT
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: trig.source
         \\        args:
         \\          source: "${source}"
@@ -1183,7 +1201,8 @@ test "precompile rejects partial bool arg map" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: psu.output
         \\        args:
         \\          state: true
@@ -1215,7 +1234,8 @@ test "precompile diagnostic includes step context" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.missing
         \\        args:
         \\          voltage: "1.0"
@@ -1264,7 +1284,8 @@ test "precompile compute step" {
         \\  v: 0
         \\  doubled: 0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: "5"
@@ -1319,7 +1340,8 @@ test "precompile compute step rejects missing assign" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - compute: "1 + 2"
     );
 
@@ -1350,7 +1372,8 @@ test "precompile step with if guard" {
         \\vars:
         \\  power: 0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: "5"
@@ -1387,7 +1410,8 @@ test "precompile rejects invalid step (neither call nor compute)" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - assign: orphan
     );
 
@@ -1419,7 +1443,8 @@ test "precompile accepts record with declared unassigned variable" {
         \\  voltage: 0
         \\  nonexistent: 0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: "1.0"
@@ -1465,7 +1490,8 @@ test "precompile rejects record column referencing const" {
         \\consts:
         \\  limit: 10
         \\tasks:
-        \\  - steps: []
+        \\  - name: task
+        \\    steps: []
     );
 
     const adapter_dir = try workspace.realpathAlloc("adapters");
@@ -1508,7 +1534,8 @@ test "precompile accepts valid record subset" {
         \\  voltage: 0
         \\  doubled: 0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: "1.0"
@@ -1551,7 +1578,8 @@ test "precompile diagnostic for missing pipeline" {
         \\    adapter: psu0.yaml
         \\    resource: "USB0::1::INSTR"
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: 1.0
@@ -1593,7 +1621,8 @@ test "precompile diagnostic for missing record" {
         \\    resource: "USB0::1::INSTR"
         \\pipeline: {}
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: 1.0
@@ -1639,7 +1668,8 @@ test "precompile expands record all into explicit assign list" {
         \\  voltage: 0
         \\  doubled: 0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: 5
@@ -1702,7 +1732,8 @@ test "precompile rejects undeclared variable use" {
         \\vars:
         \\  voltage: 1
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set
         \\        args:
         \\          voltage: "5"
@@ -1733,7 +1764,8 @@ test "precompile rejects undeclared variable in expression" {
         \\vars:
         \\  v: 1
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - compute: "${v} + ${x}"
         \\        assign: v
     );
@@ -1762,7 +1794,8 @@ test "precompile rejects variable shadowing builtin" {
         \\vars:
         \\  $ITER: 0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - compute: "1 + 1"
         \\        assign: $ITER
     );
@@ -1799,7 +1832,8 @@ test "precompile sequential task" {
         \\vars:
         \\  voltage: 0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set
         \\        args:
         \\          voltage: "5"
@@ -1817,7 +1851,7 @@ test "precompile sequential task" {
     defer compiled.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), compiled.tasks.len);
-    try std.testing.expect(compiled.tasks[0] == .sequential);
+    try std.testing.expect(compiled.tasks[0].kind == .sequential);
     try std.testing.expectEqual(@as(usize, 1), compiled.tasks[0].steps().len);
 }
 
@@ -1843,7 +1877,8 @@ test "precompile loop task with while" {
         \\vars:
         \\  voltage: 0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set
         \\        args:
         \\          voltage: "5"
@@ -1862,7 +1897,7 @@ test "precompile loop task with while" {
     defer compiled.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), compiled.tasks.len);
-    try std.testing.expect(compiled.tasks[0] == .loop);
+    try std.testing.expect(compiled.tasks[0].kind == .loop);
     try std.testing.expectEqual(@as(usize, 1), compiled.tasks[0].steps().len);
 }
 
@@ -1888,7 +1923,8 @@ test "precompile conditional task with if" {
         \\vars:
         \\  voltage: 5
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set
         \\        args:
         \\          voltage: "5"
@@ -1907,7 +1943,7 @@ test "precompile conditional task with if" {
     defer compiled.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), compiled.tasks.len);
-    try std.testing.expect(compiled.tasks[0] == .conditional);
+    try std.testing.expect(compiled.tasks[0].kind == .conditional);
     try std.testing.expectEqual(@as(usize, 1), compiled.tasks[0].steps().len);
 }
 
@@ -1925,7 +1961,8 @@ test "precompile sleep step" {
         \\vars:
         \\  v: 0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - compute: "1 + 2"
         \\        assign: v
         \\      - sleep_ms: 100
@@ -1976,7 +2013,8 @@ test "precompile recipe with list variable" {
         \\    - 3.0
         \\    - 4.5
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - compute: "${voltages}[${idx}]"
         \\        assign: idx
     );
@@ -2038,6 +2076,9 @@ test "precompile const-folds join() in step args" {
         \\commands:
         \\  set_voltage:
         \\    write: "VOLT {voltage:float},(@{channels:list})"
+        \\    args:
+        \\      channels:
+        \\        separator: ","
     );
     try workspace.writeFile("recipes/const_join.yaml",
         \\instruments:
@@ -2052,7 +2093,8 @@ test "precompile const-folds join() in step args" {
         \\    - 2
         \\    - 3
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: "5.0"
@@ -2107,7 +2149,8 @@ test "precompile const scalar expression folding" {
         \\consts:
         \\  base_v: 3.0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set
         \\        args:
         \\          voltage: "${base_v} * 2"
@@ -2163,7 +2206,8 @@ test "precompile rejects assign to const" {
         \\vars:
         \\  result: 0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set
         \\        args:
         \\          voltage: "1.0"
@@ -2230,7 +2274,8 @@ test "precompile does not fold expressions referencing runtime vars" {
         \\vars:
         \\  v: 1.0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set
         \\        args:
         \\          voltage: "${v} * 2"
@@ -2293,7 +2338,8 @@ test "precompile partially folds const prefix with runtime var" {
         \\vars:
         \\  v: 0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set
         \\        args:
         \\          voltage: "${base} + 2 + ${v}"
@@ -2346,7 +2392,8 @@ test "precompile reassociates builtin plus trailing constants" {
         \\vars:
         \\  out: 0
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - compute: "$ITER + 1 + 2"
         \\        assign: out
     );

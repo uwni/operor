@@ -177,29 +177,30 @@ pub fn validateOptionDocArg(
     diag: diagnostic.Reporter,
     context: DiagnosticContext,
 ) diagnostic.Error!void {
-    const options = format.option_values orelse return;
+    const entries = format.option_entries orelse return;
     switch (doc_arg) {
-        .scalar => |scalar| try validateOptionDocScalar(options, scalar, diag, context),
+        .scalar => |scalar| try validateOptionDocScalar(entries, scalar, diag, context),
         .list => |items| for (items) |item| {
-            try validateOptionDocScalar(options, item, diag, context);
+            try validateOptionDocScalar(entries, item, diag, context);
         },
     }
 }
 
 pub fn validateOptionDocScalar(
-    options: []const []const u8,
+    entries: []const recipe_ir.OptionEntry,
     scalar: config.ArgScalarDoc,
     diag: diagnostic.Reporter,
     context: DiagnosticContext,
 ) diagnostic.Error!void {
-    const text = switch (scalar) {
+    const key = switch (scalar) {
         .string => |s| s,
         else => return diag.withContext(context).fail(null, .{ .invalid_option_value = {} }),
     };
-    if (std.mem.indexOf(u8, text, "${") != null) return;
-    if (!adapter_mod.containsOptionValue(options, text)) {
-        return diag.withContext(context).fail(null, .{ .invalid_option_value = {} });
+    if (std.mem.indexOf(u8, key, "${") != null) return;
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.key, key)) return;
     }
+    return diag.withContext(context).fail(null, .{ .invalid_option_value = {} });
 }
 
 pub fn compileInitialValue(arena: std.mem.Allocator, value: config.ArgValueDoc) !recipe_ir.Value {

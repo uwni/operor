@@ -26,8 +26,8 @@
     // internet connectivity.
     .dependencies = .{
         .serde = .{
-            .url = "https://github.com/OrlovEvgeny/serde.zig/archive/refs/tags/v1.0.3.tar.gz",
-            .hash = "serde-1.0.1-1DszT9VLCwAjuQh0WSq-dIfZ-6Gq8edODuhwF9gfsxld",
+            .url = "git+https://github.com/OrlovEvgeny/serde.zig#8fed4c7886ff3e55f0f7060bd1f6d827891d5a83",
+            .hash = "serde-1.0.1-1DszT7L3CwAWSVgaTeoutC2-tHCDuD938yRvo7MLvvOU",
         },
         .clap = .{
             .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.12.0.tar.gz",

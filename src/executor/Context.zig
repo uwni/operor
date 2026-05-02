@@ -324,7 +324,7 @@ test "Context exposes built-ins alongside stored values" {
     var temp_arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer temp_arena.deinit();
     const source = "$ITER + $TASK_IDX";
-    var common_diagnostics = diagnostic.Diagnostics.init(temp_arena.allocator(), "<test>");
+    var common_diagnostics = diagnostic.Diagnostics.init(null, "<test>");
     defer common_diagnostics.deinit();
     const diagnostics = common_diagnostics.reporter().withSource(.expression, source);
     var ast = try expr_mod.parseAst(temp_arena.allocator(), source, diagnostics);
@@ -377,7 +377,7 @@ test "Context list round-trip through setSlot and varResolver" {
     var temp_arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer temp_arena.deinit();
     const source = "${arr}[${idx}]";
-    var common_diagnostics = diagnostic.Diagnostics.init(temp_arena.allocator(), "<test>");
+    var common_diagnostics = diagnostic.Diagnostics.init(null, "<test>");
     defer common_diagnostics.deinit();
     const diagnostics = common_diagnostics.reporter().withSource(.expression, source);
     var ast = try expr_mod.parseAst(temp_arena.allocator(), source, diagnostics);

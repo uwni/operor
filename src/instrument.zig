@@ -73,6 +73,8 @@ pub const Encoding = enum {
 pub const ResponseSpec = union(enum) {
     scalar: Encoding,
     list: ListResponseSpec,
+    /// Split by separator and parse every token as the same type; length is determined at runtime.
+    spread: SpreadResponseSpec,
     object: ObjectResponseSpec,
 
     pub fn deinit(self: ResponseSpec, allocator: std.mem.Allocator) void {
@@ -82,6 +84,7 @@ pub const ResponseSpec = union(enum) {
                 allocator.free(list.separator);
                 allocator.free(list.items);
             },
+            .spread => |s| allocator.free(s.separator),
             .object => |obj| {
                 for (obj.segments) |seg| switch (seg) {
                     .literal => |lit| allocator.free(lit),
@@ -98,6 +101,12 @@ pub const ResponseSpec = union(enum) {
 pub const ListResponseSpec = struct {
     separator: []const u8,
     items: []const Encoding,
+};
+
+/// Split by separator and collect all tokens as a homogeneous list; length depends on the response.
+pub const SpreadResponseSpec = struct {
+    separator: []const u8,
+    type: Encoding,
 };
 
 /// One named field in an object response.

@@ -187,9 +187,7 @@ fn isIdentifier(name: []const u8) bool {
 
 test "parse template segments" {
     const gpa = std.testing.allocator;
-    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
-    defer diagnostics.deinit();
-
+    var diagnostics = diagnostic.Diagnostics.init(null, "<test>");
     const segments = try parseTemplate(gpa, "VOLT {voltage:float} {channels:list}", diagnostics.reporter());
     defer freeSegments(gpa, segments);
     try std.testing.expectEqual(@as(usize, 4), segments.len);
@@ -197,9 +195,7 @@ test "parse template segments" {
 
 test "parse typed template placeholder" {
     const gpa = std.testing.allocator;
-    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
-    defer diagnostics.deinit();
-
+    var diagnostics = diagnostic.Diagnostics.init(null, "<test>");
     const segments = try parseTemplate(gpa, "VOLT { voltage : float }", diagnostics.reporter());
     defer freeSegments(gpa, segments);
     try std.testing.expectEqual(@as(usize, 2), segments.len);
@@ -214,59 +210,62 @@ test "parse typed template placeholder" {
 
 test "parse template error: missing closing brace" {
     const gpa = std.testing.allocator;
-    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
-    defer diagnostics.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var diagnostics = diagnostic.Diagnostics.init(&out.writer, "<test>");
 
     try std.testing.expectError(error.AnalysisFail, parseTemplate(gpa, "VOLT {voltage:float} {", diagnostics.reporter()));
-    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.items.len);
-    try std.testing.expectEqual(diagnostic.Message.missing_closing_brace, diagnostics.items.items[0].message);
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.count);
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "missing closing '}'"));
 }
 
 test "parse template error: empty argument" {
     const gpa = std.testing.allocator;
-    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
-    defer diagnostics.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var diagnostics = diagnostic.Diagnostics.init(&out.writer, "<test>");
 
     try std.testing.expectError(error.AnalysisFail, parseTemplate(gpa, "VOLT {} done", diagnostics.reporter()));
-    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.items.len);
-    try std.testing.expectEqual(diagnostic.Message.empty_argument, diagnostics.items.items[0].message);
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.count);
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "template placeholder cannot be empty"));
 }
 
 test "parse template error: invalid identifier" {
     const gpa = std.testing.allocator;
-    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
-    defer diagnostics.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var diagnostics = diagnostic.Diagnostics.init(&out.writer, "<test>");
 
     try std.testing.expectError(error.AnalysisFail, parseTemplate(gpa, "VOLT {123bad:float}", diagnostics.reporter()));
-    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.items.len);
-    try std.testing.expectEqualStrings("123bad", diagnostics.items.items[0].message.invalid_identifier.identifier);
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.count);
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "123bad"));
 }
 
 test "parse template error: missing argument type" {
     const gpa = std.testing.allocator;
-    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
-    defer diagnostics.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var diagnostics = diagnostic.Diagnostics.init(&out.writer, "<test>");
 
     try std.testing.expectError(error.AnalysisFail, parseTemplate(gpa, "VOLT {voltage}", diagnostics.reporter()));
-    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.items.len);
-    try std.testing.expectEqual(diagnostic.Message.missing_argument_type, diagnostics.items.items[0].message);
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.count);
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "template placeholder must declare an argument type"));
 }
 
 test "parse template error: invalid argument type" {
     const gpa = std.testing.allocator;
-    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
-    defer diagnostics.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var diagnostics = diagnostic.Diagnostics.init(&out.writer, "<test>");
 
     try std.testing.expectError(error.AnalysisFail, parseTemplate(gpa, "VOLT {voltage:}", diagnostics.reporter()));
-    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.items.len);
-    try std.testing.expectEqualStrings("", diagnostics.items.items[0].message.invalid_argument_type.arg_type);
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.count);
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "is not supported"));
 }
 
 test "parse template with optional group" {
     const gpa = std.testing.allocator;
-    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
-    defer diagnostics.deinit();
-
+    var diagnostics = diagnostic.Diagnostics.init(null, "<test>");
     const segments = try parseTemplate(gpa, "OUTP {state:bool}[,(@{channels:list})]", diagnostics.reporter());
     defer freeSegments(gpa, segments);
     // "OUTP ", {state}, optional[",(@", {channels}, ")"]
@@ -277,20 +276,22 @@ test "parse template with optional group" {
 
 test "parse template error: missing closing bracket" {
     const gpa = std.testing.allocator;
-    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
-    defer diagnostics.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var diagnostics = diagnostic.Diagnostics.init(&out.writer, "<test>");
 
     try std.testing.expectError(error.AnalysisFail, parseTemplate(gpa, "OUTP [,(@{ch:list})", diagnostics.reporter()));
-    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.items.len);
-    try std.testing.expectEqual(diagnostic.Message.missing_closing_bracket, diagnostics.items.items[0].message);
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.count);
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "missing closing ']'"));
 }
 
 test "parse template error: nested optional group" {
     const gpa = std.testing.allocator;
-    var diagnostics = diagnostic.Diagnostics.init(gpa, "<test>");
-    defer diagnostics.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var diagnostics = diagnostic.Diagnostics.init(&out.writer, "<test>");
 
     try std.testing.expectError(error.AnalysisFail, parseTemplate(gpa, "OUTP [[{a:string}]]", diagnostics.reporter()));
-    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.items.len);
-    try std.testing.expectEqual(diagnostic.Message.nested_optional_group, diagnostics.items.items[0].message);
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.count);
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "optional groups cannot be nested"));
 }

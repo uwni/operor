@@ -197,12 +197,18 @@ pub const BoolTextMap = struct {
     false_text: []const u8,
 };
 
+/// Key-value pair for an option arg: `key` is what the recipe specifies, `value` is the rendered SCPI string.
+pub const OptionEntry = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
 /// Per-placeholder formatting rules resolved from adapter defaults and command arg specs.
 pub const ArgFormat = struct {
     bool_map: ?BoolTextMap = null,
     list_separator: ?[]const u8 = null,
     float_precision: ?u8 = null,
-    option_values: ?[]const []const u8 = null,
+    option_entries: ?[]const OptionEntry = null,
 
     pub fn deinit(self: *ArgFormat, allocator: std.mem.Allocator) void {
         if (self.bool_map) |map| {
@@ -210,9 +216,12 @@ pub const ArgFormat = struct {
             allocator.free(map.false_text);
         }
         if (self.list_separator) |text| allocator.free(text);
-        if (self.option_values) |values| {
-            for (values) |value| allocator.free(value);
-            allocator.free(values);
+        if (self.option_entries) |entries| {
+            for (entries) |entry| {
+                allocator.free(entry.key);
+                allocator.free(entry.value);
+            }
+            allocator.free(entries);
         }
         self.* = undefined;
     }
@@ -241,6 +250,7 @@ pub const PrecompiledCommand = struct {
         BufferTooSmall,
         OutOfMemory,
         InvalidOptionValue,
+        MissingListSeparator,
     };
 
     /// Releases heap-owned template and placeholder data.
@@ -287,6 +297,7 @@ pub const PrecompiledCommand = struct {
                     return .{ .bytes = owned, .owned = owned };
                 },
                 error.InvalidOptionValue => return error.InvalidOptionValue,
+                error.MissingListSeparator => return error.MissingListSeparator,
                 else => unreachable,
             };
 
@@ -378,43 +389,44 @@ pub const Step = struct {
 };
 
 /// Task variant describing when and how steps are executed.
-pub const Task = union(enum) {
-    /// Runs steps in a loop while the condition is truthy.
-    loop: LoopTask,
-    /// Runs steps exactly once in order.
-    sequential: SequentialTask,
-    /// Runs steps once if the condition is truthy.
-    conditional: ConditionalTask,
+pub const Task = struct {
+    /// Display name shown in plan and log output.
+    name: []const u8,
+    /// When false, this task does not increment $ITER and produces no pipeline frame.
+    /// Defaults to true.
+    iter: bool = true,
+    kind: Kind,
 
-    /// Returns the step slice for any task variant.
+    pub const Kind = union(enum) {
+        /// Runs steps in a loop while the condition is truthy.
+        loop: LoopTask,
+        /// Runs steps exactly once in order.
+        sequential: SequentialTask,
+        /// Runs steps once if the condition is truthy.
+        conditional: ConditionalTask,
+    };
+
     pub fn steps(self: *const Task) []Step {
-        return switch (self.*) {
-            .loop => |t| t.steps,
-            .sequential => |t| t.steps,
-            .conditional => |t| t.steps,
+        return switch (self.kind) {
+            inline else => |t| t.steps,
         };
     }
 };
 
 /// Loop task: re-executes steps while the condition remains truthy.
 pub const LoopTask = struct {
-    /// Condition expression; loop continues while this evaluates to truthy.
     condition: expr.Expression,
-    /// Steps executed each iteration of the loop.
     steps: []Step,
 };
 
 /// Sequential task: runs steps exactly once in declaration order.
 pub const SequentialTask = struct {
-    /// Steps executed once.
     steps: []Step,
 };
 
 /// Conditional task: runs steps once when the guard expression is truthy.
 pub const ConditionalTask = struct {
-    /// Guard expression; steps execute only when this evaluates to truthy.
     @"if": expr.Expression,
-    /// Steps executed if the condition is true.
     steps: []Step,
 };
 
@@ -515,7 +527,7 @@ pub const PrecompiledRecipe = struct {
 fn writeValueWithFormat(writer: anytype, value: Value, fmt: ArgFormat, float_precision: ?u8) !void {
     switch (value) {
         .bool => |b| {
-            if (fmt.option_values != null) return error.InvalidOptionValue;
+            if (fmt.option_entries != null) return error.InvalidOptionValue;
             if (fmt.bool_map) |map| {
                 try writer.writeAll(if (b) map.true_text else map.false_text);
                 return;
@@ -523,7 +535,7 @@ fn writeValueWithFormat(writer: anytype, value: Value, fmt: ArgFormat, float_pre
             try writer.writeAll(if (b) "true" else "false");
         },
         .float => |f| {
-            if (fmt.option_values != null) return error.InvalidOptionValue;
+            if (fmt.option_entries != null) return error.InvalidOptionValue;
             if (fmt.float_precision orelse float_precision) |precision| {
                 try writeFloatFixed(writer, f, precision);
             } else {
@@ -531,18 +543,24 @@ fn writeValueWithFormat(writer: anytype, value: Value, fmt: ArgFormat, float_pre
             }
         },
         .int => |i| {
-            if (fmt.option_values != null) return error.InvalidOptionValue;
+            if (fmt.option_entries != null) return error.InvalidOptionValue;
             try writer.print("{d}", .{i});
         },
         .string => |s| {
             const text = s.items();
-            if (fmt.option_values) |values| {
-                if (!containsOptionValue(values, text)) return error.InvalidOptionValue;
+            if (fmt.option_entries) |entries| {
+                for (entries) |entry| {
+                    if (std.mem.eql(u8, entry.key, text)) {
+                        try writer.writeAll(entry.value);
+                        return;
+                    }
+                }
+                return error.InvalidOptionValue;
             }
             try writer.writeAll(text);
         },
         .list => |items| {
-            const sep = fmt.list_separator orelse ",";
+            const sep = fmt.list_separator orelse return error.MissingListSeparator;
             for (items.items(), 0..) |item, idx| {
                 if (idx > 0) try writer.writeAll(sep);
                 // List elements inherit the same placeholder formatting rules.
@@ -552,9 +570,9 @@ fn writeValueWithFormat(writer: anytype, value: Value, fmt: ArgFormat, float_pre
     }
 }
 
-fn containsOptionValue(values: []const []const u8, needle: []const u8) bool {
-    for (values) |value| {
-        if (std.mem.eql(u8, value, needle)) return true;
+fn containsOptionKey(entries: []const OptionEntry, key: []const u8) bool {
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.key, key)) return true;
     }
     return false;
 }
@@ -608,6 +626,7 @@ fn renderAllocWithSuffix(
     renderInternal(&out.writer, segments, args, arg_meta, float_precision) catch |err| switch (err) {
         error.WriteFailed => return error.OutOfMemory,
         error.InvalidOptionValue => return error.InvalidOptionValue,
+        error.MissingListSeparator => return error.MissingListSeparator,
     };
 
     out.writer.writeAll(suffix) catch return error.OutOfMemory;

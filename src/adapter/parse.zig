@@ -146,7 +146,7 @@ test "parse adapter response encoding" {
     const cmd = adapter.commands.get("measure_voltage") orelse return error.TestUnexpectedResult;
     switch (cmd.response.?) {
         .scalar => |encoding| try std.testing.expectEqual(schema.Encoding.float, encoding),
-        .list, .object => return error.TestUnexpectedResult,
+        .list, .spread, .object => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(@as(usize, 1), cmd.template.len);
 }
@@ -164,7 +164,7 @@ test "parse adapter list response encoding" {
 
     const cmd = adapter.commands.get("measure_all") orelse return error.TestUnexpectedResult;
     switch (cmd.response.?) {
-        .scalar, .object => return error.TestUnexpectedResult,
+        .scalar, .spread, .object => return error.TestUnexpectedResult,
         .list => |list| {
             try std.testing.expectEqualStrings(",", list.separator);
             try std.testing.expectEqual(@as(usize, 2), list.items.len);
@@ -189,7 +189,7 @@ test "parse adapter list response with custom separator" {
 
     const cmd = adapter.commands.get("read_pair") orelse return error.TestUnexpectedResult;
     switch (cmd.response.?) {
-        .scalar, .object => return error.TestUnexpectedResult,
+        .scalar, .spread, .object => return error.TestUnexpectedResult,
         .list => |list| {
             try std.testing.expectEqualStrings(";", list.separator);
             try std.testing.expectEqual(@as(usize, 2), list.items.len);
@@ -262,8 +262,7 @@ fn parseTestYaml(allocator: std.mem.Allocator, content: []const u8) !Adapter {
     var adapter_arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer adapter_arena.deinit();
     const alloc = adapter_arena.allocator();
-    var diagnostics = diagnostic.Diagnostics.init(alloc, "<test>");
-    defer diagnostics.deinit();
+    var diagnostics = diagnostic.Diagnostics.init(null, "<test>");
 
     const parsed = try doc_parse.parseByFormat(AdapterDoc, .yaml, alloc, content);
 
@@ -294,14 +293,10 @@ test "parse adapter result owns document data independent of diagnostics" {
     var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, adapter_dir, .{});
     defer dir.close(std.testing.io);
 
-    var diagnostic_arena: std.heap.ArenaAllocator = .init(gpa);
-    var diagnostics = diagnostic.Diagnostics.init(diagnostic_arena.allocator(), "recipe.yaml");
+    var diagnostics = diagnostic.Diagnostics.init(null, "recipe.yaml");
 
     var adapter = try parseAdapterInDir(gpa, std.testing.io, dir, "psu.yaml", diagnostics.reporter().withContext(.{ .adapter_name = "psu.yaml" }));
     defer adapter.deinit();
-
-    diagnostics.deinit();
-    diagnostic_arena.deinit();
 
     try std.testing.expectEqualStrings("owned adapter", adapter.meta.description.?);
     try std.testing.expectEqualStrings("Acme", adapter.instrument.manufacturer.?);
@@ -333,8 +328,9 @@ test "parse adapter document diagnostic does not invent byte position" {
     var parse_arena: std.heap.ArenaAllocator = .init(gpa);
     defer parse_arena.deinit();
 
-    var diagnostics = diagnostic.Diagnostics.init(parse_arena.allocator(), "recipe.yaml");
-    defer diagnostics.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var diagnostics = diagnostic.Diagnostics.init(&out.writer, "recipe.yaml");
 
     try std.testing.expectError(
         error.AnalysisFail,
@@ -347,10 +343,6 @@ test "parse adapter document diagnostic does not invent byte position" {
         ),
     );
 
-    var out: std.Io.Writer.Allocating = .init(gpa);
-    defer out.deinit();
-
-    try diagnostics.writeAll(&out.writer);
     try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "adapter=missing.yaml: adapter not found\n"));
     try std.testing.expect(!std.mem.containsAtLeast(u8, out.written(), 1, "at byte"));
 }
@@ -412,7 +404,10 @@ test "parse args object precision and option values" {
         \\      wavelength:
         \\        precision: 2
         \\      source:
-        \\        options: [IMM, BUS, EXT]
+        \\        options:
+        \\          IMM: IMM
+        \\          BUS: BUS
+        \\          EXT: EXT
     );
     defer adapter.deinit();
 
@@ -423,8 +418,8 @@ test "parse args object precision and option values" {
 
     const source = args.get("source") orelse return error.TestUnexpectedResult;
     const options = source.options orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 3), options.len);
-    try std.testing.expectEqualStrings("IMM", options[0]);
-    try std.testing.expectEqualStrings("BUS", options[1]);
-    try std.testing.expectEqualStrings("EXT", options[2]);
+    try std.testing.expectEqual(@as(usize, 3), options.count());
+    try std.testing.expectEqualStrings("IMM", options.get("IMM") orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("BUS", options.get("BUS") orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("EXT", options.get("EXT") orelse return error.TestUnexpectedResult);
 }

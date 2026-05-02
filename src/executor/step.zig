@@ -209,6 +209,7 @@ pub fn parseResponseIntoSlot(
     switch (response_spec) {
         .scalar => |encoding| try ctx.setSlot(slot, try parseScalarResponseValue(encoding, response_bytes, bool_map)),
         .list => |list_spec| try parseListResponseIntoSlot(ctx, slot, list_spec, response_bytes, bool_map),
+        .spread => |spec| try parseSpreadResponseIntoSlot(ctx, slot, spec, response_bytes, bool_map),
         .object => return error.ResponseSpecMismatch,
     }
 }
@@ -257,6 +258,39 @@ fn parseListResponseIntoSlot(
             std.mem.trim(u8, field, &std.ascii.whitespace),
             bool_map,
         );
+        try ctx.setPreparedListItem(items, idx, parsed);
+    }
+}
+
+fn parseSpreadResponseIntoSlot(
+    ctx: *session.Context,
+    slot: usize,
+    spec: instrument_types.SpreadResponseSpec,
+    response_bytes: []const u8,
+    bool_map: ?recipe_mod.BoolTextMap,
+) !void {
+    var remaining = std.mem.trim(u8, response_bytes, &std.ascii.whitespace);
+    if (remaining.len == 0) {
+        _ = try ctx.prepareListSlot(slot, 0);
+        return;
+    }
+
+    var count: usize = 1;
+    var scan = remaining;
+    while (findSeparatorOutsideQuotes(scan, spec.separator)) |idx| {
+        count += 1;
+        scan = scan[idx + spec.separator.len ..];
+    }
+
+    const items = try ctx.prepareListSlot(slot, count);
+    for (0..count) |idx| {
+        const field = if (idx + 1 < count) blk: {
+            const sep_idx = findSeparatorOutsideQuotes(remaining, spec.separator).?;
+            const f = remaining[0..sep_idx];
+            remaining = remaining[sep_idx + spec.separator.len ..];
+            break :blk f;
+        } else remaining;
+        const parsed = try parseScalarResponseValue(spec.type, std.mem.trim(u8, field, &std.ascii.whitespace), bool_map);
         try ctx.setPreparedListItem(items, idx, parsed);
     }
 }

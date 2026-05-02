@@ -4,6 +4,9 @@ const session = @import("session.zig");
 const pipeline_mod = @import("pipeline/root.zig");
 const step_mod = @import("step.zig");
 const expr = @import("../expr.zig");
+const tty = @import("../tty.zig");
+
+const task_tag = tty.styledText("[task]", .{.aqua});
 
 var stop_requested: std.atomic.Value(bool) = .init(false);
 
@@ -52,19 +55,22 @@ pub fn runTasks(
         if (stop_requested.load(.seq_cst)) break;
         if (try shouldStop(compiled_recipe, ctx, allocator)) break;
 
-        switch (task.*) {
+        switch (task.kind) {
             .sequential => {
-                try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, &scratch);
-                ctx.iteration += 1;
+                logTask(pipeline_runtime, task.name);
+                try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, task.iter, &scratch);
+                if (task.iter) ctx.iteration += 1;
             },
             .conditional => |cond| {
                 const is_true = try cond.@"if".isTruthy(ctx.varResolver(), allocator);
                 if (is_true) {
-                    try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, &scratch);
-                    ctx.iteration += 1;
+                    logTask(pipeline_runtime, task.name);
+                    try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, task.iter, &scratch);
+                    if (task.iter) ctx.iteration += 1;
                 }
             },
             .loop => |loop_task| {
+                logTask(pipeline_runtime, task.name);
                 while (true) {
                     if (stop_requested.load(.seq_cst)) break;
                     if (try shouldStop(compiled_recipe, ctx, allocator)) break;
@@ -72,8 +78,8 @@ pub fn runTasks(
                     const is_true = try loop_task.condition.isTruthy(ctx.varResolver(), allocator);
                     if (!is_true) break;
 
-                    try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, &scratch);
-                    ctx.iteration += 1;
+                    try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, task.iter, &scratch);
+                    if (task.iter) ctx.iteration += 1;
                 }
             },
         }
@@ -89,9 +95,10 @@ fn runTask(
     ctx: *session.Context,
     pipeline_runtime: *pipeline_mod.Runtime,
     dry_run: bool,
+    emit_frame: bool,
     scratch: *step_mod.StepScratch,
 ) !void {
-    const task = compiled_recipe.tasks[task_idx];
+    const task = &compiled_recipe.tasks[task_idx];
 
     ctx.task_idx = task_idx;
 
@@ -114,13 +121,15 @@ fn runTask(
         );
     }
 
-    if (try captureRecordFrame(allocator, compiled_recipe.record_bindings, ctx)) |frame| {
-        var owned_frame = frame;
-        if (!pipeline_runtime.publish(&owned_frame)) {
-            stop_requested.store(true, .seq_cst);
-            return;
+    if (emit_frame) {
+        if (try captureRecordFrame(allocator, compiled_recipe.record_bindings, ctx)) |frame| {
+            var owned_frame = frame;
+            if (!pipeline_runtime.publish(&owned_frame)) {
+                stop_requested.store(true, .seq_cst);
+                return;
+            }
+            // After push, ownership has moved to the ring buffer slot.
         }
-        // After push, ownership has moved to the ring buffer slot.
     }
 }
 
@@ -197,6 +206,10 @@ pub const SamplerState = struct {
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     result: ?anyerror = null,
 };
+
+fn logTask(pipeline_runtime: *pipeline_mod.Runtime, name: []const u8) void {
+    pipeline_runtime.asyncLog().print(task_tag ++ " {s}\n", .{name});
+}
 
 fn shouldStop(compiled_recipe: *const recipe_mod.PrecompiledRecipe, ctx: *session.Context, allocator: std.mem.Allocator) !bool {
     const stop_expr = compiled_recipe.stop_when orelse return false;

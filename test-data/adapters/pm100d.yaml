@@ -7,8 +7,8 @@ instrument:
   manufacturer: "Thorlabs"
   models: ["PM100D"]
   bool_format:
-    true: "1"
-    false: "0"
+    "true": "1"
+    "false": "0"
 
 commands:
   # System
@@ -39,15 +39,15 @@ commands:
     write: "SYST:LFR {freq:option}"
     args:
       freq:
-        options: ["50", "60"]
+        options:
+          "50": "50"
+          "60": "60"
   get_line_frequency:
     write: "SYST:LFR?"
     read: int
   get_sensor_info:
     write: "SYST:SENS:IDN?"
-    read:
-      split: ","
-      items: [string, string, string, string, string, string]
+    read: string
 
   # Calibration
   get_calibration_message:
@@ -168,7 +168,9 @@ commands:
     write: "SENS:POW:UNIT {unit:option}"
     args:
       unit:
-        options: [W, DBM]
+        options:
+          W: W
+          DBM: DBM
   get_power_unit:
     write: "SENS:POW:UNIT?"
     read: string
@@ -252,7 +254,10 @@ commands:
     write: "INP:ADAP:TYPE {sensor_type:option}"
     args:
       sensor_type:
-        options: [PHOT, THER, PYR]
+        options:
+          PHOT: PHOT
+          THER: THER
+          PYR: PYR
   get_sensor_type:
     write: "INP:ADAP:TYPE?"
     read: string

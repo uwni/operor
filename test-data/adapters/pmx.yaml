@@ -7,8 +7,8 @@ instrument:
   manufacturer: "KIKUSUI"
   models: ["PMX-A", "PMX-Multi"]
   bool_format:
-    true: "ON"
-    false: "OFF"
+    "true": "ON"
+    "false": "OFF"
 
 commands:
   # IEEE 488.2 common (PMX-A only)
@@ -17,13 +17,19 @@ commands:
     write: "*RCL {slot:option}"
     args:
       slot:
-        options: [A, B, C]
+        options:
+          A: A
+          B: B
+          C: C
   save_memory:
     description: "PMX-A only"
     write: "*SAV {slot:option}"
     args:
       slot:
-        options: [A, B, C]
+        options:
+          A: A
+          B: B
+          C: C
   software_trigger:
     description: "PMX-A only"
     write: "*TRG"
@@ -56,7 +62,9 @@ commands:
     write: "SYST:KLOC:MODE {mode:option}"
     args:
       mode:
-        options: [ALL, PART]
+        options:
+          ALL: ALL
+          PART: PART
   get_keylock_mode:
     write: "SYST:KLOC:MODE?"
     read: string
@@ -107,10 +115,18 @@ commands:
 
   # Output control
   set_output:
-    write: "OUTP {state:bool}[,(@{channel:int})]"
+    write: "OUTP {state:bool}[,(@{channels:list})]"
+    args:
+      channels:
+        separator: ","
   get_output:
-    write: "OUTP?[ (@{channel:int})]"
-    read: bool
+    write: "OUTP?[ (@{channels:list})]"
+    args:
+      channels:
+        separator: ","
+    read:
+      split: ","
+      type: bool
   set_output_all:
     description: "PMX-Multi only"
     write: "OUTP:ALL {state:bool}"
@@ -118,7 +134,10 @@ commands:
     write: "OUTP:PON {state:option}"
     args:
       state:
-        options: [OFF, ON, RST]
+        options:
+          OFF: OFF
+          ON: ON
+          RST: RST
   get_power_on_state:
     write: "OUTP:PON?"
     read: string
@@ -131,7 +150,9 @@ commands:
     write: "OUTP:EXT:LOG {logic:option}"
     args:
       logic:
-        options: [POS, NEG]
+        options:
+          POS: POS
+          NEG: NEG
   get_external_logic:
     write: "OUTP:EXT:LOG?"
     read: string
@@ -184,15 +205,31 @@ commands:
 
   # Voltage
   set_voltage:
-    write: "VOLT {voltage:float}[,(@{channel:int})]"
+    write: "VOLT {voltage:float}[,(@{channels:list})]"
+    args:
+      channels:
+        separator: ","
   get_voltage:
-    write: "VOLT?[ (@{channel:int})]"
-    read: float
+    write: "VOLT?[ (@{channels:list})]"
+    args:
+      channels:
+        separator: ","
+    read:
+      split: ","
+      type: float
   set_ovp:
-    write: "VOLT:PROT {voltage:float}[,(@{channel:int})]"
+    write: "VOLT:PROT {voltage:float}[,(@{channels:list})]"
+    args:
+      channels:
+        separator: ","
   get_ovp:
-    write: "VOLT:PROT?[ (@{channel:int})]"
-    read: float
+    write: "VOLT:PROT?[ (@{channels:list})]"
+    args:
+      channels:
+        separator: ","
+    read:
+      split: ","
+      type: float
   set_trigger_voltage:
     description: "PMX-A only"
     write: "VOLT:TRIG {voltage:float}"
@@ -210,15 +247,31 @@ commands:
 
   # Current
   set_current:
-    write: "CURR {current:float}[,(@{channel:int})]"
+    write: "CURR {current:float}[,(@{channels:list})]"
+    args:
+      channels:
+        separator: ","
   get_current:
-    write: "CURR?[ (@{channel:int})]"
-    read: float
+    write: "CURR?[ (@{channels:list})]"
+    args:
+      channels:
+        separator: ","
+    read:
+      split: ","
+      type: float
   set_ocp:
-    write: "CURR:PROT {current:float}[,(@{channel:int})]"
+    write: "CURR:PROT {current:float}[,(@{channels:list})]"
+    args:
+      channels:
+        separator: ","
   get_ocp:
-    write: "CURR:PROT?[ (@{channel:int})]"
-    read: float
+    write: "CURR:PROT?[ (@{channels:list})]"
+    args:
+      channels:
+        separator: ","
+    read:
+      split: ","
+      type: float
   set_trigger_current:
     description: "PMX-A only"
     write: "CURR:TRIG {current:float}"
@@ -236,44 +289,83 @@ commands:
 
   # Measurement
   measure_voltage:
-    write: "MEAS:VOLT?[ (@{channel:int})]"
-    read: float
+    write: "MEAS:VOLT?[ (@{channels:list})]"
+    args:
+      channels:
+        separator: ","
+    read:
+      split: ","
+      type: float
   measure_current:
-    write: "MEAS:CURR?[ (@{channel:int})]"
-    read: float
+    write: "MEAS:CURR?[ (@{channels:list})]"
+    args:
+      channels:
+        separator: ","
+    read:
+      split: ","
+      type: float
   measure_all:
     description: "PMX-Multi only"
-    write: "MEAS:ALL?[ (@{channel:int})]"
-    read: "{voltage:float},{current:float}"
+    write: "MEAS:ALL?[ (@{channels:list})]"
+    args:
+      channels:
+        separator: ","
+    read:
+      split: ","
+      type: float
   fetch_voltage:
     description: "PMX-Multi only"
-    write: "FETC:VOLT?[ (@{channel:int})]"
-    read: float
+    write: "FETC:VOLT?[ (@{channels:list})]"
+    args:
+      channels:
+        separator: ","
+    read:
+      split: ","
+      type: float
   fetch_current:
     description: "PMX-Multi only"
-    write: "FETC:CURR?[ (@{channel:int})]"
-    read: float
+    write: "FETC:CURR?[ (@{channels:list})]"
+    args:
+      channels:
+        separator: ","
+    read:
+      split: ","
+      type: float
   fetch_all:
     description: "PMX-Multi only"
-    write: "FETC:ALL?[ (@{channel:int})]"
-    read: "{voltage:float},{current:float}"
+    write: "FETC:ALL?[ (@{channels:list})]"
+    args:
+      channels:
+        separator: ","
+    read:
+      split: ","
+      type: float
 
   # Memory
   save_to_memory:
     write: "MEM:SAVE {slot:option}"
     args:
       slot:
-        options: [A, B, C]
+        options:
+          A: A
+          B: B
+          C: C
   recall_from_memory:
     write: "MEM:REC {slot:option}"
     args:
       slot:
-        options: [A, B, C]
+        options:
+          A: A
+          B: B
+          C: C
   preview_memory:
     write: "MEM:REC:PREV? {slot:option}"
     args:
       slot:
-        options: [A, B, C]
+        options:
+          A: A
+          B: B
+          C: C
     read: string
   set_memory_confirm:
     write: "MEM:REC:CONF {state:bool}"
@@ -293,7 +385,10 @@ commands:
     write: "TRIG:TRAN:SOUR {source:option}"
     args:
       source:
-        options: [BUS, IMM, EXT]
+        options:
+          BUS: BUS
+          IMM: IMM
+          EXT: EXT
   get_trigger_source:
     description: "PMX-A only"
     write: "TRIG:TRAN:SOUR?"
@@ -333,7 +428,9 @@ commands:
     write: "TRAC:MODE {mode:option}"
     args:
       mode:
-        options: [ABS, RAT]
+        options:
+          ABS: ABS
+          RAT: RAT
   get_tracking_mode:
     description: "PMX-Multi only"
     write: "TRAC:MODE?"

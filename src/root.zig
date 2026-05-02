@@ -93,13 +93,13 @@ pub fn preview(
     }
     try log.print("Tasks: {d}\n", .{compiled.tasks.len});
     for (compiled.tasks, 0..) |*task, task_idx| {
-        const task_kind: []const u8 = switch (task.*) {
+        const task_kind: []const u8 = switch (task.kind) {
             .loop => "loop",
             .sequential => "sequential",
             .conditional => "conditional",
         };
         const task_steps = task.steps();
-        try log.print("  Task {d}: {s}, {d} steps\n", .{ task_idx, task_kind, task_steps.len });
+        try log.print("  Task {d} '{s}': {s}, {d} steps\n", .{ task_idx, task.name, task_kind, task_steps.len });
         for (task_steps, 0..) |*step, step_idx| {
             switch (step.action) {
                 .instrument_call => |ic| {
@@ -147,6 +147,9 @@ test "preview output" {
         \\commands:
         \\  set_voltage:
         \\    write: "VOLT {voltage:float},(@{channels:list})"
+        \\    args:
+        \\      channels:
+        \\        separator: ","
     );
     try workspace.writeFile("recipes/r1_set_voltage.yaml",
         \\instruments:
@@ -156,7 +159,8 @@ test "preview output" {
         \\pipeline:
         \\  record: all
         \\tasks:
-        \\  - steps:
+        \\  - name: task
+        \\    steps:
         \\      - call: d1.set_voltage
         \\        args:
         \\          voltage: 5
