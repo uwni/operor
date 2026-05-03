@@ -74,7 +74,7 @@ pub fn preview(
         compiled.pipeline.buffer_size != null or
         compiled.pipeline.warn_usage_percent != null or
         compiled.pipeline.file_path != null or
-        compiled.pipeline.network_host != null)
+        compiled.pipeline.api_port != null)
     {
         try log.print(
             "Pipeline: mode={s} buffer_size={d} warn_usage_percent={d}\n",
@@ -87,8 +87,8 @@ pub fn preview(
         if (compiled.pipeline.file_path) |path| {
             try log.print("  file={s}\n", .{path});
         }
-        if (compiled.pipeline.network_host) |host| {
-            try log.print("  network={s}:{d}\n", .{ host, compiled.pipeline.network_port orelse 0 });
+        if (compiled.pipeline.api_port) |port| {
+            try log.print("  api=:{d}\n", .{port});
         }
     }
     try log.print("Tasks: {d}\n", .{compiled.tasks.len});

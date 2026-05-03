@@ -125,60 +125,6 @@ pub const FileSink = struct {
     }
 };
 
-pub const NetworkSink = struct {
-    io: std.Io,
-    stream: std.Io.net.Stream,
-    frame_columns: []const []const u8,
-
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, frame_columns: []const []const u8) !NetworkSink {
-        const columns_copy = try allocator.dupe([]const u8, frame_columns);
-        errdefer allocator.free(columns_copy);
-
-        const addr = try std.Io.net.IpAddress.resolve(io, host, port);
-        return .{
-            .io = io,
-            .stream = try addr.connect(io, .{ .mode = .stream }),
-            .frame_columns = columns_copy,
-        };
-    }
-
-    pub fn deinit(self: *NetworkSink, allocator: std.mem.Allocator) void {
-        allocator.free(self.frame_columns);
-        self.stream.close(self.io);
-    }
-
-    pub fn writeFrame(self: *NetworkSink, frame: *const frame_mod.Frame) !void {
-        var io_buffer: [2048]u8 = undefined;
-        var stream_writer = self.stream.writer(self.io, &io_buffer);
-        try writeFrameJson(&stream_writer.interface, frame, self.frame_columns);
-        try stream_writer.interface.flush();
-    }
-};
-
-fn writeFrameJson(writer: *std.Io.Writer, frame: *const frame_mod.Frame, columns: []const []const u8) !void {
-    try writer.writeAll("{\"fields\":[");
-
-    var first = true;
-    for (columns, 0..) |name, col| {
-        if (frame.getColumn(col)) |value| {
-            if (!first) try writer.writeByte(',');
-            first = false;
-            try writer.writeAll("{\"name\":");
-            try writeJsonString(writer, name);
-            try writer.writeAll(",\"value\":");
-            try writeJsonString(writer, value);
-            try writer.writeByte('}');
-        }
-    }
-
-    try writer.writeAll("]}");
-    try writer.writeAll("\n");
-}
-
-fn writeJsonString(writer: *std.Io.Writer, value: []const u8) !void {
-    try std.json.Stringify.encodeJsonString(value, .{}, writer);
-}
-
 fn writeCsvField(writer: anytype, field: []const u8) !void {
     try writer.writeByte('"');
     for (field) |byte| {
@@ -289,26 +235,3 @@ test "file sink escapes csv quotes commas and newlines in frame values" {
     try std.testing.expect(std.mem.containsAtLeast(u8, file_data, 1, "\"1,\"\"2\"\"\n3\""));
 }
 
-test "writeFrameJson escapes column names and values without heap allocation" {
-    const gpa = std.testing.allocator;
-
-    const values = try gpa.alloc(?[]u8, 2);
-    values[0] = try gpa.dupe(u8, "1,\"2\"\n3");
-    values[1] = null;
-
-    var frame = frame_mod.Frame{
-        .values = values,
-    };
-    defer frame.deinit(gpa);
-
-    const columns = [_][]const u8{ "channel\"name", "unused" };
-
-    var out: std.Io.Writer.Allocating = .init(gpa);
-    defer out.deinit();
-
-    try writeFrameJson(&out.writer, &frame, &columns);
-    try std.testing.expectEqualStrings(
-        "{\"fields\":[{\"name\":\"channel\\\"name\",\"value\":\"1,\\\"2\\\"\\n3\"}]}\n",
-        out.written(),
-    );
-}

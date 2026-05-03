@@ -1,0 +1,1246 @@
+metadata:
+  version: "1.0.0"
+  description: Keysight N77xx Series (N774x/N775x/N776x/N771x/N773x) SCPI adapter based on Programming Guide Edition 7 (March 2015)
+  author: GitHub Copilot
+
+instrument:
+  manufacturer: "Keysight Technologies"
+  models: ["N7744A", "N7745A", "N7747A", "N7748A", "N7751A", "N7752A", "N7761A", "N7762A", "N7764A", "N7766A", "N7768A", "N7711A", "N7714A", "N7731A", "N7734A", "N7736A", "N7738A"]
+  read_termination: "\n"
+  write_termination: "\n"
+  bool_format:
+    "true": "1"
+    "false": "0"
+
+commands:
+  # IEEE 488.2 common
+  clear_status:
+    description: Clear STB/SESR and error queue (*CLS)
+    write: "*CLS"
+  set_event_status_enable:
+    description: Set standard event status enable mask (*ESE <0..255>)
+    write: "*ESE {value:int}"
+  get_event_status_enable:
+    description: Query standard event status enable mask (*ESE?)
+    write: "*ESE?"
+    read: int
+  get_event_status_register:
+    description: Query and clear standard event status register (*ESR?)
+    write: "*ESR?"
+    read: int
+  get_idn:
+    description: Identification query (*IDN?)
+    write: "*IDN?"
+    read: string
+  operation_complete:
+    description: Mark operation complete event (*OPC)
+    write: "*OPC"
+  get_operation_complete:
+    description: Query operation complete (*OPC?)
+    write: "*OPC?"
+    read: int
+  get_options:
+    description: Query installed options/modules (*OPT?)
+    write: "*OPT?"
+    read: string
+  reset:
+    description: Reset instrument to standard setting (*RST)
+    write: "*RST"
+  get_status_byte:
+    description: Query status byte register (*STB?)
+    write: "*STB?"
+    read: int
+  self_test:
+    description: Start instrument self test (*TST?)
+    write: "*TST?"
+    read: int
+  wait_compat:
+    description: Compatibility wait command (*WAI)
+    write: "*WAI"
+
+  # System
+  get_system_error:
+    description: Read next entry from instrument error queue
+    write: "SYST:ERR?"
+    read: "{code:int},{message:string}"
+  get_scpi_version:
+    description: Query supported SCPI version
+    write: "SYST:VERS?"
+    read: string
+  system_preset:
+    description: Set all parameters to default values
+    write: "SYST:PRES"
+  system_reboot:
+    description: Reboot instrument
+    write: "SYST:REBO"
+  get_help_headers:
+    description: Query supported command headers
+    write: "SYST:HELP:HEAD?"
+    read: string
+  set_system_date:
+    description: >
+      Set date (backward compat — instrument has no internal clock).
+      Format: year,month,day
+    write: "SYST:DATE {date:string}"
+  get_system_date:
+    description: >
+      Query date (backward compat — instrument has no internal clock).
+    write: "SYST:DATE?"
+    read: string
+  set_system_time:
+    description: >
+      Set time (backward compat — instrument has no internal clock).
+      Format: hour,minute,second
+    write: "SYST:TIME {time:string}"
+  get_system_time:
+    description: >
+      Query time (backward compat — instrument has no internal clock).
+    write: "SYST:TIME?"
+    read: string
+  lxi_identify:
+    description: >
+      Flash front-panel LAN LED for physical identification.
+      (:SYSTem:LXI:IDN <boolean>)
+    write: "SYST:LXI:IDN {state:bool}"
+
+  # System communication - GPIB
+  set_gpib_address:
+    description: Set GPIB address (:SYST:COMM:GPIB:ADDR)
+    write: "SYST:COMM:GPIB:ADDR {address:int}"
+  get_gpib_address:
+    description: Query GPIB address (:SYST:COMM:GPIB:ADDR?)
+    write: "SYST:COMM:GPIB:ADDR?"
+    read: int
+
+  # System communication - Ethernet
+  get_mac_address:
+    description: Query Ethernet MAC address
+    write: "SYST:COMM:ETH:MACA?"
+    read: string
+  set_dhcp:
+    description: Enable or disable DHCP
+    write: "SYST:COMM:ETH:DHCP:ENAB {state:bool}"
+  get_dhcp:
+    description: Query DHCP state
+    write: "SYST:COMM:ETH:DHCP:ENAB?"
+    read: bool
+  set_hostname:
+    description: Set host name
+    write: 'SYST:COMM:ETH:HOST "{hostname:string}"'
+  get_hostname:
+    description: Query configured host name
+    write: "SYST:COMM:ETH:HOST?"
+    read: string
+  get_current_hostname:
+    description: Query currently active host name
+    write: "SYST:COMM:ETH:HOST:CURR?"
+    read: string
+  set_ip_address:
+    description: Set static IP address
+    write: 'SYST:COMM:ETH:IPAD "{ip:string}"'
+  get_ip_address:
+    description: Query configured static IP address
+    write: "SYST:COMM:ETH:IPAD?"
+    read: string
+  get_current_ip_address:
+    description: Query currently active IP address
+    write: "SYST:COMM:ETH:IPAD:CURR?"
+    read: string
+  set_subnet_mask:
+    description: Set subnet mask
+    write: 'SYST:COMM:ETH:SMAS "{mask:string}"'
+  get_subnet_mask:
+    description: Query configured subnet mask
+    write: "SYST:COMM:ETH:SMAS?"
+    read: string
+  get_current_subnet_mask:
+    description: Query currently active subnet mask
+    write: "SYST:COMM:ETH:SMAS:CURR?"
+    read: string
+  set_default_gateway:
+    description: Set default gateway
+    write: 'SYST:COMM:ETH:DGAT "{gateway:string}"'
+  get_default_gateway:
+    description: Query configured default gateway
+    write: "SYST:COMM:ETH:DGAT?"
+    read: string
+  get_current_default_gateway:
+    description: Query currently active default gateway
+    write: "SYST:COMM:ETH:DGAT:CURR?"
+    read: string
+  restart_network:
+    description: Restart network interface with new parameters (:SYST:COMM:ETH:RESTart)
+    write: "SYST:COMM:ETH:REST"
+  set_autoip:
+    description: Enable or disable automatic IP addressing (fallback if no DHCP server)
+    write: "SYST:COMM:ETH:AUTO:ENAB {state:bool}"
+  get_autoip:
+    description: Query whether automatic IP addressing is enabled
+    write: "SYST:COMM:ETH:AUTO:ENAB?"
+    read: bool
+  set_domain_name:
+    description: Set domain name (used when DHCP is disabled)
+    write: 'SYST:COMM:ETH:DOM "{name:string}"'
+  get_domain_name:
+    description: Query configured domain name
+    write: "SYST:COMM:ETH:DOM?"
+    read: string
+  get_current_domain_name:
+    description: Query currently active domain name
+    write: "SYST:COMM:ETH:DOM:CURR?"
+    read: string
+  reset_network:
+    description: Reset all LAN parameters to factory defaults (:SYST:COMM:ETH:RESet)
+    write: "SYST:COMM:ETH:RES"
+  save_network:
+    description: Save network interface parameters to non-volatile memory
+    write: "SYST:COMM:ETH:SAV"
+  cancel_network_changes:
+    description: >
+      Undo all network parameter changes since the last save/reboot/restart.
+      (:SYSTem:COMMunicate:ETHernet:CANCel)
+    write: "SYST:COMM:ETH:CANC"
+
+  # Measurement and sensing
+  initiate_slot:
+    description: Start measurement for slot n (:INIT<n>:IMM)
+    write: "INIT{slot:int}[:CHAN{channel:int}]:IMM"
+  set_initiate_continuous_slot:
+    description: Enable/disable continuous measurement for slot n
+    write: "INIT{slot:int}[:CHAN{channel:int}]:CONT {state:bool}"
+  get_initiate_continuous_slot:
+    description: Query continuous measurement state for slot n
+    write: "INIT{slot:int}[:CHAN{channel:int}]:CONT?"
+    read: bool
+  read_power_slot:
+    description: Trigger and read power from slot n
+    write: "READ{slot:int}[:CHAN{channel:int}]:POW?"
+    read: float
+  fetch_power_slot:
+    description: Read latest power from slot n without re-triggering
+    write: "FETC{slot:int}[:CHAN{channel:int}]:POW?"
+    read: float
+  read_power_all:
+    description: Trigger and read power from all available channels
+    write: "READ:POW:ALL?"
+    read:
+      split: ","
+      type: float
+  fetch_power_all:
+    description: Read latest power from all available channels
+    write: "FETC:POW:ALL?"
+    read:
+      split: ","
+      type: float
+  set_wavelength_slot:
+    description: Set sensing wavelength for slot n (meters)
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:WAV {wavelength:float}"
+  get_wavelength_slot:
+    description: Query sensing wavelength for slot n (meters)
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:WAV?"
+    read: float
+  set_averaging_time_slot:
+    description: Set averaging time for slot n (seconds)
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:ATIM {seconds:float}"
+  get_averaging_time_slot:
+    description: Query averaging time for slot n
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:ATIM?"
+    read: float
+  set_power_unit_slot:
+    description: Set absolute power unit (DBM or W) for slot n
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:UNIT {unit:option}"
+    args:
+      unit:
+        options:
+          DBM: DBM
+          W: W
+  get_power_unit_slot:
+    description: Query absolute power unit for slot n
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:UNIT?"
+    read: string
+
+  # Trigger
+  set_trigger_configuration:
+    description: Set trigger configuration
+    write: "TRIG:CONF {mode:string}"
+  get_trigger_configuration:
+    description: Query trigger configuration
+    write: "TRIG:CONF?"
+    read: string
+  set_trigger_input_slot:
+    description: Set trigger input response for slot n
+    write: "TRIG{slot:int}[:CHAN{channel:int}]:INP {value:string}"
+  get_trigger_input_slot:
+    description: Query trigger input response for slot n
+    write: "TRIG{slot:int}[:CHAN{channel:int}]:INP?"
+    read: string
+  set_trigger_output_slot:
+    description: Set trigger output response for slot n
+    write: "TRIG{slot:int}[:CHAN{channel:int}]:OUTP {value:string}"
+  get_trigger_output_slot:
+    description: Query trigger output response for slot n
+    write: "TRIG{slot:int}[:CHAN{channel:int}]:OUTP?"
+    read: string
+  trigger_node:
+    description: Generate hardware trigger; primarily for N7747A/N7748A
+    write: "TRIG {node:option}"
+    args:
+      node:
+        options:
+          NODEA: NODEA
+          NODEB: NODEB
+          "1": "1"
+          "2": "2"
+
+  # Status subsystem
+  status_preset:
+    description: Preset all STATus enable masks to factory defaults
+    write: "STAT:PRES"
+  get_operation_event_summary:
+    description: Query operation event summary register
+    write: "STAT:OPER:EVEN?"
+    read: int
+  get_operation_condition_summary:
+    description: Query operation condition summary register
+    write: "STAT:OPER:COND?"
+    read: int
+  set_operation_enable_summary:
+    description: Set operation enable summary mask
+    write: "STAT:OPER:ENAB {value:int}"
+  get_operation_enable_summary:
+    description: Query operation enable summary mask
+    write: "STAT:OPER:ENAB?"
+    read: int
+  get_questionable_event_summary:
+    description: Query questionable event summary register
+    write: "STAT:QUES:EVEN?"
+    read: int
+  get_questionable_condition_summary:
+    description: Query questionable condition summary register
+    write: "STAT:QUES:COND?"
+    read: int
+  set_questionable_enable_summary:
+    description: Set questionable enable summary mask
+    write: "STAT:QUES:ENAB {value:int}"
+  get_questionable_enable_summary:
+    description: Query questionable enable summary mask
+    write: "STAT:QUES:ENAB?"
+    read: int
+  get_slot_operation_event:
+    description: Query operation event register for slot n
+    write: "STAT{slot:int}:OPER:EVEN?"
+    read: int
+  get_slot_operation_condition:
+    description: Query operation condition register for slot n
+    write: "STAT{slot:int}:OPER:COND?"
+    read: int
+  set_slot_operation_enable:
+    description: Set operation enable mask for slot n
+    write: "STAT{slot:int}:OPER:ENAB {value:int}"
+  get_slot_operation_enable:
+    description: Query operation enable mask for slot n
+    write: "STAT{slot:int}:OPER:ENAB?"
+    read: int
+  get_slot_questionable_event:
+    description: Query questionable event register for slot n
+    write: "STAT{slot:int}:QUES:EVEN?"
+    read: int
+  get_slot_questionable_condition:
+    description: Query questionable condition register for slot n
+    write: "STAT{slot:int}:QUES:COND?"
+    read: int
+  set_slot_questionable_enable:
+    description: Set questionable enable mask for slot n
+    write: "STAT{slot:int}:QUES:ENAB {value:int}"
+  get_slot_questionable_enable:
+    description: Query questionable enable mask for slot n
+    write: "STAT{slot:int}:QUES:ENAB?"
+    read: int
+  set_operation_ntransition:
+    description: Set operational negative transition filter (N775xA/N776xA attenuators)
+    write: "STAT:OPER:NTR {value:int}"
+  get_operation_ntransition:
+    description: Query operational negative transition filter
+    write: "STAT:OPER:NTR?"
+    read: int
+  set_operation_ptransition:
+    description: Set operational positive transition filter (N775xA/N776xA attenuators)
+    write: "STAT:OPER:PTR {value:int}"
+  get_operation_ptransition:
+    description: Query operational positive transition filter
+    write: "STAT:OPER:PTR?"
+    read: int
+  set_questionable_ntransition:
+    description: Set questionable negative transition filter (N775xA/N776xA attenuators)
+    write: "STAT:QUES:NTR {value:int}"
+  get_questionable_ntransition:
+    description: Query questionable negative transition filter
+    write: "STAT:QUES:NTR?"
+    read: int
+  set_questionable_ptransition:
+    description: Set questionable positive transition filter (N775xA/N776xA attenuators)
+    write: "STAT:QUES:PTR {value:int}"
+  get_questionable_ptransition:
+    description: Query questionable positive transition filter
+    write: "STAT:QUES:PTR?"
+    read: int
+
+  # CONFigure:MEASurement:SETTing subtree (Chapter 3 / used by Chapter 4)
+  get_setting_actual:
+    description: >
+      Get index of setting currently in use. >0 = saved/recalled & unchanged,
+      0 = not stored or erased, -1 = changed but not saved.
+      (:CONFigure:MEASurement:SETTing:ACTual?)
+    write: "CONF:MEAS:SETT:ACT?"
+    read: int
+  get_setting_number:
+    description: >
+      Get number of available setting slots in FLASH memory.
+      (:CONFigure:MEASurement:SETTing:NUMBer?)
+    write: "CONF:MEAS:SETT:NUMB?"
+    read: int
+  setting_preset:
+    description: >
+      Reset working-memory setting to defaults; does not erase stored FLASH settings.
+      (:CONFigure:MEASurement:SETTing:PRESet)
+    write: "CONF:MEAS:SETT:PRES"
+  setting_cancel:
+    description: >
+      Discard all changes since the last save or recall.
+      (:CONFigure:MEASurement:SETTing:CANCel)
+    write: "CONF:MEAS:SETT:CANC"
+  setting_recall:
+    description: >
+      Recall a setting from FLASH memory by index.
+      (:CONFigure:MEASurement:SETTing:RECall <index>)
+    write: "CONF:MEAS:SETT:REC {index:int}"
+  setting_save:
+    description: >
+      Save current setting to FLASH memory at given index.
+      (:CONFigure:MEASurement:SETTing:SAVE <index>)
+    write: "CONF:MEAS:SETT:SAV {index:int}"
+  setting_erase:
+    description: >
+      Erase a setting from FLASH memory.
+      (:CONFigure:MEASurement:SETTing:ERASe <index>)
+    write: "CONF:MEAS:SETT:ERAS {index:int}"
+
+  # Root Layer – SLOT commands (Chapter 4)
+  get_slot_opc:
+    description: >
+      Query whether all operations of slot n are complete (1=done, 0=busy).
+      Differs from *OPC? which waits for all slots.
+      (:SLOT[n]:OPC?) N775xA/N776xA attenuators and N771xA TLS.
+    write: "SLOT{slot:int}:OPC?"
+    read: int
+  get_slot_options:
+    description: >
+      Query option string for slot n / head m.
+      (:SLOT[n][:HEAD[m]]:OPTions?)
+    write: "SLOT{slot:int}[:HEAD{head:int}]:OPT?"
+    read: string
+  get_slot_idn:
+    description: >
+      Query identification string for slot n / head m.
+      (:SLOT[n][:HEAD[m]]:IDN?) N774xA MPPM and N775xA/N776xA attenuators.
+    write: "SLOT{slot:int}[:HEAD{head:int}]:IDN?"
+    read: string
+  get_slot_wavelength_response:
+    description: >
+      Query wavelength response table from slot n in binary block format
+      (8 bytes per entry: 4-byte float wavelength + 4-byte float calibration factor).
+      NOTE: response is raw binary; use read: string.
+      (:SLOT[n][:HEAD[m]]:WAVelength:RESPonse?) N774xA/N775xA/N776xA.
+    write: "SLOT{slot:int}[:HEAD{head:int}]:WAV:RESP?"
+    read: string
+  get_slot_wavelength_response_csv:
+    description: >
+      Query wavelength response table from slot n in CSV format
+      (comma-separated wavelength,factor pairs separated by newlines).
+      (:SLOT[n][:HEAD[m]]:WAVelength:RESPonse:CSV?) N774xA/N775xA/N776xA.
+    write: "SLOT{slot:int}[:HEAD{head:int}]:WAV:RESP:CSV?"
+    read: string
+  get_slot_wavelength_response_size:
+    description: >
+      Query number of entries in the wavelength response table of slot n.
+      (:SLOT[n][:HEAD[m]]:WAVelength:RESPonse:SIZE?) N774xA/N775xA/N776xA.
+    write: "SLOT{slot:int}[:HEAD{head:int}]:WAV:RESP:SIZE?"
+    read: int
+
+  # SOURce subtree – OUTPut (N7711A/N7714A/81950A TLS)
+  set_source_output_state:
+    description: >
+      Switch TLS laser on (1) or off (0) for slot n.
+      Equivalent to SOUR[n]:POW:STAT.
+      (:OUTPut[n][:CHANnel][:STATe]) N7711A/N7714A/81950A.
+    write: "OUTP{slot:int}[:CHAN{channel:int}] {state:bool}"
+  get_source_output_state:
+    description: >
+      Query TLS laser state for slot n (0=off, 1=on).
+      (:OUTPut[n][:CHANnel][:STATe]?) N7711A/N7714A/81950A.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]?"
+    read: int
+
+  # SOURce subtree – SOURce:POWer (N7711A/N7714A/81950A TLS)
+  set_source_power:
+    description: >
+      Set laser output power level for TLS slot n (current power unit).
+      (:SOURce[n][:CHANnel]:POWer[:LEVel][:IMMediate][:AMPLitude]) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:POW {power:float}"
+  get_source_power:
+    description: >
+      Query laser output power level for TLS slot n.
+      (:SOURce[n][:CHANnel]:POWer[:LEVel][:IMMediate][:AMPLitude]?) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:POW?"
+    read: float
+  set_source_power_state:
+    description: >
+      Switch TLS laser on (1) or off (0) for slot n via SOURce tree.
+      Equivalent to OUTP[n][:STATe].
+      (:SOURce[n][:CHANnel]:POWer:STATe) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:POW:STAT {state:bool}"
+  get_source_power_state:
+    description: >
+      Query TLS laser state via SOURce tree for slot n (0=off, 1=on).
+      (:SOURce[n][:CHANnel]:POWer:STATe?) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:POW:STAT?"
+    read: int
+  set_source_power_unit:
+    description: >
+      Set power unit for TLS slot n (DBM=0, W=1) via SOURce tree.
+      (:SOURce[n][:CHANnel]:POWer:UNIT) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:POW:UNIT {unit:option}"
+    args:
+      unit:
+        options:
+          DBM: DBM
+          W: W
+  get_source_power_unit:
+    description: >
+      Query power unit for TLS slot n via SOURce tree (0=dBm, 1=W).
+      (:SOURce[n][:CHANnel]:POWer:UNIT?) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:POW:UNIT?"
+    read: int
+
+  # SOURce subtree – SOURce:WAVelength (N7711A/N7714A/81950A TLS)
+  set_source_wavelength:
+    description: >
+      Set laser wavelength for TLS slot n (meters). Only in Auto Mode.
+      (:SOURce[n][:CHANnel]:WAVelength[:CW]) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:WAV {wavelength:float}"
+  get_source_wavelength:
+    description: >
+      Query laser wavelength for TLS slot n (meters).
+      (:SOURce[n][:CHANnel]:WAVelength[:CW]?) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:WAV?"
+    read: float
+  set_source_wavelength_togrid:
+    description: >
+      Set laser wavelength to nearest ITU grid point for TLS slot n (meters).
+      Only available in Grid Mode; changes channel number only.
+      (:SOURce[n][:CHANnel]:WAVelength:TOGRid) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:WAV:TOGR {wavelength:float}"
+  set_source_wavelength_auto:
+    description: >
+      Switch TLS slot n between Auto Mode (1) and Grid Mode (0).
+      Equivalent to SOUR[n]:FREQ:AUTO.
+      (:SOURce[n][:CHANnel]:WAVelength:AUTO) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:WAV:AUTO {state:bool}"
+  get_source_wavelength_auto:
+    description: >
+      Query TLS slot n operation mode (0=Grid Mode, 1=Auto Mode).
+      (:SOURce[n][:CHANnel]:WAVelength:AUTO?) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:WAV:AUTO?"
+    read: int
+
+  # SOURce subtree – SOURce:FREQuency (N7711A/N7714A/81950A TLS)
+  set_source_frequency:
+    description: >
+      Set laser frequency for TLS slot n (Hz). Only in Auto Mode.
+      (:SOURce[n][:CHANnel]:FREQuency) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:FREQ {frequency:float}"
+  get_source_frequency:
+    description: >
+      Query laser frequency for TLS slot n (Hz).
+      (:SOURce[n][:CHANnel]:FREQuency?) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:FREQ?"
+    read: float
+  set_source_frequency_reference:
+    description: >
+      Set frequency grid reference for TLS slot n (Hz). Only in Grid Mode.
+      (:SOURce[n][:CHANnel]:FREQuency:REFerence) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:FREQ:REF {frequency:float}"
+  get_source_frequency_reference:
+    description: >
+      Query frequency grid reference for TLS slot n (Hz).
+      (:SOURce[n][:CHANnel]:FREQuency:REFerence?) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:FREQ:REF?"
+    read: float
+  set_source_frequency_grid:
+    description: >
+      Set frequency grid spacing for TLS slot n (Hz). Only in Grid Mode.
+      (:SOURce[n][:CHANnel]:FREQuency:GRID) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:FREQ:GRID {frequency:float}"
+  get_source_frequency_grid:
+    description: >
+      Query frequency grid spacing for TLS slot n (Hz).
+      (:SOURce[n][:CHANnel]:FREQuency:GRID?) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:FREQ:GRID?"
+    read: float
+  set_source_frequency_channel:
+    description: >
+      Set ITU grid channel number for TLS slot n. Only in Grid Mode.
+      (:SOURce[n][:CHANnel]:FREQuency:CHANnel) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:FREQ:CHAN {grid_channel:int}"
+  get_source_frequency_channel:
+    description: >
+      Query ITU grid channel number for TLS slot n.
+      (:SOURce[n][:CHANnel]:FREQuency:CHANnel?) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:FREQ:CHAN?"
+    read: int
+  set_source_frequency_offset:
+    description: >
+      Set frequency offset for TLS slot n (Hz). Only in Grid Mode.
+      (:SOURce[n][:CHANnel]:FREQuency:OFFSet) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:FREQ:OFFS {frequency:float}"
+  get_source_frequency_offset:
+    description: >
+      Query frequency offset for TLS slot n (Hz).
+      (:SOURce[n][:CHANnel]:FREQuency:OFFSet?) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:FREQ:OFFS?"
+    read: float
+  set_source_frequency_togrid:
+    description: >
+      Set TLS slot n frequency to nearest grid point (Hz). Only in Grid Mode.
+      (:SOURce[n][:CHANnel]:FREQuency:TOGRid) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:FREQ:TOGR {frequency:float}"
+  set_source_frequency_auto:
+    description: >
+      Switch TLS slot n between Auto Mode (1) and Grid Mode (0) via FREQuency tree.
+      Equivalent to SOUR[n]:WAV:AUTO.
+      (:SOURce[n][:CHANnel]:FREQuency:AUTO) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:FREQ:AUTO {state:bool}"
+  get_source_frequency_auto:
+    description: >
+      Query TLS slot n operation mode via FREQuency tree (0=Grid, 1=Auto).
+      (:SOURce[n][:CHANnel]:FREQuency:AUTO?) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:FREQ:AUTO?"
+    read: int
+
+  # SOURce subtree – SOURce:MODUlation (N7711A/N7714A/81950A TLS)
+  set_source_modulation_internal_state:
+    description: >
+      Enable/disable internal SBS-suppression modulation for TLS slot n.
+      SBSControl must also be set.
+      (:SOURce[n][:CHANnel]:MODUlation:INTernal[:STATe]) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:MODU:INT {state:bool}"
+  get_source_modulation_internal_state:
+    description: >
+      Query internal modulation state for TLS slot n (0=off, 1=on).
+      (:SOURce[n][:CHANnel]:MODUlation:INTernal[:STATe]?) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:MODU:INT?"
+    read: int
+  set_source_modulation_internal_sbscontrol:
+    description: >
+      Set internal frequency modulation frequency (SBS control) for TLS slot n (Hz).
+      (:SOURce[n][:CHANnel]:MODUlation:INTernal:SBSControl[:LEVel]) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:MODU:INT:SBSC {frequency:float}"
+  get_source_modulation_internal_sbscontrol:
+    description: >
+      Query internal frequency modulation frequency for TLS slot n (Hz).
+      (:SOURce[n][:CHANnel]:MODUlation:INTernal:SBSControl[:LEVel]?) N7711A/N7714A/81950A.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:MODU:INT:SBSC?"
+    read: float
+  get_source_modulation_internal_rate:
+    description: >
+      Query internal modulation rate for TLS slot n (Hz). Read-only (hardware fixed).
+      (:SOURce[n][:CHANnel]:MODUlation:INTernal:RATE?) N7711A/N7714A only.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:MODU:INT:RATE?"
+    read: float
+  get_source_modulation_internal_waveform:
+    description: >
+      Query internal modulation waveform for TLS slot n (SIN or TRI). Read-only.
+      (:SOURce[n][:CHANnel]:MODUlation:INTernal:WAVeform?) N7711A/N7714A only.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:MODU:INT:WAV?"
+    read: string
+  set_source_modulation_external_state:
+    description: >
+      Enable/disable external amplitude modulation for TLS slot n.
+      (:SOURce[n][:CHANnel]:MODUlation:EXTernal[:STATe]) 81950A only.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:MODU:EXT {state:bool}"
+  get_source_modulation_external_state:
+    description: >
+      Query external amplitude modulation state for TLS slot n (0=off, 1=on).
+      (:SOURce[n][:CHANnel]:MODUlation:EXTernal[:STATe]?) 81950A only.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:MODU:EXT?"
+    read: int
+  set_source_modulation_external_am_level:
+    description: >
+      Set external amplitude modulation level for TLS slot n (%).
+      (:SOURce[n][:CHANnel]:MODUlation:EXTernal:AM[:LEVel]) 81950A only.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:MODU:EXT:AM {level:float}"
+  get_source_modulation_external_am_level:
+    description: >
+      Query external amplitude modulation level for TLS slot n (%).
+      (:SOURce[n][:CHANnel]:MODUlation:EXTernal:AM[:LEVel]?) 81950A only.
+    write: "SOUR{slot:int}[:CHAN{channel:int}]:MODU:EXT:AM?"
+    read: float
+
+  # INPut subtree – attenuators (N775xA/N776xA)
+  set_input_attenuation:
+    description: >
+      Set attenuation factor (dB) for attenuator slot n.
+      (:INPut[n][:CHANnel]:ATTenuation) N775xA/N776xA.
+    write: "INP{slot:int}[:CHAN{channel:int}]:ATT {attenuation:float}"
+  get_input_attenuation:
+    description: >
+      Query attenuation factor (dB) for attenuator slot n.
+      (:INPut[n][:CHANnel]:ATTenuation?) N775xA/N776xA.
+    write: "INP{slot:int}[:CHAN{channel:int}]:ATT?"
+    read: float
+  set_input_attenuation_all:
+    description: >
+      Set attenuation factor (dB) for all attenuators simultaneously.
+      (:INPut[:CHANnel]:ATTenuation:ALL) N775xA/N776xA.
+    write: "INP:ATT:ALL {attenuation:float}"
+  set_input_offset:
+    description: >
+      Set offset factor (dB) for attenuator slot n to compensate external losses.
+      (:INPut[n][:CHANnel]:OFFSet) N775xA/N776xA.
+    write: "INP{slot:int}[:CHAN{channel:int}]:OFFS {offset:float}"
+  get_input_offset:
+    description: >
+      Query offset factor (dB) for attenuator slot n.
+      (:INPut[n][:CHANnel]:OFFSet?) N775xA/N776xA.
+    write: "INP{slot:int}[:CHAN{channel:int}]:OFFS?"
+    read: float
+  set_input_offset_display:
+    description: >
+      Set offset factor so that attenuation display reads zero (normalise display).
+      (:INPut[n][:CHANnel]:OFFSet:DISPlay) N775xA/N776xA.
+    write: "INP{slot:int}[:CHAN{channel:int}]:OFFS:DISP"
+  set_input_offset_powermeter:
+    description: >
+      Set offset factor from difference between external powermeter and attenuator
+      monitor diode. Parameters: slot and channel of the external powermeter.
+      (:INPut[n][:CHANnel]:OFFSet:POWermeter <slot>,<channel>) N775xA/N776xA.
+    write: "INP{slot:int}[:CHAN{channel:int}]:OFFS:POW {ext_slot:int},{ext_channel:int}"
+  set_input_attenuation_speed:
+    description: >
+      Set filter transition speed (dB/s) for attenuator slot n.
+      (:INPut[n][:CHANnel]:ATTenuation:SPEed) N775xA/N776xA.
+    write: "INP{slot:int}[:CHAN{channel:int}]:ATT:SPE {speed:float}"
+  get_input_attenuation_speed:
+    description: >
+      Query filter transition speed (dB/s) for attenuator slot n.
+      (:INPut[n][:CHANnel]:ATTenuation:SPEed?) N775xA/N776xA.
+    write: "INP{slot:int}[:CHAN{channel:int}]:ATT:SPE?"
+    read: float
+  set_input_wavelength:
+    description: >
+      Set operating wavelength (meters) for attenuator slot n.
+      Used for wavelength-dependent filter compensation and offset table lookup.
+      (:INPut[n][:CHANnel]:WAVelength) N775xA/N776xA.
+    write: "INP{slot:int}[:CHAN{channel:int}]:WAV {wavelength:float}"
+  get_input_wavelength:
+    description: >
+      Query operating wavelength (meters) for attenuator slot n.
+      (:INPut[n][:CHANnel]:WAVelength?) N775xA/N776xA.
+    write: "INP{slot:int}[:CHAN{channel:int}]:WAV?"
+    read: float
+  set_input_wavelength_all:
+    description: >
+      Set operating wavelength (meters) for all attenuators simultaneously.
+      (:INPut[:CHANnel]:WAVelength:ALL) N775xA/N776xA.
+    write: "INP:WAV:ALL {wavelength:float}"
+
+  # OUTPut subtree – attenuators (N775xA/N776xA)
+  set_output_apmode:
+    description: >
+      Set APMode for attenuator slot n. Included for 8156A compatibility; has no effect.
+      (:OUTPut[n][:CHANnel]:APMode) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:APMode {state:bool}"
+  get_output_apmode:
+    description: >
+      Query whether user last amended power (1) or attenuation (0) for slot n.
+      (:OUTPut[n][:CHANnel]:APMode?) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:APMode?"
+    read: int
+  set_output_power:
+    description: >
+      Set output power value for attenuator slot n (current power unit).
+      (:OUTPut[n][:CHANnel]:POWer) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW {power:float}"
+  get_output_power:
+    description: >
+      Query output power value for attenuator slot n (current power unit).
+      (:OUTPut[n][:CHANnel]:POWer?) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW?"
+    read: float
+  set_output_power_all:
+    description: >
+      Set output power value for all attenuators simultaneously.
+      (:OUTPut[:CHANnel]:POWer:ALL) N775xA/N776xA.
+    write: "OUTP:POW:ALL {power:float}"
+  set_output_power_offset:
+    description: >
+      Set power offset (dB) for attenuator slot n. Does not affect filter position.
+      (:OUTPut[n][:CHANnel]:POWer:OFFSet) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:OFFS {offset:float}"
+  get_output_power_offset:
+    description: >
+      Query power offset (dB) for attenuator slot n.
+      (:OUTPut[n][:CHANnel]:POWer:OFFSet?) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:OFFS?"
+    read: float
+  set_output_power_offset_powermeter:
+    description: >
+      Calculate and store power offset from difference between external powermeter
+      and attenuator integrated powermeter.
+      Parameters: slot and channel of the external powermeter.
+      (:OUTPut[n][:CHANnel]:POWer:OFFSet:POWermeter <slot>,<channel>) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:OFFS:POW {ext_slot:int},{ext_channel:int}"
+  set_output_power_control:
+    description: >
+      Enable/disable power control mode for attenuator slot n.
+      When enabled, attenuation auto-compensates for input power changes.
+      (:OUTPut[n][:CHANnel]:POWer:CONTRol) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:CONTR {state:bool}"
+  get_output_power_control:
+    description: >
+      Query power control mode state for attenuator slot n (0=off, 1=on).
+      (:OUTPut[n][:CHANnel]:POWer:CONTRol?) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:CONTR?"
+    read: int
+  set_output_power_unit:
+    description: >
+      Set power unit for attenuator slot n (DBM=0, W=1).
+      (:OUTPut[n][:CHANnel]:POWer:UNit) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:UN {unit:option}"
+    args:
+      unit:
+        options:
+          DBM: DBM
+          WATT: WATT
+  get_output_power_unit:
+    description: >
+      Query power unit for attenuator slot n (0=dBm, 1=W).
+      (:OUTPut[n][:CHANnel]:POWer:UNit?) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:POW:UN?"
+    read: int
+  set_output_state:
+    description: >
+      Open (1) or close (0) shutter for attenuator slot n.
+      (:OUTPut[n][:CHANnel][:STATe]) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:STAT {state:bool}"
+  get_output_state:
+    description: >
+      Query shutter state for attenuator slot n (0=closed, 1=open).
+      (:OUTPut[n][:CHANnel][:STATe]?) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:STAT?"
+    read: int
+  set_output_state_all:
+    description: >
+      Open (1) or close (0) shutters for all attenuators simultaneously.
+      (:OUTPut[:CHANnel][:STATe]:ALL) N775xA/N776xA.
+    write: "OUTP:STAT:ALL {state:bool}"
+  set_output_state_apoweron:
+    description: >
+      Set shutter state at power-on for attenuator slot n (0=closed, 1=open).
+      Must be saved with CONF:MEAS:SETT:SAV before taking effect.
+      (:OUTPut[n][:CHANnel]:STATe:APOWeron) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:APOW {state:bool}"
+  get_output_state_apoweron:
+    description: >
+      Query shutter state at power-on for attenuator slot n (0=closed, 1=open).
+      (:OUTPut[n][:CHANnel]:STATe:APOWeron?) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:APOW?"
+    read: int
+  set_output_atime:
+    description: >
+      Set powermeter averaging time for attenuator slot n (seconds).
+      (:OUTPut[n][:CHANnel]:ATIMe) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:ATIM {seconds:float}"
+  get_output_atime:
+    description: >
+      Query powermeter averaging time for attenuator slot n (seconds).
+      (:OUTPut[n][:CHANnel]:ATIMe?) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:ATIM?"
+    read: float
+  output_correction_zero:
+    description: >
+      Zero electrical offsets of attenuator integrated powermeter for slot n.
+      All attenuators are stopped and shutters closed during zeroing.
+      (:OUTPut[n][:CHANnel]:CORRection:COLLection:ZERO) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:CORR:COLL:ZERO"
+  get_output_correction_zero:
+    description: >
+      Query status of last zero operation for attenuator slot n (0=OK).
+      (:OUTPut[n][:CHANnel]:CORRection:COLLection:ZERO?) N775xA/N776xA.
+    write: "OUTP{slot:int}[:CHAN{channel:int}]:CORR:COLL:ZERO?"
+    read: int
+  output_correction_zero_all:
+    description: >
+      Zero all powermeter channels in the instrument.
+      (:OUTPut[:CHANnel]:CORRection:COLLection:ZERO:ALL) N775xA/N776xA.
+    write: "OUTP:CORR:COLL:ZERO:ALL"
+  get_output_correction_zero_all:
+    description: >
+      Query status of last zero-all operation; returns hex integer where each digit
+      represents one channel (0=OK, other=error code).
+      (:OUTPut[:CHANnel]:CORRection:COLLection:ZERO:ALL?) N775xA/N776xA.
+    write: "OUTP:CHAN:CORR:COLL:ZERO:ALL?"
+    read: string
+
+  # CONFigure:OFFSet:WAVelength table (N775xA/N776xA attenuators)
+  set_configure_offset_wavelength_state:
+    description: >
+      Enable/disable use of wavelength-dependent offset table for attenuator slot n.
+      (:CONFigure[n][:CHANnel]:OFFSet:WAVelength:STATe) N775xA/N776xA.
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:STAT {state:bool}"
+  get_configure_offset_wavelength_state:
+    description: >
+      Query whether wavelength-dependent offset table is enabled for attenuator slot n.
+      (:CONFigure[n][:CHANnel]:OFFSet:WAVelength:STATe?) N775xA/N776xA.
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:STAT?"
+    read: int
+  set_configure_offset_wavelength_value:
+    description: >
+      Add or overwrite a (wavelength, offset) pair in the offset table for attenuator slot n.
+      NOTE: table state must be OFF to edit. Use TOREF keyword to auto-calculate from
+      an external powermeter (set reference first with CONF[n]:OFFS:WAV:REF).
+      (:CONFigure[n][:CHANnel]:OFFSet:WAVelength:VALue <lambda_m>,<offset_dB>|TOREF) N775xA/N776xA.
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:VAL {wavelength:float},{offset:float}"
+  set_configure_offset_wavelength_reference:
+    description: >
+      Set slot and channel of external powermeter used for TOREF auto-offset calculation.
+      (:CONFigure[n][:CHANnel]:OFFSet:WAVelength:REFerence <slot>,<channel>) N775xA/N776xA.
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:REF {ext_slot:int},{ext_channel:int}"
+  get_configure_offset_wavelength_reference:
+    description: >
+      Query slot and channel of external powermeter used for TOREF.
+      (:CONFigure[n][:CHANnel]:OFFSet:WAVelength:REFerence?) N775xA/N776xA.
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:REF?"
+    read: string
+  get_configure_offset_wavelength_table:
+    description: >
+      Query complete offset table for attenuator slot n as binary block
+      (12 bytes per entry: 8-byte double wavelength + 4-byte float offset).
+      NOTE: returns raw binary; use read: string.
+      (:CONFigure[n][:CHANnel]:OFFSet:WAVelength:TABle?) N775xA/N776xA.
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:TAB?"
+    read: string
+  get_configure_offset_wavelength_table_size:
+    description: >
+      Query number of entries in the offset table for attenuator slot n.
+      (:CONFigure[n][:CHANnel]:OFFSet:WAVelength:TABle:SIZE?) N775xA/N776xA.
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:TAB:SIZE?"
+    read: int
+  configure_offset_wavelength_value_delete_all:
+    description: >
+      Delete all (wavelength, offset) pairs from the offset table for attenuator slot n.
+      CAUTION: this clears the entire table.
+      (:CONFigure[n][:CHANnel]:OFFSet:WAVelength:VALue:DELete:ALL) N775xA/N776xA.
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:VAL:DEL:ALL"
+  # Backward-compatibility no-op queries (parameters: none, response: none — included for compat)
+  get_offset_wavelength_value_wav_compat:
+    description: >
+      Backward compatibility no-op query (parameters: none, response: none).
+      (:CONFigure[n][:CHANnel]:OFFSet:WAVelength:VALue:WAVelength?) N775xA/N776xA.
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:VAL:WAV?"
+    read: string
+  get_offset_wavelength_value_offs_compat:
+    description: >
+      Backward compatibility no-op query (parameters: none, response: none).
+      (:CONFigure[n][:CHANnel]:OFFSet:WAVelength:VALue:OFFSet?) N775xA/N776xA.
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:VAL:OFFS?"
+    read: string
+  get_offset_wavelength_value_pair_compat:
+    description: >
+      Backward compatibility no-op query (parameters: none, response: none).
+      (:CONFigure[n][:CHANnel]:OFFSet:WAVelength:VALue:PAIR?) N775xA/N776xA.
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:VAL:PAIR?"
+    read: string
+  delete_offset_wavelength_value_compat:
+    description: >
+      Backward compatibility no-op command. Use delete_offset_wavelength_all instead.
+      (:CONFigure[n][:CHANnel]:OFFSet:WAVelength:VALue:DELete) N775xA/N776xA.
+    write: "CONF{slot:int}[:CHAN{channel:int}]:OFFS:WAV:VAL:DEL"
+
+  # FETCh subtree (additional – Chapter 4)
+  fetch_power_all_csv:
+    description: >
+      Read all current power values (Watts) as comma-separated string without re-triggering.
+      (:FETCh[n][:CHANnel][:SCALar]:POWer[:DC]:ALL:CSV?) MPPM/Attenuator.
+    write: "FETC:POW:ALL:CSV?"
+    read: string
+  fetch_power_all_config:
+    description: >
+      Return slot/channel mapping for all power meter channels as binary block
+      (2-byte unsigned int pairs: slot, channel). NOTE: raw binary; use read: string.
+      (:FETCh[n][:CHANnel]:POWer:ALL:CONFig?) MPPM/Attenuator.
+    write: "FETC:POW:ALL:CONF?"
+    read: string
+
+  # READ subtree (additional – Chapter 4)
+  read_power_all_csv:
+    description: >
+      Trigger and read all power values (Watts) as comma-separated string.
+      (:READ[n][:CHANnel][:SCALar]:POWer[:DC]:ALL:CSV?) N7747A/N7748A.
+    write: "READ:POW:ALL:CSV?"
+    read: string
+  read_power_all_config:
+    description: >
+      Return slot/channel mapping for all power meter channels as binary block
+      (2-byte unsigned int pairs: slot, channel). NOTE: raw binary; use read: string.
+      (:READ[n][:CHANnel]:POWer:ALL:CONFig?) MPPM/Attenuator.
+    write: "READ:POW:ALL:CONF?"
+    read: string
+
+  # ROUTe subtree – optical switches (N773xA)
+  set_route_channel:
+    description: >
+      Set channel route for switch slot n / switch channel m.
+      channel_list format: A..Z,1..n (e.g. "A,2").
+      NOTE: expression limitation – channel_list is passed as a string argument.
+      (:ROUTe[n][:CHANnel[m]] <channel_list>) All switch modules.
+    write: "ROUT{slot:int}:CHAN{switch:int} {channel_list:string}"
+  get_route_channel:
+    description: >
+      Query current route for switch slot n / switch channel m.
+      Response: "A,1" for simple 1xN; "A,2;B,1" for 2x2 crossover.
+      (:ROUTe[n][:CHANnel[m]]?) All switch modules.
+    write: "ROUT{slot:int}:CHAN{switch:int}?"
+    read: string
+  get_route_config:
+    description: >
+      Query switch port configuration for slot n / channel m.
+      Response format: "<first_left>,<last_left>;<min_right>,<max_right>" e.g. "A,B;1,2".
+      (:ROUTe[n][:CHANnel[m]]:CONFig?) All switch modules.
+    write: "ROUT{slot:int}:CHAN{switch:int}:CONF?"
+    read: string
+  get_route_config_routes:
+    description: >
+      Query allowed switch state combinations for slot n / channel m.
+      Response: dot-separated list of semicolon-separated port pairs.
+      (:ROUTe[n][:CHANnel[m]]:CONFig:ROUTe?) All switch modules.
+    write: "ROUT{slot:int}:CHAN{switch:int}:CONF:ROUT?"
+    read: string
+
+  # SENSe:CORRection subtree (Chapter 4)
+  set_sense_correction_loss:
+    description: >
+      Enter calibration factor (dB) for power meter slot n.
+      (:SENSe[n][:CHANnel]:CORRection[:LOSS][:INPut][:MAGNitude]) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:CORR {calibration:float}"
+  get_sense_correction_loss:
+    description: >
+      Query calibration factor (dB) for power meter slot n.
+      (:SENSe[n][:CHANnel]:CORRection[:LOSS][:INPut][:MAGNitude]?) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:CORR?"
+    read: float
+  sense_correction_zero:
+    description: >
+      Zero electrical offsets for power meter slot n.
+      (:SENSe[n][:CHANnel]:CORRection:COLLect:ZERO) MPPM/Attenuator.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:CORR:COLL:ZERO"
+  get_sense_correction_zero:
+    description: >
+      Query status of last zero operation for power meter slot n (0=OK).
+      (:SENSe[n][:CHANnel]:CORRection:COLLect:ZERO?) MPPM/Attenuator.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:CORR:COLL:ZERO?"
+    read: int
+  sense_correction_zero_all:
+    description: >
+      Zero electrical offsets for all installed power meters.
+      (:SENSe[n][:CHANnel]:CORRection:COLLect:ZERO:ALL) MPPM/Attenuator.
+    write: "SENS:CHAN:CORR:COLL:ZERO:ALL"
+  get_sense_correction_zero_all:
+    description: >
+      Query status of last zero-all operation; returns hex integer where each digit
+      represents one channel (0=OK, other=error code).
+      (:SENSe[n][:CHANnel]:CORRection:COLLect:ZERO:ALL?) MPPM/Attenuator.
+    write: "SENS:CHAN:CORR:COLL:ZERO:ALL?"
+    read: string
+
+  # SENSe:FUNCtion subtree (Chapter 4)
+  set_sense_function_logging_params:
+    description: >
+      Set number of data points and averaging time for logging acquisition.
+      NOTE: expression limitation – two arguments must be sent as one command.
+      Pass averaging time as seconds (float).
+      (:SENSe[n][:CHANnel]:FUNCtion:PARameter:LOGGing <points>,<avg_time>) N774xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:PAR:LOGG {points:int},{avg_time:float}"
+  get_sense_function_logging_params:
+    description: >
+      Query data points and averaging time for logging acquisition.
+      Response: "<points>,<avg_time_seconds>".
+      (:SENSe[n][:CHANnel]:FUNCtion:PARameter:LOGGing?) N774xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:PAR:LOGG?"
+    read: string
+  set_sense_function_minmax_params:
+    description: >
+      Set MinMax mode and data points for MinMax acquisition.
+      mode: CONTinous, WINDow, or REFResh.
+      NOTE: expression limitation – mode and data points sent together as string.
+      (:SENSe[n][:CHANnel]:FUNCtion:PARameter:MINMax <mode>,<points>) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:PAR:MINM {mode:string},{points:int}"
+  get_sense_function_minmax_params:
+    description: >
+      Query MinMax mode and data points.
+      Response: "<CONT|WIND|REFR>,<points>".
+      (:SENSe[n][:CHANnel]:FUNCtion:PARameter:MINMax?) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:PAR:MINM?"
+    read: string
+  set_sense_function_stability_params:
+    description: >
+      Set total time, period time, and averaging time for stability acquisition (seconds).
+      NOTE: expression limitation – three float args sent as formatted string.
+      (:SENSe[n][:CHANnel]:FUNCtion:PARameter:STABility <total>,<period>,<avg>) N774xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:PAR:STAB {total_time:float},{period_time:float},{avg_time:float}"
+  get_sense_function_stability_params:
+    description: >
+      Query total time, period time, and averaging time for stability acquisition.
+      Response: "<total_s>,<period_s>,<avg_s>".
+      (:SENSe[n][:CHANnel]:FUNCtion:PARameter:STABility?) N774xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:PAR:STAB?"
+    read: string
+  set_sense_function_loop:
+    description: >
+      Set number of logging loops for slot n (0=endless, 1=default, n=n loops).
+      (:SENSe[n][:CHANnel]:FUNCtion:LOOP) N774xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:LOOP {loops:int}"
+  get_sense_function_loop:
+    description: >
+      Query number of logging loops for slot n.
+      (:SENSe[n][:CHANnel]:FUNCtion:LOOP?) N774xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:LOOP?"
+    read: int
+  get_sense_function_result_index:
+    description: >
+      Query number of already-completed logging loops for slot n.
+      (:SENSe[n][:CHANnel]:FUNCtion:RESult:INDex?) N774xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:RES:INDEX?"
+    read: int
+  get_sense_function_result:
+    description: >
+      Return data array from last acquisition function for slot n as binary block.
+      Logging/Stability: 4-byte float per sample. MinMax: min,max,current floats.
+      NOTE: raw binary; use read: string.
+      (:SENSe[n][:CHANnel]:FUNCtion:RESult?) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:RES?"
+    read: string
+  get_sense_function_result_bufa:
+    description: >
+      Return data array from Buffer A of last logging/stability acquisition for slot n.
+      NOTE: raw binary; use read: string.
+      (:SENSe[n][:CHANnel]:FUNCtion:RESult:BUFA?) N774xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:RES:BUFA?"
+    read: string
+  get_sense_function_result_bufb:
+    description: >
+      Return data array from Buffer B of last logging/stability acquisition for slot n.
+      NOTE: raw binary; use read: string.
+      (:SENSe[n][:CHANnel]:FUNCtion:RESult:BUFB?) N774xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:RES:BUFB?"
+    read: string
+  set_sense_function_state:
+    description: >
+      Start or stop a data acquisition function for slot n.
+      func: LOGGing, STABility, or MINMax. action: STARt or STOP.
+      NOTE: expression limitation – func and action sent as two string arguments.
+      (:SENSe[n][:CHANnel]:FUNCtion:STATe <func>,<action>) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:STAT {func:string},{action:string}"
+  get_sense_function_state:
+    description: >
+      Query current function mode and status for slot n.
+      Response: "NONE|LOGGING_STABILITY|MINMAX,PROGRESS|COMPLETE".
+      (:SENSe[n][:CHANnel]:FUNCtion:STATe?) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:FUNC:STAT?"
+    read: string
+
+  # SENSe:POWer subtree (additional – Chapter 4)
+  set_sense_power_range_auto:
+    description: >
+      Enable/disable automatic power ranging for power meter slot n.
+      (:SENSe[n][:CHANnel]:POWer:RANGe:AUTO) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:RANG:AUTO {state:bool}"
+  get_sense_power_range_auto:
+    description: >
+      Query automatic power ranging state for power meter slot n (0=off, 1=on).
+      (:SENSe[n][:CHANnel]:POWer:RANGe:AUTO?) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:RANG:AUTO?"
+    read: int
+  set_sense_power_range:
+    description: >
+      Set power range for power meter slot n (dBm, rounded to nearest 10 dBm).
+      (:SENSe[n][:CHANnel]:POWer:RANGe[:UPPer]) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:RANG {range_dbm:float}"
+  get_sense_power_range:
+    description: >
+      Query power range for power meter slot n (dBm).
+      (:SENSe[n][:CHANnel]:POWer:RANGe[:UPPer]?) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:RANG?"
+    read: float
+  set_sense_power_gain_auto:
+    description: >
+      Set Auto Gain for power meter slot n (0=off/best transient, 1=on/best dynamic).
+      Works only for averaging times >10 s; disabled automatically otherwise.
+      (:SENSe[n][:CHANnel]:POWer:GAIN:AUTO) N774xA (excl. N7747A/N7748A) / N775xA.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:GAIN:AUTO {state:int}"
+  get_sense_power_gain_auto:
+    description: >
+      Query Auto Gain state for power meter slot n (0=off, 1=on).
+      (:SENSe[n][:CHANnel]:POWer:GAIN:AUTO?) N774xA (excl. N7747A/N7748A) / N775xA.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:GAIN:AUTO?"
+    read: int
+  set_sense_power_reference:
+    description: >
+      Set sensor reference value for power meter slot n.
+      Use "TOMOD,-40DB" (relative to another slot) or "TOREF,1e-6" (absolute W/dBm).
+      NOTE: expression limitation – mode and value must be sent as a pre-formatted string.
+      (:SENSe[n][:CHANnel]:POWer:REFerence TOMODule|TOREF,<value><unit>) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF {ref_string:string}"
+  get_sense_power_reference:
+    description: >
+      Query sensor reference value for power meter slot n.
+      Pass mode as argument: TOMOD or TOREF.
+      (:SENSe[n][:CHANnel]:POWer:REFerence? TOMODule|TOREF) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF? {mode:string}"
+    read: float
+  set_sense_power_reference_display:
+    description: >
+      Set current input power as reference value for power meter slot n.
+      (:SENSe[n][:CHANnel]:POWer:REFerence:DISPlay) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF:DISP"
+  set_sense_power_reference_state:
+    description: >
+      Set measurement to absolute (0) or relative/dB (1) mode for power meter slot n.
+      (:SENSe[n][:CHANnel]:POWer:REFerence:STATe) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF:STAT {state:bool}"
+  get_sense_power_reference_state:
+    description: >
+      Query measurement mode for power meter slot n (0=absolute, 1=relative/dB).
+      (:SENSe[n][:CHANnel]:POWer:REFerence:STATe?) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF:STAT?"
+    read: int
+  set_sense_power_reference_state_ratio:
+    description: >
+      Select reference for relative measurement on power meter slot n.
+      Pass "<other_slot>,<channel>" or "TOREF,1" for absolute reference.
+      NOTE: expression limitation – params sent as pre-formatted string.
+      (:SENSe[n][:CHANnel]:POWer:REFerence:STATe:RATio <slot|255|TOREF>,<channel>) N774xA/N775xA.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF:STAT:RAT {ratio_string:string}"
+  get_sense_power_reference_state_ratio:
+    description: >
+      Query reference slot and channel for relative measurement on power meter slot n.
+      Response: "<slot_or_255>,<channel>".
+      (:SENSe[n][:CHANnel]:POWer:REFerence:STATe:RATio?) N774xA/N775xA MPPM.
+    write: "SENS{slot:int}[:CHAN{channel:int}]:POW:REF:STAT:RAT?"
+    read: string
+  get_sense_power_unit_all_csv:
+    description: >
+      Query power unit for all ports as comma-separated integers (0=dBm, 1=W).
+      (:SENSe[:CHANnel]:POWer:UNIT:ALL:CSV?) All instruments.
+    write: "SENS:POW:UNIT:ALL:CSV?"
+    read: string

@@ -446,10 +446,8 @@ pub const PipelineConfig = struct {
     mode: ?PipelineMode = null,
     /// Optional CSV file sink written by the consumer thread.
     file_path: ?[]const u8 = null,
-    /// Optional TCP sink host written by the consumer thread.
-    network_host: ?[]const u8 = null,
-    /// Optional TCP sink port written by the consumer thread.
-    network_port: ?u16 = null,
+    /// Optional port for the HTTP/WebSocket API server.
+    api_port: ?u16 = null,
     /// Declares which runtime variables to record as frame columns.
     /// Use `"all"` to record every recipe var plus built-ins, or list names explicitly.
     record: ?RecordConfig = null,
@@ -474,8 +472,7 @@ pub const PipelineConfig = struct {
             .warn_usage_percent = cfg.warn_usage_percent,
             .mode = cfg.mode,
             .file_path = if (cfg.file_path) |path| try allocator.dupe(u8, path) else null,
-            .network_host = if (cfg.network_host) |host| try allocator.dupe(u8, host) else null,
-            .network_port = cfg.network_port,
+            .api_port = cfg.api_port,
             .record = record_copy,
         };
     }

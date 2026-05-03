@@ -140,10 +140,7 @@ pub fn validatePipelineConfig(cfg: *const recipe_ir.PipelineConfig, diag: diagno
     if (cfg.warn_usage_percent) |percent| {
         if (percent == 0 or percent > 100) has_error = true;
     }
-    const has_network_host = cfg.network_host != null;
-    const has_network_port = cfg.network_port != null;
-    if (has_network_host != has_network_port) has_error = true;
-    if (cfg.network_port) |port| {
+    if (cfg.api_port) |port| {
         if (port == 0) has_error = true;
     }
     if (!has_error) return;

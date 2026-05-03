@@ -3,6 +3,7 @@ const tty = @import("../../tty.zig");
 const config_mod = @import("config.zig");
 const sinks = @import("sinks.zig");
 const frame_mod = @import("frame.zig");
+const api_server_mod = @import("../../api/server.zig");
 
 const idle_sleep_ns: u64 = 100 * std.time.ns_per_us;
 const min_log_queue_capacity: usize = 256;
@@ -38,7 +39,7 @@ pub const Runtime = struct {
     log_thread: ?std.Thread = null,
     worker_error: ?anyerror = null,
     file_sink: ?sinks.FileSink = null,
-    network_sink: ?sinks.NetworkSink = null,
+    api_server: ?*api_server_mod.ApiServer = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -67,10 +68,18 @@ pub const Runtime = struct {
         }
         errdefer if (runtime.file_sink) |*sink| sink.deinit();
 
-        if (config.network_host) |host| {
-            runtime.network_sink = try sinks.NetworkSink.init(allocator, io, host, config.network_port.?, frame_columns);
+        if (config.api_port) |port| {
+            runtime.api_server = try api_server_mod.ApiServer.init(
+                allocator,
+                io,
+                port,
+                frame_columns,
+                config.buffer_size,
+            );
         }
-        errdefer if (runtime.network_sink) |*sink| sink.deinit();
+        errdefer if (runtime.api_server) |srv| {
+            srv.deinit();
+        };
 
         return runtime;
     }
@@ -78,13 +87,17 @@ pub const Runtime = struct {
     pub fn deinit(self: *Runtime) void {
         if (self.consumer_thread != null) unreachable;
         if (self.log_thread != null) unreachable;
-        if (self.network_sink) |*sink| sink.deinit(self.allocator);
+        if (self.api_server) |srv| {
+            srv.stop();
+            srv.deinit();
+        }
         if (self.file_sink) |*sink| sink.deinit();
         self.frame_queue.deinit();
         self.log_queue.deinit();
     }
 
     pub fn start(self: *Runtime) !void {
+        if (self.api_server) |srv| try srv.start();
         self.consumer_thread = try std.Thread.spawn(.{}, workerMain, .{self});
         errdefer {
             self.frame_producer_done.store(true, .release);
@@ -122,6 +135,8 @@ pub const Runtime = struct {
             thread.join();
             self.consumer_thread = null;
         }
+        // Consumer is done; let the broadcaster drain remaining frames and exit.
+        if (self.api_server) |srv| srv.hub.stopAndJoin();
     }
 
     pub fn finishLogs(self: *Runtime) void {
@@ -233,7 +248,7 @@ pub const Runtime = struct {
 
     fn processFrame(self: *Runtime, frame: *const frame_mod.Frame) !void {
         try self.writeFileSink(frame);
-        try self.writeNetworkSink(frame);
+        if (self.api_server) |srv| srv.hub.push(frame);
     }
 
     fn writeFileSink(self: *Runtime, frame: *const frame_mod.Frame) !void {
@@ -245,15 +260,6 @@ pub const Runtime = struct {
         }
     }
 
-    fn writeNetworkSink(self: *Runtime, frame: *const frame_mod.Frame) !void {
-        if (self.network_sink) |*sink| {
-            sink.writeFrame(frame) catch |err| {
-                sink.deinit(self.allocator);
-                self.network_sink = null;
-                self.asyncLog().print(warn_tag ++ " network sink disabled: {s}\n", .{@errorName(err)});
-            };
-        }
-    }
 };
 
 fn logQueueCapacity(frame_buffer_size: usize) usize {

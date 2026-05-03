@@ -8,8 +8,7 @@ pub const ResolvedConfig = struct {
     buffer_size: usize,
     warn_usage_percent: u8,
     file_path: ?[]const u8 = null,
-    network_host: ?[]const u8 = null,
-    network_port: ?u16 = null,
+    api_port: ?u16 = null,
 };
 
 pub fn resolveConfig(recipe_pipeline: *const recipe_compiled.PipelineConfig, opts: *const session.ExecOptions) ResolvedConfig {
@@ -21,8 +20,7 @@ pub fn resolveConfig(recipe_pipeline: *const recipe_compiled.PipelineConfig, opt
         .buffer_size = normalizeBufferSize(requested_buffer_size),
         .warn_usage_percent = normalizeWarnUsagePercent(opts.pipeline_warn_usage_percent orelse recipe_pipeline.warn_usage_percent orelse 85),
         .file_path = recipe_pipeline.file_path,
-        .network_host = recipe_pipeline.network_host,
-        .network_port = recipe_pipeline.network_port,
+        .api_port = recipe_pipeline.api_port,
     };
 }
 

@@ -30,6 +30,12 @@ pub fn build(b: *std.Build) !void {
 
     operor_mod.addImport("serde", serde_dep.module("serde"));
 
+    const ws_dep = b.dependency("websocket", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    operor_mod.addImport("websocket", ws_dep.module("websocket"));
+
     const semver = std.SemanticVersion.parse(pkg.version) catch unreachable;
 
     // Create the executable
