@@ -3,12 +3,17 @@ const session = @import("../session.zig");
 const ring_buffer_mod = @import("ring_buffer.zig");
 const frame_mod = @import("frame.zig");
 
-/// Queue message that owns its heap-allocated text buffer.
-pub const LogMessage = struct {
-    text: []u8 = &.{},
+/// Queue message: either a regular log line or a live echo-area snapshot.
+pub const LogMessage = union(enum) {
+    /// Regular log text written directly to the output stream.
+    log: []u8,
+    /// Pre-rendered echo area; the log worker replaces the live display with this.
+    echo: []u8,
 
     pub fn deinit(self: *LogMessage, allocator: std.mem.Allocator) void {
-        if (self.text.len > 0) allocator.free(self.text);
+        switch (self.*) {
+            inline else => |bytes| if (bytes.len > 0) allocator.free(bytes),
+        }
     }
 };
 
@@ -35,8 +40,26 @@ pub const AsyncLog = struct {
         self.enqueueOwned(owned);
     }
 
+    pub fn echoAll(self: AsyncLog, bytes: []const u8) void {
+        const owned = self.allocator.dupe(u8, bytes) catch {
+            self.recordDrop();
+            return;
+        };
+        self.enqueueEchoOwned(owned);
+    }
+
     fn enqueueOwned(self: AsyncLog, owned: []u8) void {
-        var message = LogMessage{ .text = owned };
+        var message = LogMessage{ .log = owned };
+        self.queue.push(&message) catch |err| switch (err) {
+            error.BufferOverflow => {
+                message.deinit(self.allocator);
+                return;
+            },
+        };
+    }
+
+    fn enqueueEchoOwned(self: AsyncLog, owned: []u8) void {
+        var message = LogMessage{ .echo = owned };
         self.queue.push(&message) catch |err| switch (err) {
             error.BufferOverflow => {
                 message.deinit(self.allocator);
@@ -234,4 +257,3 @@ test "file sink escapes csv quotes commas and newlines in frame values" {
 
     try std.testing.expect(std.mem.containsAtLeast(u8, file_data, 1, "\"1,\"\"2\"\"\n3\""));
 }
-

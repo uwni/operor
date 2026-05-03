@@ -30,6 +30,7 @@ pub const Runtime = struct {
     io: std.Io,
     config: config_mod.ResolvedConfig,
     log_writer: *std.Io.Writer,
+    log_is_tty: bool,
     log_queue: sinks.LogQueue,
     log_drop_count: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     frame_queue: frame_mod.FrameQueue,
@@ -47,6 +48,7 @@ pub const Runtime = struct {
         config: config_mod.ResolvedConfig,
         frame_columns: []const []const u8,
         log_writer: *std.Io.Writer,
+        log_is_tty: bool,
     ) !Runtime {
         var log_queue = try sinks.LogQueue.init(allocator, logQueueCapacity(config.buffer_size));
         errdefer log_queue.deinit();
@@ -59,6 +61,7 @@ pub const Runtime = struct {
             .io = io,
             .config = config,
             .log_writer = log_writer,
+            .log_is_tty = log_is_tty,
             .log_queue = log_queue,
             .frame_queue = frame_queue,
         };
@@ -228,11 +231,43 @@ pub const Runtime = struct {
     }
 
     fn runLogWorker(self: *Runtime) !void {
-        var message: sinks.LogMessage = .{};
+        var message: sinks.LogMessage = .{ .log = &.{} };
+        // Heap-allocated copy of the last echo area text, or empty if none.
+        var last_echo: []u8 = &.{};
+        // Number of newlines in last_echo (= number of lines drawn on screen).
+        var echo_lines: usize = 0;
+        defer if (last_echo.len > 0) self.allocator.free(last_echo);
+        const is_tty = self.log_is_tty;
+
         while (true) {
             if (self.log_queue.pop(&message)) {
                 defer message.deinit(self.allocator);
-                try self.log_writer.writeAll(message.text);
+                switch (message) {
+                    .log => |bytes| {
+                        // Erase live echo area so the log line appears above it.
+                        if (is_tty and echo_lines > 0) {
+                            try eraseEchoArea(self.log_writer, echo_lines);
+                            echo_lines = 0;
+                        }
+                        try self.log_writer.writeAll(bytes);
+                        // Redraw echo below the new log line.
+                        if (is_tty and last_echo.len > 0) {
+                            try self.log_writer.writeAll(last_echo);
+                            echo_lines = countNewlines(last_echo);
+                        }
+                    },
+                    .echo => |bytes| {
+                        if (is_tty) {
+                            if (echo_lines > 0) try eraseEchoArea(self.log_writer, echo_lines);
+                            // Dupe before freeing old so OOM leaves last_echo intact.
+                            const new_echo = try self.allocator.dupe(u8, bytes);
+                            if (last_echo.len > 0) self.allocator.free(last_echo);
+                            last_echo = new_echo;
+                            try self.log_writer.writeAll(last_echo);
+                            echo_lines = countNewlines(last_echo);
+                        }
+                    },
+                }
                 continue;
             }
 
@@ -240,9 +275,17 @@ pub const Runtime = struct {
             self.io.sleep(.fromNanoseconds(idle_sleep_ns), .awake) catch break;
         }
 
+        // Erase the live echo area before draining final log messages.
+        if (is_tty and echo_lines > 0) {
+            try eraseEchoArea(self.log_writer, echo_lines);
+        }
+
         while (self.log_queue.pop(&message)) {
             defer message.deinit(self.allocator);
-            try self.log_writer.writeAll(message.text);
+            switch (message) {
+                .log => |bytes| try self.log_writer.writeAll(bytes),
+                .echo => {}, // discard echo updates during shutdown drain
+            }
         }
     }
 
@@ -259,9 +302,20 @@ pub const Runtime = struct {
             };
         }
     }
-
 };
 
 fn logQueueCapacity(frame_buffer_size: usize) usize {
     return if (frame_buffer_size < min_log_queue_capacity) min_log_queue_capacity else frame_buffer_size;
+}
+
+/// Moves the cursor up `lines` lines to the beginning of that line and
+/// clears everything from there to the end of the screen, erasing the echo area.
+fn eraseEchoArea(writer: *std.Io.Writer, lines: usize) !void {
+    try tty.cursor.goUp(writer, lines);
+    try tty.clear.toScreenEnd(writer);
+}
+
+/// Counts the number of newline characters in `text`.
+fn countNewlines(text: []const u8) usize {
+    return std.mem.count(u8, text, "\n");
 }

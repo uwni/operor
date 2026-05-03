@@ -131,6 +131,44 @@ fn runTask(
             // After push, ownership has moved to the ring buffer slot.
         }
     }
+
+    echoCurrentValues(allocator, compiled_recipe, task_idx, ctx, pipeline_runtime);
+}
+
+/// Renders the current task header and echo variables to a single async-log
+/// echo message, which the log worker displays as a persistent live display.
+fn echoCurrentValues(
+    allocator: std.mem.Allocator,
+    compiled_recipe: *const recipe_mod.PrecompiledRecipe,
+    task_idx: usize,
+    ctx: *const session.Context,
+    pipeline_runtime: *pipeline_mod.Runtime,
+) void {
+    if (compiled_recipe.echo_bindings.len == 0) return;
+    const columns = compiled_recipe.pipeline.echo.?.explicit;
+    if (columns.len == 0) return;
+
+    // Compute max column name width for alignment.
+    var max_col_len: usize = 0;
+    for (columns) |col| if (col.len > max_col_len) {
+        max_col_len = col.len;
+    };
+
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
+
+    // Task header line.
+    w.print(task_tag ++ " {d} · {s}\n", .{ task_idx + 1, compiled_recipe.tasks[task_idx].name }) catch return;
+
+    // One line per echo variable, column names left-aligned to max width.
+    for (columns, compiled_recipe.echo_bindings) |col, binding| {
+        w.print("  {s:<[1]}  =  ", .{ col, max_col_len }) catch return;
+        ctx.resolveBinding(binding).format(w) catch return;
+        w.writeAll("\n") catch return;
+    }
+
+    pipeline_runtime.asyncLog().echoAll(buf.written());
 }
 
 fn captureRecordFrame(

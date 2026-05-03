@@ -8,12 +8,13 @@ const slot_map_mod = @import("slot_map.zig");
 const SlotMap = slot_map_mod.SlotMap;
 const DiagnosticContext = slot_map_mod.DiagnosticContext;
 
-pub const RecordResolution = struct {
+pub const PipelineResolution = struct {
     pipeline: recipe_ir.PipelineConfig,
-    bindings: []const expr.VariableBinding,
+    record_bindings: []const expr.VariableBinding,
+    echo_bindings: []const expr.VariableBinding,
 };
 
-pub const AllRecordSources = struct {
+pub const ColumnResolution = struct {
     columns: []const []const u8,
     bindings: []const expr.VariableBinding,
 };
@@ -24,9 +25,8 @@ pub fn resolvePipelineConfig(
     recipe: *const config.RecipeConfig,
     slot_map: *const SlotMap,
     diag: diagnostic.Reporter,
-) !RecordResolution {
+) !PipelineResolution {
     const empty_columns: []const []const u8 = &.{};
-    const empty_bindings: []const expr.VariableBinding = &.{};
     const pipeline_cfg = recipe.pipeline orelse {
         try diag.add(.fatal, null, .{ .missing_pipeline = {} });
         return error.AnalysisFail;
@@ -42,55 +42,29 @@ pub fn resolvePipelineConfig(
     var pipeline = blk: {
         var _pipeline_cfg = pipeline_cfg;
         _pipeline_cfg.record = null;
+        _pipeline_cfg.echo = null;
         break :blk try _pipeline_cfg.clone(arena);
     };
 
-    var bindings: []const expr.VariableBinding = empty_bindings;
+    const record_cfg = pipeline_cfg.record orelse recipe_ir.ColumnConfig{ .explicit = empty_columns };
+    const record = try resolveColumnConfig(scratch_alloc, arena, record_cfg, slot_map, diag);
+    pipeline.record = .{ .explicit = record.columns };
 
-    const record_cfg: recipe_ir.RecordConfig = pipeline_cfg.record orelse .{ .explicit = empty_columns };
-    switch (record_cfg) {
-        .all => {
-            const all = try resolveAllRecordSources(arena, slot_map);
-            pipeline.record = .{ .explicit = all.columns };
-            bindings = all.bindings;
-        },
-        .explicit => |columns| {
-            var seen: std.StringArrayHashMapUnmanaged(void) = .empty;
-            defer seen.deinit(scratch_alloc);
-            var unique_columns: std.ArrayList([]const u8) = .empty;
-            var unique_bindings: std.ArrayList(expr.VariableBinding) = .empty;
+    const echo_bindings: []const expr.VariableBinding = if (pipeline_cfg.echo) |echo_cfg| blk: {
+        const echo = try resolveColumnConfig(scratch_alloc, arena, echo_cfg, slot_map, diag);
+        pipeline.echo = .{ .explicit = echo.columns };
+        break :blk echo.bindings;
+    } else &.{};
 
-            for (columns) |name| {
-                const column_context: DiagnosticContext = .{ .variable_name = name };
-                const column_reporter = diag.withContext(column_context);
-                if (seen.getIndex(name) != null) {
-                    try column_reporter.warn(null, .{ .duplicate_record_column = .{ .column = name } });
-                    continue;
-                }
-                try seen.put(scratch_alloc, name, {});
-
-                const binding = resolveRecordSource(slot_map, column_reporter, name) catch |err| switch (err) {
-                    error.AnalysisFail => {
-                        has_error = true;
-                        continue;
-                    },
-                    else => return err,
-                };
-                try unique_columns.append(arena, try arena.dupe(u8, name));
-                try unique_bindings.append(arena, binding);
-            }
-            pipeline.record = .{ .explicit = try unique_columns.toOwnedSlice(arena) };
-            bindings = try unique_bindings.toOwnedSlice(arena);
-        },
-    }
     if (has_error) return error.AnalysisFail;
     return .{
         .pipeline = pipeline,
-        .bindings = bindings,
+        .record_bindings = record.bindings,
+        .echo_bindings = echo_bindings,
     };
 }
 
-pub fn resolveAllRecordSources(arena: std.mem.Allocator, slot_map: *const SlotMap) !AllRecordSources {
+fn resolveAllColumnSources(arena: std.mem.Allocator, slot_map: *const SlotMap) !ColumnResolution {
     const var_names = slot_map.varNames();
     const total = var_names.len + expr.BuiltinVar.vars.len;
     const columns = try arena.alloc([]const u8, total);
@@ -114,7 +88,7 @@ pub fn resolveAllRecordSources(arena: std.mem.Allocator, slot_map: *const SlotMa
     };
 }
 
-pub fn resolveRecordSource(
+pub fn resolveColumnSource(
     slot_map: *const SlotMap,
     diag: diagnostic.Reporter,
     name: []const u8,
@@ -147,4 +121,48 @@ pub fn validatePipelineConfig(cfg: *const recipe_ir.PipelineConfig, diag: diagno
 
     try diag.add(.fatal, null, .{ .invalid_pipeline_config = {} });
     return error.AnalysisFail;
+}
+
+fn resolveColumnConfig(
+    scratch_alloc: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    cfg: recipe_ir.ColumnConfig,
+    slot_map: *const SlotMap,
+    diag: diagnostic.Reporter,
+) !ColumnResolution {
+    switch (cfg) {
+        .all => return resolveAllColumnSources(arena, slot_map),
+        .explicit => |columns| {
+            var seen: std.StringArrayHashMapUnmanaged(void) = .empty;
+            defer seen.deinit(scratch_alloc);
+            var unique_columns: std.ArrayList([]const u8) = .empty;
+            var unique_bindings: std.ArrayList(expr.VariableBinding) = .empty;
+            var has_error = false;
+
+            for (columns) |name| {
+                const column_context: DiagnosticContext = .{ .variable_name = name };
+                const column_reporter = diag.withContext(column_context);
+                if (seen.getIndex(name) != null) {
+                    try column_reporter.warn(null, .{ .duplicate_record_column = .{ .column = name } });
+                    continue;
+                }
+                try seen.put(scratch_alloc, name, {});
+
+                const binding = resolveColumnSource(slot_map, column_reporter, name) catch |err| switch (err) {
+                    error.AnalysisFail => {
+                        has_error = true;
+                        continue;
+                    },
+                    else => return err,
+                };
+                try unique_columns.append(arena, try arena.dupe(u8, name));
+                try unique_bindings.append(arena, binding);
+            }
+            if (has_error) return error.AnalysisFail;
+            return .{
+                .columns = try unique_columns.toOwnedSlice(arena),
+                .bindings = try unique_bindings.toOwnedSlice(arena),
+            };
+        },
+    }
 }

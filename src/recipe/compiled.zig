@@ -450,30 +450,22 @@ pub const PipelineConfig = struct {
     api_port: ?u16 = null,
     /// Declares which runtime variables to record as frame columns.
     /// Use `"all"` to record every recipe var plus built-ins, or list names explicitly.
-    record: ?RecordConfig = null,
+    record: ?ColumnConfig = null,
+    /// Optional live echo: displays these variables on a single overwriting CLI line.
+    echo: ?ColumnConfig = null,
 
     pub fn clone(
         cfg: *const PipelineConfig,
         allocator: std.mem.Allocator,
     ) !PipelineConfig {
-        const record_copy: ?RecordConfig = if (cfg.record) |record| switch (record) {
-            .all => |value| .{ .all = try allocator.dupe(u8, value) },
-            .explicit => |columns| blk: {
-                const items = try allocator.alloc([]const u8, columns.len);
-                for (columns, 0..) |name, idx| {
-                    items[idx] = try allocator.dupe(u8, name);
-                }
-                break :blk .{ .explicit = items };
-            },
-        } else null;
-
         return .{
             .buffer_size = cfg.buffer_size,
             .warn_usage_percent = cfg.warn_usage_percent,
             .mode = cfg.mode,
             .file_path = if (cfg.file_path) |path| try allocator.dupe(u8, path) else null,
             .api_port = cfg.api_port,
-            .record = record_copy,
+            .record = if (cfg.record) |r| try r.clone(allocator) else null,
+            .echo = if (cfg.echo) |r| try r.clone(allocator) else null,
         };
     }
 };
@@ -481,7 +473,7 @@ pub const PipelineConfig = struct {
 const serde_lib = @import("serde");
 
 /// Controls which runtime variables are persisted by pipeline sinks.
-pub const RecordConfig = union(enum) {
+pub const ColumnConfig = union(enum) {
     /// Record every recipe var and built-in variable.
     all: []const u8,
     /// Record only the listed recipe var or built-in names.
@@ -490,6 +482,19 @@ pub const RecordConfig = union(enum) {
     pub const serde = .{
         .tag = serde_lib.UnionTag.untagged,
     };
+
+    pub fn clone(self: *const ColumnConfig, allocator: std.mem.Allocator) !ColumnConfig {
+        return switch (self.*) {
+            .all => |value| .{ .all = try allocator.dupe(u8, value) },
+            .explicit => |columns| blk: {
+                const items = try allocator.alloc([]const u8, columns.len);
+                for (columns, 0..) |name, idx| {
+                    items[idx] = try allocator.dupe(u8, name);
+                }
+                break :blk .{ .explicit = items };
+            },
+        };
+    }
 };
 
 /// Fully validated recipe ready for preview or execution.
@@ -502,6 +507,8 @@ pub const PrecompiledRecipe = struct {
     /// Runtime variable sources for pipeline columns, aligned with `pipeline.record.explicit`.
     /// `.slot` values are Context slot indices, not record column indices.
     record_bindings: []const expr.VariableBinding,
+    /// Variable bindings for the CLI echo display, aligned with `pipeline.echo.explicit`.
+    echo_bindings: []const expr.VariableBinding,
     /// Optional stop condition expression; scheduler stops when this evaluates to truthy.
     stop_when: ?expr.Expression,
     /// Estimated total number of task iterations across all tasks.
