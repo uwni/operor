@@ -64,7 +64,7 @@ pub fn execute(allocator: std.mem.Allocator, opts: session.ExecOptions) !void {
 
     const frame_columns = compiled.pipeline.record.?.explicit;
 
-    var pipeline_runtime: pipeline_mod.Runtime = try .init(allocator, opts.io, pipeline_config, frame_columns, log);
+    var pipeline_runtime: pipeline_mod.Runtime = try .init(allocator, opts.io, pipeline_config, frame_columns, log, tty.isatty(opts.io));
     defer pipeline_runtime.deinit();
     try pipeline_runtime.start();
 

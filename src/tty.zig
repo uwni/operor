@@ -35,6 +35,11 @@ pub const Attr = enum {
 
 pub const reset = "\x1b[0m";
 
+/// Returns true when `fd` is connected to an interactive terminal.
+pub fn isatty(io: std.Io) bool {
+    return std.Io.File.stdout().isTty(io) catch false;
+}
+
 pub fn attrPrefix(comptime attrs: anytype) []const u8 {
     var codes: []const u8 = "";
     for (@typeInfo(@TypeOf(attrs)).@"struct".fields) |f| {
@@ -108,6 +113,10 @@ pub const cursor = struct {
     pub inline fn goRight(writer: *std.Io.Writer, n: anytype) !void {
         try writer.print("\x1b[{d}C", .{n});
     }
+    /// Move cursor up `n` lines, to the beginning of that line.
+    pub inline fn goUp(writer: *std.Io.Writer, n: anytype) !void {
+        try writer.print("\x1b[{d}F", .{n});
+    }
 };
 
 // ── Line / screen clearing ──────────────────────────────────────────────
@@ -124,6 +133,10 @@ pub const clear = struct {
     /// Move cursor to beginning of current line (carriage return).
     pub inline fn lineStart(writer: *std.Io.Writer) !void {
         try writer.writeAll("\r");
+    }
+    /// Erase from cursor to end of screen.
+    pub inline fn toScreenEnd(writer: *std.Io.Writer) !void {
+        try writer.writeAll("\x1b[0J");
     }
 };
 

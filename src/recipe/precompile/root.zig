@@ -92,10 +92,10 @@ fn precompileInternal(
     // 3-5. Normalize tasks and steps, resolving commands and validating arguments.
     const tasks = try steps_mod.precompileTasks(scratch_alloc, arena, recipe, &slot_map, loaded_adapters, &precompiled_instruments, reporter);
 
-    // 6. Validate and resolve pipeline record configuration.
+    // 6. Validate and resolve pipeline record and echo configuration.
     const record_resolution = try pipeline_mod.resolvePipelineConfig(scratch_alloc, arena, recipe, &slot_map, reporter);
 
-    // 7. Parse optional stop_when expression.
+    // 8. Parse optional stop_when expression.
     var stop_when: ?expr.Expression = null;
     var stop_when_failed = false;
     if (recipe.stop_when) |src|
@@ -114,7 +114,8 @@ fn precompileInternal(
         .instruments = precompiled_instruments,
         .tasks = tasks,
         .pipeline = record_resolution.pipeline,
-        .record_bindings = record_resolution.bindings,
+        .record_bindings = record_resolution.record_bindings,
+        .echo_bindings = record_resolution.echo_bindings,
         .stop_when = stop_when,
         .expected_iterations = recipe.expected_iterations,
         .float_precision = recipe.float_precision,
