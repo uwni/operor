@@ -9,7 +9,6 @@ const Span = types.Span;
 const VariableBinding = types.VariableBinding;
 const ResolvedValue = types.ResolvedValue;
 const ResolvedList = types.ResolvedList;
-const VarResolver = types.VarResolver;
 
 pub const Op = union(enum) {
     push_int: i64,
@@ -41,6 +40,24 @@ pub const Op = union(enum) {
     pop,
     /// Replace top of stack with a bool.
     to_bool,
+
+    /// Authoritative net stack-depth change for this opcode.
+    /// +1 = push one value, -1 = pop one value, 0 = no net change.
+    /// Used by `validateStackShape` — keep in sync with `eval`.
+    pub fn stackDelta(self: Op) i8 {
+        return switch (self) {
+            .push_int, .push_float, .push_string, .push_bool, .load_var, .load_list_len => 1,
+            // pop index, push element — net 0
+            .load_list_elem => 0,
+            // pop delimiter, resolve list, push joined string — net 0
+            .call_join => 0,
+            // pop two operands, push result — net -1
+            .add, .sub, .mul, .div, .cmp, .call_min, .call_max => -1,
+            // consume top-of-stack, produce bool/negation in-place — net 0
+            .negate, .not, .to_bool, .jump_if_false, .jump_if_true => 0,
+            .pop => -1,
+        };
+    }
 };
 
 pub const Expression = struct {
@@ -65,7 +82,7 @@ pub const Expression = struct {
         }
     };
 
-    pub fn eval(self: *const Expression, resolver: VarResolver, allocator: std.mem.Allocator) EvalError!EvalResult {
+    pub fn eval(self: *const Expression, resolver: anytype, allocator: std.mem.Allocator) EvalError!EvalResult {
         if (self.ops.len == 1) switch (self.ops[0]) {
             .push_int => |i| return .{ .value = .{ .int = i }, .allocator = undefined },
             .push_float => |f| return .{ .value = .{ .float = f }, .allocator = undefined },
@@ -241,7 +258,7 @@ pub const Expression = struct {
         return .{ .value = result, .owned = result_owned, .allocator = allocator };
     }
 
-    pub fn isTruthy(self: *const Expression, resolver: VarResolver, allocator: std.mem.Allocator) EvalError!bool {
+    pub fn isTruthy(self: *const Expression, resolver: anytype, allocator: std.mem.Allocator) EvalError!bool {
         var result = try self.eval(resolver, allocator);
         defer result.deinit();
         return result.value.isTruthy();
@@ -256,24 +273,12 @@ pub fn freeOwnedOps(allocator: std.mem.Allocator, ops: []const Op) void {
 }
 
 pub fn validateStackShape(ops: []const Op, span: Span, diagnostics: diagnostic.Reporter) CompileError!void {
-    var depth: usize = 0;
-    var max_depth: usize = 0;
+    var depth: i64 = 0;
+    var max_depth: i64 = 0;
     for (ops) |op| {
-        switch (op) {
-            .push_int, .push_float, .push_string, .push_bool, .load_var, .load_list_len => depth += 1,
-            .load_list_elem, .call_join => {},
-            .add, .sub, .mul, .div, .cmp, .call_min, .call_max => {
-                if (depth < 2) return diagnostics.fail(span, .invalid_stack_shape);
-                depth -= 1;
-            },
-            .negate, .not, .to_bool, .jump_if_false, .jump_if_true => {
-                if (depth < 1) return diagnostics.fail(span, .invalid_stack_shape);
-            },
-            .pop => {
-                if (depth < 1) return diagnostics.fail(span, .invalid_stack_shape);
-                depth -= 1;
-            },
-        }
+        const delta = op.stackDelta();
+        if (delta < 0 and depth < -delta) return diagnostics.fail(span, .invalid_stack_shape);
+        depth += delta;
         if (depth > max_depth) max_depth = depth;
     }
     if (depth != 1) return diagnostics.fail(span, .invalid_stack_shape);

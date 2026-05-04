@@ -154,22 +154,25 @@ pub const ApiServer = struct {
     // HTTP
     // -----------------------------------------------------------------------
 
+    const Handler = *const fn (*ApiServer, *std.http.Server.Request) anyerror!void;
+
+    const route_table: std.StaticStringMap(Handler) = .initComptime(.{
+        .{ "/status", serveStatus },
+        .{ "/columns", serveColumns },
+    });
+
     fn handleHttp(self: *ApiServer, request: *std.http.Server.Request) !void {
         // Strip query string for routing.
         const target = request.head.target;
         const path = if (std.mem.indexOfScalar(u8, target, '?')) |q| target[0..q] else target;
 
-        if (std.mem.eql(u8, path, "/status")) {
-            try self.serveStatus(request);
-        } else if (std.mem.eql(u8, path, "/columns")) {
-            try self.serveColumns(request);
-        } else {
-            try request.respond("{\"error\":\"not found\"}", .{
-                .status = .not_found,
-                .keep_alive = false,
-                .extra_headers = &cors_json_headers,
-            });
-        }
+        if (route_table.get(path)) |handler| return handler(self, request);
+
+        try request.respond("{\"error\":\"not found\"}", .{
+            .status = .not_found,
+            .keep_alive = false,
+            .extra_headers = &cors_json_headers,
+        });
     }
 
     fn serveStatus(self: *ApiServer, request: *std.http.Server.Request) !void {

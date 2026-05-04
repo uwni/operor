@@ -231,31 +231,18 @@ pub fn appendResolvedValueText(
     }
 }
 
-/// Opaque variable resolver: calls the provided function to map bindings to values.
-pub const VarResolver = struct {
-    ctx: *const anyopaque,
-    resolve_fn: *const fn (ctx: *const anyopaque, binding: VariableBinding) ?ResolvedValue,
-
-    pub fn resolve(self: VarResolver, binding: VariableBinding) ?ResolvedValue {
-        return self.resolve_fn(self.ctx, binding);
-    }
-
-    /// Returns a resolver that always yields null (for variable-free expressions).
-    pub fn none() VarResolver {
-        return .{
-            .ctx = undefined,
-            .resolve_fn = struct {
-                fn noResolve(_: *const anyopaque, _: VariableBinding) ?ResolvedValue {
-                    return null;
-                }
-            }.noResolve,
-        };
+/// Zero-size resolver for variable-free expressions. Always returns null.
+pub const NullResolver = struct {
+    pub fn resolve(_: NullResolver, _: VariableBinding) ?ResolvedValue {
+        return null;
     }
 };
 
 pub fn resolveBuiltin(name: []const u8) ?VariableBinding {
-    inline for (BuiltinVar.vars) |builtin| {
-        if (std.mem.eql(u8, name, builtin.name())) return .{ .builtin = builtin };
-    }
-    return null;
+    const map = comptime std.StaticStringMap(BuiltinVar).initComptime(.{
+        .{ "$ITER", .iter },
+        .{ "$TASK_IDX", .task_idx },
+        .{ "$ELAPSED_MS", .elapsed_ms },
+    });
+    return if (map.get(name)) |v| .{ .builtin = v } else null;
 }

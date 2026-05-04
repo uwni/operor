@@ -233,26 +233,23 @@ pub const Diagnostics = struct {
 };
 
 fn writeMessage(writer: *std.Io.Writer, item: Diagnostic) !void {
+    // Comptime array: indexed by SourceKind ordinal, null means no prefix.
+    const source_prefix = comptime std.enums.directEnumArray(SourceKind, ?[]const u8, 0, .{
+        .recipe_document = null,
+        .adapter_document = null,
+        .expression = "invalid expression",
+        .argument_expression = "invalid argument expression",
+        .adapter_write_template = "invalid adapter write template",
+        .adapter_read_type = "invalid adapter read type",
+    });
+
     var has_source_prefix = false;
-    if (item.source_kind) |source_kind| switch (source_kind) {
-        .expression => {
-            try writer.writeAll("invalid expression");
+    if (item.source_kind) |sk| {
+        if (source_prefix[@intFromEnum(sk)]) |prefix| {
+            try writer.writeAll(prefix);
             has_source_prefix = true;
-        },
-        .argument_expression => {
-            try writer.writeAll("invalid argument expression");
-            has_source_prefix = true;
-        },
-        .adapter_write_template => {
-            try writer.writeAll("invalid adapter write template");
-            has_source_prefix = true;
-        },
-        .adapter_read_type => {
-            try writer.writeAll("invalid adapter read type");
-            has_source_prefix = true;
-        },
-        .recipe_document, .adapter_document => {},
-    };
+        }
+    }
     if (item.source) |source| {
         if (has_source_prefix) try writer.writeByte(' ');
         try writer.print("'{s}'", .{source});

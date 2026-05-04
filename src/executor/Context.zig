@@ -177,22 +177,6 @@ fn floatToIntFloor(f: f64) !i64 {
     return @trunc(f);
 }
 
-fn resolveBindingValue(ctx_ptr: *const anyopaque, binding: expr.VariableBinding) ?expr.ResolvedValue {
-    const self: *const Context = @ptrCast(@alignCast(ctx_ptr));
-    const val = self.resolveBinding(binding);
-    return switch (val) {
-        .list => |items| blk: {
-            const slice = items.items();
-            break :blk .{ .list = .{
-                .len = slice.len,
-                .ctx = @ptrCast(slice.ptr),
-                .at_fn = listAtFn,
-            } };
-        },
-        else => val.toResolvedValue(),
-    };
-}
-
 fn listAtFn(ctx: *const anyopaque, index: usize) ?expr.ResolvedValue {
     const ptr: [*]const Value = @ptrCast(@alignCast(ctx));
     // Caller already bounds-checked via integer subscript; this is a safety net.
@@ -200,12 +184,30 @@ fn listAtFn(ctx: *const anyopaque, index: usize) ?expr.ResolvedValue {
     return item.toResolvedValue();
 }
 
-/// Returns an expression resolver over slot-based values plus built-in execution state.
-pub fn varResolver(self: *const Context) expr.VarResolver {
-    return .{
-        .ctx = @ptrCast(self),
-        .resolve_fn = resolveBindingValue,
-    };
+/// Zero-cost resolver: holds a typed pointer so the compiler can inline
+/// `resolve` directly into `Expression.eval` / `Expression.isTruthy`.
+pub const Resolver = struct {
+    ctx: *const Context,
+
+    pub fn resolve(self: Resolver, binding: expr.VariableBinding) ?expr.ResolvedValue {
+        const val = self.ctx.resolveBinding(binding);
+        return switch (val) {
+            .list => |items| blk: {
+                const slice = items.items();
+                break :blk .{ .list = .{
+                    .len = slice.len,
+                    .ctx = @ptrCast(slice.ptr),
+                    .at_fn = listAtFn,
+                } };
+            },
+            else => val.toResolvedValue(),
+        };
+    }
+};
+
+/// Returns a resolver that the compiler can monomorphize and inline.
+pub fn resolver(self: *const Context) Resolver {
+    return .{ .ctx = self };
 }
 
 fn freeStored(self: *Context, stored: *Slot) void {
@@ -331,7 +333,7 @@ test "Context exposes built-ins alongside stored values" {
     try ast.bindVariables(&empty_slots, diagnostics);
     var expr_obj = try ast.lower(testing.allocator, diagnostics);
     defer expr_obj.deinit(testing.allocator);
-    const eval_result = try expr_obj.eval(ctx.varResolver(), testing.allocator);
+    const eval_result = try expr_obj.eval(ctx.resolver(), testing.allocator);
     try testing.expectEqual(@as(i64, 9), eval_result.value.int);
 }
 
@@ -368,7 +370,7 @@ test "Context list round-trip through setSlot and varResolver" {
         else => return error.TestUnexpectedResult,
     }
 
-    // Evaluate len(${arr}) via varResolver.
+    // Evaluate len(${arr}) via resolver.
     var slots: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer slots.deinit(testing.allocator);
     try slots.put(testing.allocator, "arr", {});
@@ -384,7 +386,7 @@ test "Context list round-trip through setSlot and varResolver" {
     try ast.bindVariables(&slots, diagnostics);
     var e = try ast.lower(testing.allocator, diagnostics);
     defer e.deinit(testing.allocator);
-    const eval_result = try e.eval(ctx.varResolver(), testing.allocator);
+    const eval_result = try e.eval(ctx.resolver(), testing.allocator);
     try testing.expectApproxEqAbs(@as(f64, 10.0), eval_result.value.float, 1e-9);
 
     // Overwrite list slot to verify freeStored works.

@@ -62,7 +62,7 @@ pub fn runTasks(
                 if (task.iter) ctx.iteration += 1;
             },
             .conditional => |cond| {
-                const is_true = try cond.@"if".isTruthy(ctx.varResolver(), allocator);
+                const is_true = try cond.@"if".isTruthy(ctx.resolver(), allocator);
                 if (is_true) {
                     logTask(pipeline_runtime, task.name);
                     try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, task.iter, &scratch);
@@ -75,7 +75,7 @@ pub fn runTasks(
                     if (stop_requested.load(.seq_cst)) break;
                     if (try shouldStop(compiled_recipe, ctx, allocator)) break;
 
-                    const is_true = try loop_task.condition.isTruthy(ctx.varResolver(), allocator);
+                    const is_true = try loop_task.condition.isTruthy(ctx.resolver(), allocator);
                     if (!is_true) break;
 
                     try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, task.iter, &scratch);
@@ -251,7 +251,7 @@ fn logTask(pipeline_runtime: *pipeline_mod.Runtime, name: []const u8) void {
 
 fn shouldStop(compiled_recipe: *const recipe_mod.PrecompiledRecipe, ctx: *session.Context, allocator: std.mem.Allocator) !bool {
     const stop_expr = compiled_recipe.stop_when orelse return false;
-    return try stop_expr.isTruthy(ctx.varResolver(), allocator);
+    return try stop_expr.isTruthy(ctx.resolver(), allocator);
 }
 
 pub fn runTasksThread(state: *SamplerState) void {

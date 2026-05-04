@@ -168,7 +168,7 @@ pub fn executeParallel(
 
     for (steps, 0..) |*s, i| {
         if (s.@"if") |*if_expr| {
-            const is_true = try if_expr.isTruthy(ctx.varResolver(), allocator);
+            const is_true = try if_expr.isTruthy(ctx.resolver(), allocator);
             if (!is_true) {
                 states[i].guard_passed = false;
                 continue;

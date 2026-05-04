@@ -49,7 +49,7 @@ pub fn executeStep(
 ) !void {
     // Evaluate optional `if` guard.
     if (step.@"if") |*if_expr| {
-        const is_true = try if_expr.isTruthy(ctx.varResolver(), allocator);
+        const is_true = try if_expr.isTruthy(ctx.resolver(), allocator);
         if (!is_true) return;
     }
 
@@ -69,7 +69,7 @@ pub fn executeCompute(
     comp: *const recipe_mod.Step.Compute,
     ctx: *session.Context,
 ) !void {
-    var eval_res = try comp.expression.eval(ctx.varResolver(), allocator);
+    var eval_res = try comp.expression.eval(ctx.resolver(), allocator);
     defer eval_res.deinit();
     const result = eval_res.value;
 
@@ -343,7 +343,7 @@ fn evalToValue(
     ctx: *const session.Context,
     allocator: std.mem.Allocator,
 ) !session.Value {
-    const result = try e.eval(ctx.varResolver(), allocator);
+    const result = try e.eval(ctx.resolver(), allocator);
     // Owned strings (if any) live in `allocator` — caller manages lifetime.
     return switch (result.value) {
         .int => |i| .{ .int = i },
