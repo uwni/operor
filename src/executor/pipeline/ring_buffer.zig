@@ -45,8 +45,7 @@ pub fn SpscRingBuffer(comptime T: type) type {
             const used = head - tail;
             const capacity: u64 = @intCast(self.capacity);
             if (used >= capacity) {
-                const current = self.overflow_count.load(.monotonic);
-                self.overflow_count.store(current + 1, .monotonic);
+                _ = self.overflow_count.fetchAdd(1, .monotonic);
                 return error.BufferOverflow;
             }
 

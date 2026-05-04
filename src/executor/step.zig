@@ -49,8 +49,7 @@ pub fn executeStep(
 ) !void {
     // Evaluate optional `if` guard.
     if (step.@"if") |*if_expr| {
-        const is_true = try if_expr.isTruthy(ctx.resolver(), allocator);
-        if (!is_true) return;
+        if (!try if_expr.isTruthy(ctx.resolver(), allocator)) return;
     }
 
     switch (step.action) {

@@ -273,10 +273,9 @@ pub const PrecompiledCommand = struct {
 
     /// Returns the stable placeholder index assigned during template compilation.
     pub fn argIndex(self: *const PrecompiledCommand, name: []const u8) ?usize {
-        for (self.args, 0..) |arg, idx| {
-            if (std.mem.eql(u8, arg.name, name)) return idx;
-        }
-        return null;
+        return for (self.args, 0..) |arg, idx| {
+            if (std.mem.eql(u8, arg.name, name)) break idx;
+        } else null;
     }
 
     /// Renders the command plus optional suffix using a stack buffer with automatic heap fallback.
@@ -575,10 +574,9 @@ fn writeValueWithFormat(writer: anytype, value: Value, fmt: ArgFormat, float_pre
 }
 
 fn containsOptionKey(entries: []const OptionEntry, key: []const u8) bool {
-    for (entries) |entry| {
-        if (std.mem.eql(u8, entry.key, key)) return true;
-    }
-    return false;
+    return for (entries) |entry| {
+        if (std.mem.eql(u8, entry.key, key)) break true;
+    } else false;
 }
 
 fn renderInternal(

@@ -50,21 +50,17 @@ pub const AsyncLog = struct {
 
     fn enqueueOwned(self: AsyncLog, owned: []u8) void {
         var message = LogMessage{ .log = owned };
-        self.queue.push(&message) catch |err| switch (err) {
-            error.BufferOverflow => {
-                message.deinit(self.allocator);
-                return;
-            },
+        self.queue.push(&message) catch {
+            message.deinit(self.allocator);
+            return;
         };
     }
 
     fn enqueueEchoOwned(self: AsyncLog, owned: []u8) void {
         var message = LogMessage{ .echo = owned };
-        self.queue.push(&message) catch |err| switch (err) {
-            error.BufferOverflow => {
-                message.deinit(self.allocator);
-                return;
-            },
+        self.queue.push(&message) catch {
+            message.deinit(self.allocator);
+            return;
         };
     }
 

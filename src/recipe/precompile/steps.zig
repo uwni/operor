@@ -192,8 +192,7 @@ pub fn precompileCallStep(
         var assign_context = call_context;
         assign_context.variable_name = label;
 
-        const is_object = if (command.response) |r| (r == .object) else false;
-        if (is_object) {
+        if (command.response != null and command.response.? == .object) {
             if (slot_map.slots.contains(label)) {
                 return diag.withContext(assign_context).fail(null, .{ .object_assign_to_var = .{ .variable = label } });
             }
@@ -213,9 +212,7 @@ pub fn precompileCallStep(
             save_result = .{ .object = object_field_slots };
         } else {
             const save_slot = try slot_map.varSlotIndex(diag, assign_context, label);
-            if (command.response) |response| {
-                slot_map.recordListResponseCapacity(save_slot, response);
-            }
+            if (command.response) |response| slot_map.recordListResponseCapacity(save_slot, response);
             save_result = .{ .scalar = save_slot };
         }
     }
@@ -266,10 +263,10 @@ pub fn precompileIf(
     context: DiagnosticContext,
     if_src_opt: ?config.BooleanExpr,
 ) !?expr.Expression {
-    if (if_src_opt) |if_src| {
-        return try expr_compile.compileExpr(slot_map, arena, diag, context, if_src.source(), .expression);
-    }
-    return null;
+    return if (if_src_opt) |if_src|
+        try expr_compile.compileExpr(slot_map, arena, diag, context, if_src.source(), .expression)
+    else
+        null;
 }
 
 pub fn precompileSleepStep(

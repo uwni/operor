@@ -155,12 +155,12 @@ pub fn resolveBinding(self: *const Context, binding: expr.VariableBinding) Value
             .iter => .{ .int = @intCast(self.iteration) },
             .task_idx => .{ .int = @intCast(self.task_idx) },
             .elapsed_ms => .{ .int = if (self.start_ns == 0)
-                @as(i64, 0)
+                0
             else blk: {
                 const now = std.Io.Timestamp.now(self.io, .awake).toNanoseconds();
                 const delta_ns = now - self.start_ns;
                 const ms = @divTrunc(delta_ns, 1_000_000);
-                break :blk @as(i64, @intCast(@min(ms, std.math.maxInt(i64))));
+                break :blk @intCast(@min(ms, std.math.maxInt(i64)));
             } },
         },
     };

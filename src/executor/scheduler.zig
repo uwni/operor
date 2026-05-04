@@ -62,8 +62,7 @@ pub fn runTasks(
                 if (task.iter) ctx.iteration += 1;
             },
             .conditional => |cond| {
-                const is_true = try cond.@"if".isTruthy(ctx.resolver(), allocator);
-                if (is_true) {
+                if (try cond.@"if".isTruthy(ctx.resolver(), allocator)) {
                     logTask(pipeline_runtime, task.name);
                     try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, task.iter, &scratch);
                     if (task.iter) ctx.iteration += 1;
@@ -75,8 +74,7 @@ pub fn runTasks(
                     if (stop_requested.load(.seq_cst)) break;
                     if (try shouldStop(compiled_recipe, ctx, allocator)) break;
 
-                    const is_true = try loop_task.condition.isTruthy(ctx.resolver(), allocator);
-                    if (!is_true) break;
+                    if (!try loop_task.condition.isTruthy(ctx.resolver(), allocator)) break;
 
                     try runTask(allocator, compiled_recipe, task_idx, instruments, ctx, pipeline_runtime, dry_run, task.iter, &scratch);
                     if (task.iter) ctx.iteration += 1;
